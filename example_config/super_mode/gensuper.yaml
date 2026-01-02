@@ -8,7 +8,7 @@ Super Node:
   Listen port: 3456
   EdgeAPI prefix: /eg_net/eg_api
   Endpoint(IPv4)(optional): 127.0.0.1
-  Endpoint(IPv6)(optional): 
+  Endpoint(IPv6)(optional):
   Endpoint(EdgeAPI): http://127.0.0.1:3456/eg_net/eg_api
 Edge Node:
   Node IDs: "[1~2,100]"
@@ -16,3 +16,14 @@ Edge Node:
   IPv4 range: 192.168.76.0/24
   IPv6 range: fd95:71cb:a3df:e586::/64
   IPv6 LL range: fe80::a3df:0/112
+FakeTCP:
+  Enabled: true
+  TunName: etherguard-tcp0
+  TunIPv4: 192.168.200.1/24
+  TunPeerIPv4: 192.168.200.2
+  TunIPv6: ""
+  TunPeerIPv6: ""
+  TunMTU: 1500
+Obfuscation:
+  Enabled: true
+  PSK: ""  # 32 bytes base64 encoded pre-shared key for obfuscation
