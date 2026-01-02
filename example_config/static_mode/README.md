@@ -130,8 +130,10 @@ PrivKey           | Private key. Same spec as wireguard.
 ListenPort        | UDP lesten port
 [LogLevel](#LogLevel)| Log related settings
 [DynamicRoute](../super_mode/README.md#DynamicRoute)      | Dynamic Route related settings. Not work at static mode.
-NextHopTable      | NextHopTable, Next hop = `NhTable[start][destnation]`  
+NextHopTable      | NextHopTable, Next hop = `NhTable[start][destnation]`
 ResetConnInterval | Reset the endpoint for peers. You may need this if that peer use DDNS.
+[FakeTCP](#FakeTCP) | FakeTCP transport settings for TCP obfuscation
+[Obfuscation](#Obfuscation) | Obfuscation settings for zero-overhead encryption
 [Peers](#Peers)   | Peer info.
 
 <a name="Interface"></a>Interface      | Description
@@ -181,10 +183,25 @@ LogNTP      | NTP related logs.
 --------------------|:-----
 NodeID              | Node ID.
 PubKey              | Public key.
-PSKey               | Pre shared key. 
+PSKey               | Pre shared key.
 EndPoint            | Peer EndPoint.
 PersistentKeepalive | PersistentKeepalive, same as wireguard
 Static              | Do not overwrite by roaming and reset the connection every `ResetConnInterval` seconds.
+
+<a name="FakeTCP"></a>FakeTCP      | Description
+--------------------|:-----
+Enabled             | Enable FakeTCP transport for TCP obfuscation (default: true)
+TunName             | TUN device name for FakeTCP (e.g., "etherguard-tcp0")
+TunIPv4             | Local IPv4 address for TUN device (e.g., "192.168.200.1/24")
+TunPeerIPv4         | Peer IPv4 address for TUN device (e.g., "192.168.200.2")
+TunIPv6             | Local IPv6 address for TUN device (optional)
+TunPeerIPv6         | Peer IPv6 address for TUN device (optional)
+TunMTU              | MTU for TUN device (default: 1500)
+
+<a name="Obfuscation"></a>Obfuscation      | Description
+--------------------|:-----
+Enabled             | Enable obfuscation with zero-overhead encryption (default: true)
+PSK                 | Pre-shared key for obfuscation (32 bytes base64 encoded)<br>Leave empty to disable obfuscation
 
 #### Run example config
 

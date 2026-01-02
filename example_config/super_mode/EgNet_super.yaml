@@ -49,6 +49,17 @@ NextHopTable: {}
 EdgeTemplate: EgNet_edge001.yaml
 UsePSKForInterEdge: true
 ResetEndPointInterval: 600
+FakeTCP:
+  Enabled: true
+  TunName: etherguard-tcp0
+  TunIPv4: 192.168.200.1/24
+  TunPeerIPv4: 192.168.200.2
+  TunIPv6: ""
+  TunPeerIPv6: ""
+  TunMTU: 1500
+Obfuscation:
+  Enabled: true
+  PSK: ""  # 32 bytes base64 encoded pre-shared key for obfuscation
 Peers:
 - NodeID: 1
   Name: EgNet001

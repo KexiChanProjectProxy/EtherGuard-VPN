@@ -297,6 +297,8 @@ SendPingInterval    | The interval that send pings/pongs between EdgeNodes
 [NextHopTable](../static_mode/README.md#NextHopTable) | `NextHopTable` used by StaticMode
 EdgeTemplate        |  for HTTP ManageAPI `peer/add`. Refer to this configuration file and show a sample configuration file of the edge to the user
 UsePSKForInterEdge  | Whether to enable pre-share key communication between edges.<br>If enabled, SuperNode will generate PSK for edges  automatically
+[FakeTCP](#FakeTCP) | FakeTCP transport settings for TCP obfuscation
+[Obfuscation](#Obfuscation) | Obfuscation settings for zero-overhead encryption
 [Peers](#EdgeNodes)     | EdgeNode information
 
 <a name="Passwords"></a>Passwords      | Description
@@ -324,6 +326,21 @@ PubKey              | Peer's public key
 PSKey               | Pre shared key
 [AdditionalCost](#AdditionalCost)      | AdditionalCost(unit:ms)<br> `-1` means uses client's self configuration.
 SkipLocalIP         | Ignore Edge reported local IP, use public IP only while udp-hole-punching
+
+<a name="FakeTCP"></a>FakeTCP      | Description
+--------------------|:-----
+Enabled             | Enable FakeTCP transport for TCP obfuscation (default: true)
+TunName             | TUN device name for FakeTCP (e.g., "etherguard-tcp0")
+TunIPv4             | Local IPv4 address for TUN device (e.g., "192.168.200.1/24")
+TunPeerIPv4         | Peer IPv4 address for TUN device (e.g., "192.168.200.2")
+TunIPv6             | Local IPv6 address for TUN device (optional)
+TunPeerIPv6         | Peer IPv6 address for TUN device (optional)
+TunMTU              | MTU for TUN device (default: 1500)
+
+<a name="Obfuscation"></a>Obfuscation      | Description
+--------------------|:-----
+Enabled             | Enable obfuscation with zero-overhead encryption (default: true)
+PSK                 | Pre-shared key for obfuscation (32 bytes base64 encoded)<br>Leave empty to disable obfuscation
 
 ### EdgeNode Config Parameter
 

@@ -49,4 +49,38 @@ Deploy these configuration files to the corresponding nodes, and then execute
 
 you can turn off unnecessary logs to increase performance after it works.
 
+## EdgeNode Config Parameter
+
+P2P mode uses the same [EdgeConfig structure](../static_mode/README.md#EdgeConfig) as static mode, with dynamic routing enabled.
+
+For detailed configuration parameters, refer to:
+- [Interface](../static_mode/README.md#Interface) - Interface related config
+- [LogLevel](../static_mode/README.md#LogLevel) - Log related settings
+- [DynamicRoute](../super_mode/README.md#DynamicRoute) - Dynamic Route related settings
+- [P2P](#P2P) - P2P mode specific settings
+- [FakeTCP](#FakeTCP) - FakeTCP transport settings
+- [Obfuscation](#Obfuscation) - Obfuscation settings
+- [Peers](../static_mode/README.md#Peers) - Peer info
+
+<a name="P2P"></a>P2P      | Description
+--------------------|:-----
+UseP2P                  | Enable P2P mode (must be true for P2P mode)
+SendPeerInterval        | Interval to exchange peer information with other nodes (sec)
+[GraphRecalculateSetting](../super_mode/README.md#GraphRecalculateSetting) | Floyd-Warshall algorithm related parameters
+
+<a name="FakeTCP"></a>FakeTCP      | Description
+--------------------|:-----
+Enabled             | Enable FakeTCP transport for TCP obfuscation (default: true)
+TunName             | TUN device name for FakeTCP (e.g., "etherguard-tcp0")
+TunIPv4             | Local IPv4 address for TUN device (e.g., "192.168.200.1/24")
+TunPeerIPv4         | Peer IPv4 address for TUN device (e.g., "192.168.200.2")
+TunIPv6             | Local IPv6 address for TUN device (optional)
+TunPeerIPv6         | Peer IPv6 address for TUN device (optional)
+TunMTU              | MTU for TUN device (default: 1500)
+
+<a name="Obfuscation"></a>Obfuscation      | Description
+--------------------|:-----
+Enabled             | Enable obfuscation with zero-overhead encryption (default: true)
+PSK                 | Pre-shared key for obfuscation (32 bytes base64 encoded)<br>Leave empty to disable obfuscation
+
 [WIP]
