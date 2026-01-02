@@ -160,13 +160,17 @@ func GetExampleEdgeConf(templatePath string, getDemo bool) (mtypes.EdgeConfig, e
 			},
 		},
 		FakeTCP: mtypes.FakeTCPConfig{
-			Enabled:     false, // Set to true to enable FakeTCP dual-stack mode
+			Enabled:     true, // FakeTCP dual-stack mode enabled by default
 			TunName:     "etherguard-tcp0",
 			TunIPv4:     "192.168.200.1/24",
 			TunPeerIPv4: "192.168.200.2",
-			TunIPv6:     "",
-			TunPeerIPv6: "",
+			TunIPv6:     "fd00:200::1/64",
+			TunPeerIPv6: "fd00:200::2",
 			TunMTU:      1500,
+		},
+		Obfuscation: mtypes.ObfuscationConfig{
+			Enabled: true,                                                   // Obfuscation enabled by default
+			PSK:     device.RandomPSK().ToString(),                          // Random PSK for obfuscation
 		},
 	}
 	if getDemo {
@@ -290,13 +294,17 @@ func GetExampleSuperConf(templatePath string, getDemo bool) (mtypes.SuperConfig,
 			},
 		},
 		FakeTCP: mtypes.FakeTCPConfig{
-			Enabled:     false, // Set to true to enable FakeTCP dual-stack mode
+			Enabled:     true, // FakeTCP dual-stack mode enabled by default
 			TunName:     "etherguard-tcp-super",
 			TunIPv4:     "192.168.201.1/24",
 			TunPeerIPv4: "192.168.201.2",
-			TunIPv6:     "",
-			TunPeerIPv6: "",
+			TunIPv6:     "fd00:201::1/64",
+			TunPeerIPv6: "fd00:201::2",
 			TunMTU:      1500,
+		},
+		Obfuscation: mtypes.ObfuscationConfig{
+			Enabled: true,                                                   // Obfuscation enabled by default
+			PSK:     device.RandomPSK().ToString(),                          // Random PSK for obfuscation
 		},
 	}
 	if !getDemo {

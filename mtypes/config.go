@@ -34,9 +34,10 @@ type EdgeConfig struct {
 	LogLevel              LoggerInfo       `yaml:"LogLevel"`
 	DynamicRoute          DynamicRouteInfo `yaml:"DynamicRoute"`
 	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
-	ResetEndPointInterval float64          `yaml:"ResetEndPointInterval"`
-	Peers                 []PeerInfo       `yaml:"Peers"`
-	FakeTCP               FakeTCPConfig    `yaml:"FakeTCP"`
+	ResetEndPointInterval float64             `yaml:"ResetEndPointInterval"`
+	Peers                 []PeerInfo         `yaml:"Peers"`
+	FakeTCP               FakeTCPConfig      `yaml:"FakeTCP"`
+	Obfuscation           ObfuscationConfig  `yaml:"Obfuscation"`
 }
 
 type FakeTCPConfig struct {
@@ -47,6 +48,11 @@ type FakeTCPConfig struct {
 	TunIPv6      string `yaml:"TunIPv6"`       // Local IPv6 address for TUN (optional)
 	TunPeerIPv6  string `yaml:"TunPeerIPv6"`   // Peer IPv6 address for TUN (optional)
 	TunMTU       int    `yaml:"TunMTU"`        // MTU for TUN device (default: 1500)
+}
+
+type ObfuscationConfig struct {
+	Enabled bool   `yaml:"Enabled"` // Enable obfuscation with zero-overhead encryption
+	PSK     string `yaml:"PSK"`     // Pre-shared key for obfuscation (32 bytes base64)
 }
 
 type SuperConfig struct {
@@ -74,6 +80,7 @@ type SuperConfig struct {
 	ResetEndPointInterval   float64                 `yaml:"ResetEndPointInterval"`
 	Peers                   []SuperPeerInfo         `yaml:"Peers"`
 	FakeTCP                 FakeTCPConfig           `yaml:"FakeTCP"`
+	Obfuscation             ObfuscationConfig       `yaml:"Obfuscation"`
 }
 
 type Passwords struct {
