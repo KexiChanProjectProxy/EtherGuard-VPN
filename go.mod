@@ -1,6 +1,6 @@
 module github.com/KusakabeSi/EtherGuard-VPN
 
-go 1.17
+go 1.25
 
 require (
 	git.fd.io/govpp.git v0.4.0
