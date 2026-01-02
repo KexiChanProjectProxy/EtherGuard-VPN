@@ -159,6 +159,15 @@ func GetExampleEdgeConf(templatePath string, getDemo bool) (mtypes.EdgeConfig, e
 				Static:              true,
 			},
 		},
+		FakeTCP: mtypes.FakeTCPConfig{
+			Enabled:     false, // Set to true to enable FakeTCP dual-stack mode
+			TunName:     "etherguard-tcp0",
+			TunIPv4:     "192.168.200.1/24",
+			TunPeerIPv4: "192.168.200.2",
+			TunIPv6:     "",
+			TunPeerIPv6: "",
+			TunMTU:      1500,
+		},
 	}
 	if getDemo {
 		g, _ := path.NewGraph(3, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
@@ -279,6 +288,15 @@ func GetExampleSuperConf(templatePath string, getDemo bool) (mtypes.SuperConfig,
 				PSKey:          "juJMQaGAaeSy8aDsXSKNsPZv/nFiPj4h/1G70tGYygs=",
 				AdditionalCost: 10,
 			},
+		},
+		FakeTCP: mtypes.FakeTCPConfig{
+			Enabled:     false, // Set to true to enable FakeTCP dual-stack mode
+			TunName:     "etherguard-tcp-super",
+			TunIPv4:     "192.168.201.1/24",
+			TunPeerIPv4: "192.168.201.2",
+			TunIPv6:     "",
+			TunPeerIPv6: "",
+			TunMTU:      1500,
 		},
 	}
 	if !getDemo {

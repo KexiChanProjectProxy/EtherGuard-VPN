@@ -20,6 +20,7 @@ import (
 
 	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/device"
+	"github.com/KusakabeSi/EtherGuard-VPN/faketcp"
 	"github.com/KusakabeSi/EtherGuard-VPN/gencfg"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 	"github.com/KusakabeSi/EtherGuard-VPN/path"
@@ -124,6 +125,41 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, false, configPath, &econfig, nil, nil, Version)
 	defer the_device.Close()
+
+	// Initialize FakeTCP bind if enabled
+	if econfig.FakeTCP.Enabled {
+		logger.Verbosef("FakeTCP is enabled, initializing FakeTCP bind")
+		tunName := econfig.FakeTCP.TunName
+		if tunName == "" {
+			tunName = "etherguard-tcp0"
+		}
+		tunMTU := econfig.FakeTCP.TunMTU
+		if tunMTU == 0 {
+			tunMTU = 1500
+		}
+		tunIPv4 := econfig.FakeTCP.TunIPv4
+		if tunIPv4 == "" {
+			tunIPv4 = "192.168.200.1/24"
+		}
+		tunPeerIPv4 := econfig.FakeTCP.TunPeerIPv4
+		if tunPeerIPv4 == "" {
+			tunPeerIPv4 = "192.168.200.2"
+		}
+
+		faketcpConfig := faketcp.TunConfig{
+			Name:        tunName,
+			MTU:         tunMTU,
+			IPv4Address: tunIPv4,
+			IPv4Peer:    tunPeerIPv4,
+			IPv6Address: econfig.FakeTCP.TunIPv6,
+			IPv6Peer:    econfig.FakeTCP.TunPeerIPv6,
+		}
+
+		faketcpBind := conn.NewFakeTCPBind(EnabledAf.IPv4, EnabledAf.IPv6, faketcpConfig)
+		the_device.SetFakeTCPBind(faketcpBind)
+		logger.Verbosef("FakeTCP bind initialized")
+	}
+
 	pk, err := device.Str2PriKey(econfig.PrivKey)
 	if err != nil {
 		fmt.Println("Error decode base64 ", err)

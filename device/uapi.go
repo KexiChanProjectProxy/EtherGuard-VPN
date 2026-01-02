@@ -102,7 +102,6 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 
 		for _, peer := range device.peers.keyMap {
 			peer.RLock()
-			defer peer.RUnlock()
 
 			keyf("public_key", (*[32]byte)(&peer.handshake.remoteStatic))
 			keyf("preshared_key", (*[32]byte)(&peer.handshake.presharedKey))
@@ -122,6 +121,8 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("persistent_keepalive_interval=%d", atomic.LoadUint32(&peer.persistentKeepaliveInterval))
 			sendf("allowed_ip=%s/%d", net.IPv4zero.String(), 0)
 			sendf("allowed_ip=%s/%d", net.IPv6zero.String(), 0)
+
+			peer.RUnlock()
 		}
 	}()
 

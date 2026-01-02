@@ -23,6 +23,7 @@ import (
 
 	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/device"
+	"github.com/KusakabeSi/EtherGuard-VPN/faketcp"
 	"github.com/KusakabeSi/EtherGuard-VPN/gencfg"
 	"github.com/KusakabeSi/EtherGuard-VPN/ipc"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -157,6 +158,47 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 	thetap6, _ := tap.CreateDummyTAP()
 	httpobj.http_device6 = device.NewDevice(thetap6, mtypes.NodeID_SuperNode, conn.NewDefaultBind(EnabledAf.GetOnly6(), bindmode, sconfig.FwMark), logger6, httpobj.http_graph, true, configPath, nil, &sconfig, httpobj.http_super_chains, Version)
 	defer httpobj.http_device6.Close()
+
+	// Initialize FakeTCP bind if enabled (for both IPv4 and IPv6 devices)
+	if sconfig.FakeTCP.Enabled {
+		logger4.Verbosef("FakeTCP is enabled for super node, initializing FakeTCP bind")
+		tunName := sconfig.FakeTCP.TunName
+		if tunName == "" {
+			tunName = "etherguard-tcp-super"
+		}
+		tunMTU := sconfig.FakeTCP.TunMTU
+		if tunMTU == 0 {
+			tunMTU = 1500
+		}
+		tunIPv4 := sconfig.FakeTCP.TunIPv4
+		if tunIPv4 == "" {
+			tunIPv4 = "192.168.201.1/24"
+		}
+		tunPeerIPv4 := sconfig.FakeTCP.TunPeerIPv4
+		if tunPeerIPv4 == "" {
+			tunPeerIPv4 = "192.168.201.2"
+		}
+
+		faketcpConfig := faketcp.TunConfig{
+			Name:        tunName,
+			MTU:         tunMTU,
+			IPv4Address: tunIPv4,
+			IPv4Peer:    tunPeerIPv4,
+			IPv6Address: sconfig.FakeTCP.TunIPv6,
+			IPv6Peer:    sconfig.FakeTCP.TunPeerIPv6,
+		}
+
+		// Initialize for IPv4 device
+		faketcpBind4 := conn.NewFakeTCPBind(true, false, faketcpConfig)
+		httpobj.http_device4.SetFakeTCPBind(faketcpBind4)
+
+		// Initialize for IPv6 device
+		faketcpBind6 := conn.NewFakeTCPBind(false, true, faketcpConfig)
+		httpobj.http_device6.SetFakeTCPBind(faketcpBind6)
+
+		logger4.Verbosef("FakeTCP bind initialized for super node")
+	}
+
 	if sconfig.PrivKeyV4 != "" {
 		pk4, err := device.Str2PriKey(sconfig.PrivKeyV4)
 		if err != nil {

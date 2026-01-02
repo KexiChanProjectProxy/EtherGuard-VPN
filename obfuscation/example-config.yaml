@@ -1,0 +1,115 @@
+# Example EtherGuard-VPN Configuration with Obfuscation
+#
+# This shows how to enable packet obfuscation for anti-DPI protection
+
+# ============================================================
+# Edge Node Example Configuration
+# ============================================================
+NodeID: 1
+NodeName: "edge-node-1"
+PrivKey: "YourPrivateKeyHere"
+ListenPort: 51820
+FwMark: 0
+DefaultTTL: 64
+L2FIBTimeout: 3600
+ResetEndPointInterval: 300
+
+# Obfuscation Configuration
+# Enable this to protect against Deep Packet Inspection (DPI)
+Obfuscation:
+  Enabled: true
+  # PSK must be a base64-encoded 32-byte key
+  # Generate with: openssl rand -base64 32
+  # IMPORTANT: All nodes must use the SAME PSK to communicate
+  PSK: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+Interface:
+  IType: "stdio"
+  Name: "eg0"
+  MTU: 1416
+  IPv4CIDR: "10.0.0.1/24"
+  MacAddrPrefix: "02:00:00"
+  L2HeaderMode: "kbdbg"
+
+LogLevel:
+  LogLevel: "normal"
+  LogTransit: false
+  LogControl: true
+  LogNormal: false
+  DumpNormal: false
+  LogInternal: false
+
+DynamicRoute:
+  SendPingInterval: 10
+  PeerAliveTimeout: 30
+  TimeoutCheckInterval: 5
+  ConnNextTry: 5
+  DupCheckTimeout: 10
+  AdditionalCost: 0
+  DampingFilterRadius: 0
+  SaveNewPeers: true
+
+  SuperNode:
+    UseSuperNode: true
+    PSKey: "SuperNodePSKHere"
+    EndpointEdgeAPIUrl: "http://super-node.example.com:3000/api"
+    SkipLocalIP: false
+
+  P2P:
+    UseP2P: true
+    SendPeerInterval: 20
+
+  NTPConfig:
+    UseNTP: false
+
+Peers:
+  - NodeID: 2
+    PubKey: "PeerPublicKeyHere"
+    PSKey: ""
+    EndPoint: "peer.example.com:51820"
+    PersistentKeepalive: 25
+    Static: false
+
+# ============================================================
+# Super Node Example Configuration
+# ============================================================
+# Uncomment and modify for super node:
+#
+# NodeName: "super-node"
+# PrivKeyV4: "SuperNodePrivateKeyV4"
+# PrivKeyV6: "SuperNodePrivateKeyV6"
+# ListenPort: 51820
+# ListenPort_EdgeAPI: ":3000"
+# ListenPort_ManageAPI: ":3001"
+#
+# # Obfuscation must be enabled with same PSK
+# Obfuscation:
+#   Enabled: true
+#   PSK: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+#
+# LogLevel:
+#   LogLevel: "normal"
+#   LogTransit: false
+#   LogControl: true
+#   LogNormal: false
+#   DumpNormal: false
+#   LogInternal: false
+#
+# GraphRecalculateSetting:
+#   StaticMode: false
+#   JitterTolerance: 10
+#   JitterToleranceMultiplier: 1.5
+#   TimeoutCheckInterval: 5
+#   RecalculateCoolDown: 5
+#
+# PeerAliveTimeout: 30
+# SendPingInterval: 10
+# HttpPostInterval: 20
+# DampingFilterRadius: 3
+#
+# Peers:
+#   - NodeID: 1
+#     Name: "edge-node-1"
+#     PubKey: "EdgeNodePublicKey"
+#     PSKey: "EdgeNodePSK"
+#     EndPoint: "edge1.example.com:51820"

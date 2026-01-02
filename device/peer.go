@@ -243,8 +243,11 @@ type Peer struct {
 	keypairs         Keypairs
 	handshake        Handshake
 	device           *Device
-	endpoint         conn.Endpoint
+	endpoint         conn.Endpoint    // Primary endpoint (UDP)
+	faketcpEndpoint  conn.Endpoint    // FakeTCP endpoint (fallback)
 	endpoint_trylist *endpoint_trylist
+	udpFailed        AtomicBool       // Track if UDP communication has failed
+	lastUDPSuccess   atomic.Value     // *time.Time - last successful UDP communication
 
 	LastPacketReceivedAdd1Sec atomic.Value // *time.Time
 
@@ -409,15 +412,52 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 	peer.RLock()
 	defer peer.RUnlock()
 
-	if peer.endpoint == nil {
+	if peer.endpoint == nil && peer.faketcpEndpoint == nil {
 		return errors.New("no known endpoint for peer")
 	}
 
-	err := peer.device.net.bind.Send(buffer, peer.endpoint)
-	if err == nil {
-		atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
+	var err error
+	var sent bool
+
+	// Try UDP first if available and not marked as failed
+	if peer.endpoint != nil && !peer.udpFailed.Get() {
+		err = peer.device.net.bind.Send(buffer, peer.endpoint)
+		if err == nil {
+			// UDP success - update last success time
+			now := time.Now()
+			peer.lastUDPSuccess.Store(&now)
+			atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
+			sent = true
+
+			// If UDP was previously failed, mark it as recovered
+			if peer.udpFailed.Get() {
+				peer.device.log.Verbosef("UDP communication recovered for peer %v", peer.ID)
+				peer.udpFailed.Set(false)
+			}
+		} else {
+			// UDP failed - try FakeTCP
+			peer.device.log.Verbosef("UDP send failed for peer %v: %v, trying FakeTCP", peer.ID, err)
+			peer.udpFailed.Set(true)
+		}
 	}
-	return err
+
+	// If UDP failed or was skipped, try FakeTCP
+	if !sent && peer.faketcpEndpoint != nil && peer.device.net.faketcpBind != nil {
+		err = peer.device.net.faketcpBind.Send(buffer, peer.faketcpEndpoint)
+		if err == nil {
+			atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
+			sent = true
+			peer.device.log.Verbosef("Sent packet via FakeTCP for peer %v", peer.ID)
+		} else {
+			peer.device.log.Errorf("FakeTCP send also failed for peer %v: %v", peer.ID, err)
+		}
+	}
+
+	if !sent {
+		return errors.New(fmt.Sprintf("failed to send packet via both UDP and FakeTCP: %v", err))
+	}
+
+	return nil
 }
 
 func (peer *Peer) String() string {
@@ -574,6 +614,8 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 		//}
 		return nil
 	}
+
+	// Set up UDP endpoint
 	endpoint, err := peer.device.net.bind.ParseEndpoint(connIP)
 	if err != nil {
 		return err
@@ -582,6 +624,20 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	peer.ConnURL = connurl
 	peer.ConnAF = af
 	peer.SetEndpointFromPacket(endpoint)
+
+	// Also set up FakeTCP endpoint if FakeTCP is enabled
+	if peer.device.net.faketcpBind != nil {
+		faketcpEndpoint, err := peer.device.net.faketcpBind.ParseEndpoint(connIP)
+		if err != nil {
+			peer.device.log.Verbosef("Failed to parse FakeTCP endpoint for %v: %v", peer.ID, err)
+		} else {
+			peer.Lock()
+			peer.faketcpEndpoint = faketcpEndpoint
+			peer.Unlock()
+			peer.device.log.Verbosef("Set FakeTCP endpoint for peer %v to %v", peer.ID, connIP)
+		}
+	}
+
 	return nil
 }
 

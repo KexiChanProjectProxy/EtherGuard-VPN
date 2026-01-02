@@ -36,6 +36,17 @@ type EdgeConfig struct {
 	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
 	ResetEndPointInterval float64          `yaml:"ResetEndPointInterval"`
 	Peers                 []PeerInfo       `yaml:"Peers"`
+	FakeTCP               FakeTCPConfig    `yaml:"FakeTCP"`
+}
+
+type FakeTCPConfig struct {
+	Enabled      bool   `yaml:"Enabled"`       // Enable FakeTCP transport
+	TunName      string `yaml:"TunName"`       // TUN device name (e.g., "etherguard-tcp0")
+	TunIPv4      string `yaml:"TunIPv4"`       // Local IPv4 address for TUN (e.g., "192.168.200.1/24")
+	TunPeerIPv4  string `yaml:"TunPeerIPv4"`   // Peer IPv4 address for TUN (e.g., "192.168.200.2")
+	TunIPv6      string `yaml:"TunIPv6"`       // Local IPv6 address for TUN (optional)
+	TunPeerIPv6  string `yaml:"TunPeerIPv6"`   // Peer IPv6 address for TUN (optional)
+	TunMTU       int    `yaml:"TunMTU"`        // MTU for TUN device (default: 1500)
 }
 
 type SuperConfig struct {
@@ -62,6 +73,7 @@ type SuperConfig struct {
 	UsePSKForInterEdge      bool                    `yaml:"UsePSKForInterEdge"`
 	ResetEndPointInterval   float64                 `yaml:"ResetEndPointInterval"`
 	Peers                   []SuperPeerInfo         `yaml:"Peers"`
+	FakeTCP                 FakeTCPConfig           `yaml:"FakeTCP"`
 }
 
 type Passwords struct {

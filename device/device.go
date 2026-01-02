@@ -46,9 +46,10 @@ type Device struct {
 	}
 
 	net struct {
-		stopping sync.WaitGroup
+		stopping      sync.WaitGroup
 		sync.RWMutex
-		bind          conn.Bind // bind interface
+		bind          conn.Bind // UDP bind interface
+		faketcpBind   conn.Bind // FakeTCP bind interface (optional)
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
@@ -655,7 +656,7 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 	device.peers.RUnlock()
 }
 
-// closeBindLocked closes the device's net.bind.
+// closeBindLocked closes the device's net.bind and net.faketcpBind.
 // The caller must hold the net mutex.
 func closeBindLocked(device *Device) error {
 	var err error
@@ -666,6 +667,14 @@ func closeBindLocked(device *Device) error {
 	if netc.bind != nil {
 		err = netc.bind.Close()
 	}
+	if netc.faketcpBind != nil {
+		if err2 := netc.faketcpBind.Close(); err2 != nil {
+			device.log.Errorf("Error closing FakeTCP bind: %v", err2)
+			if err == nil {
+				err = err2
+			}
+		}
+	}
 	netc.stopping.Wait()
 	return err
 }
@@ -674,6 +683,12 @@ func (device *Device) Bind() conn.Bind {
 	device.net.Lock()
 	defer device.net.Unlock()
 	return device.net.bind
+}
+
+func (device *Device) SetFakeTCPBind(bind conn.Bind) {
+	device.net.Lock()
+	defer device.net.Unlock()
+	device.net.faketcpBind = bind
 }
 
 func (device *Device) BindSetMark(mark uint32) error {
@@ -697,10 +712,10 @@ func (device *Device) BindSetMark(mark uint32) error {
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.Lock()
-		defer peer.Unlock()
 		if peer.endpoint != nil {
 			peer.endpoint.ClearSrc()
 		}
+		peer.Unlock()
 	}
 	device.peers.RUnlock()
 
@@ -749,10 +764,10 @@ func (device *Device) BindUpdate() error {
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.Lock()
-		defer peer.Unlock()
 		if peer.endpoint != nil {
 			peer.endpoint.ClearSrc()
 		}
+		peer.Unlock()
 	}
 	device.peers.RUnlock()
 
@@ -765,6 +780,27 @@ func (device *Device) BindUpdate() error {
 	}
 
 	device.log.Verbosef("UDP bind has been updated")
+
+	// Open FakeTCP bind if configured
+	if netc.faketcpBind != nil {
+		var faketcpRecvFns []conn.ReceiveFunc
+		var faketcpPort uint16
+		faketcpRecvFns, faketcpPort, err = netc.faketcpBind.Open(netc.port)
+		if err != nil {
+			device.log.Errorf("Failed to open FakeTCP bind: %v", err)
+			// Don't fail completely, just continue without FakeTCP
+		} else {
+			// Start FakeTCP receiving routines
+			device.net.stopping.Add(len(faketcpRecvFns))
+			device.queue.decryption.wg.Add(len(faketcpRecvFns))
+			device.queue.handshake.wg.Add(len(faketcpRecvFns))
+			for _, fn := range faketcpRecvFns {
+				go device.RoutineReceiveIncoming(fn)
+			}
+			device.log.Verbosef("FakeTCP bind opened on port %d", faketcpPort)
+		}
+	}
+
 	return nil
 }
 
