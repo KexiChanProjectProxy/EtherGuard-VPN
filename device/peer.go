@@ -615,6 +615,29 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 		return nil
 	}
 
+	// Extract IP address from connIP (format: "ip:port")
+	host, _, err := net.SplitHostPort(connIP)
+	if err != nil {
+		return fmt.Errorf("failed to parse endpoint %s: %w", connIP, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("invalid IP address in endpoint: %s", host)
+	}
+
+	// Check if private IPs are allowed
+	allowPrivate := false
+	if peer.device.IsSuperNode {
+		allowPrivate = peer.device.SuperConfig.AllowPrivateIP
+	} else {
+		allowPrivate = peer.device.EdgeConfig.AllowPrivateIP
+	}
+
+	// Reject private/non-routable IPs unless explicitly allowed
+	if !allowPrivate && conn.IsPrivateIP(ip) {
+		return fmt.Errorf("connection to private/non-routable IP %s rejected (set AllowPrivateIP: true to allow)", connIP)
+	}
+
 	// Set up UDP endpoint
 	endpoint, err := peer.device.net.bind.ParseEndpoint(connIP)
 	if err != nil {
@@ -645,6 +668,27 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	if peer.disableRoaming {
 		return
 	}
+
+	// Validate source IP address
+	sourceIP := endpoint.DstIP()
+	if sourceIP != nil {
+		// Check if private IPs are allowed
+		allowPrivate := false
+		if peer.device.IsSuperNode {
+			allowPrivate = peer.device.SuperConfig.AllowPrivateIP
+		} else {
+			allowPrivate = peer.device.EdgeConfig.AllowPrivateIP
+		}
+
+		// Reject private/non-routable IPs unless explicitly allowed
+		if !allowPrivate && conn.IsPrivateIP(sourceIP) {
+			if peer.device.LogLevel.LogControl {
+				fmt.Printf("Control: Rejected endpoint update from private IP %s for peer %v (set AllowPrivateIP: true to allow)\n", endpoint.DstToString(), peer.ID.ToString())
+			}
+			return
+		}
+	}
+
 	peer.Lock()
 	defer peer.Unlock()
 	if peer.ID == mtypes.NodeID_SuperNode {

@@ -529,30 +529,41 @@ func (peer *Peer) RoutineSequentialReceiver() {
 			}
 
 			// Set should_transfer
-			switch dst_nodeID {
-			case mtypes.NodeID_Broadcast:
-				should_transfer = true
-			case mtypes.NodeID_Spread:
-				packet := elem.packet[path.EgHeaderLen:] //packet body
-				if device.CheckNoDup(packet) {
-					should_transfer = true
-				} else {
-					if device.LogLevel.LogTransit {
-						fmt.Printf("Transit: Duplicate packet dropped. S:%v D:%v From:%v \n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID)
-					}
-					goto skip
+			// Check if relay/forwarding is disabled
+			disableRelay := device.EdgeConfig.DisableRelay
+			if disableRelay {
+				// When relay is disabled, never forward packets to other peers
+				should_transfer = false
+				// Log dropped relay packets if LogTransit is enabled
+				if device.LogLevel.LogTransit && dst_nodeID != device.ID {
+					fmt.Printf("Transit: Relay disabled - dropped packet S:%v D:%v From:%v (set DisableRelay: false to enable relaying)\n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID.ToString())
 				}
-			case device.ID:
-				should_transfer = false
-			case mtypes.NodeID_SuperNode:
-				should_transfer = false
-			case mtypes.NodeID_Invalid:
-				should_transfer = false
-			default:
-				if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
+			} else {
+				switch dst_nodeID {
+				case mtypes.NodeID_Broadcast:
 					should_transfer = true
-				} else {
-					device.log.Verbosef("No route to peer ID %v", dst_nodeID)
+				case mtypes.NodeID_Spread:
+					packet := elem.packet[path.EgHeaderLen:] //packet body
+					if device.CheckNoDup(packet) {
+						should_transfer = true
+					} else {
+						if device.LogLevel.LogTransit {
+							fmt.Printf("Transit: Duplicate packet dropped. S:%v D:%v From:%v \n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID)
+						}
+						goto skip
+					}
+				case device.ID:
+					should_transfer = false
+				case mtypes.NodeID_SuperNode:
+					should_transfer = false
+				case mtypes.NodeID_Invalid:
+					should_transfer = false
+				default:
+					if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
+						should_transfer = true
+					} else {
+						device.log.Verbosef("No route to peer ID %v", dst_nodeID)
+					}
 				}
 			}
 		}

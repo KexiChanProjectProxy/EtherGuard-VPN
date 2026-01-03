@@ -35,6 +35,8 @@ type EdgeConfig struct {
 	DynamicRoute          DynamicRouteInfo `yaml:"DynamicRoute"`
 	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
 	ResetEndPointInterval float64             `yaml:"ResetEndPointInterval"`
+	AllowPrivateIP        bool                `yaml:"AllowPrivateIP"`        // Allow connections to private/non-routable IPs (default: false)
+	DisableRelay          bool                `yaml:"DisableRelay"`          // Disable packet forwarding/relay to other peers (default: false)
 	Peers                 []PeerInfo         `yaml:"Peers"`
 	FakeTCP               FakeTCPConfig      `yaml:"FakeTCP"`
 	Obfuscation           ObfuscationConfig  `yaml:"Obfuscation"`
@@ -78,6 +80,8 @@ type SuperConfig struct {
 	EdgeTemplate            string                  `yaml:"EdgeTemplate"`
 	UsePSKForInterEdge      bool                    `yaml:"UsePSKForInterEdge"`
 	ResetEndPointInterval   float64                 `yaml:"ResetEndPointInterval"`
+	AllowPrivateIP          bool                    `yaml:"AllowPrivateIP"`          // Allow connections to private/non-routable IPs (default: false)
+	DisableRelay            bool                    `yaml:"DisableRelay"`            // Disable packet forwarding/relay to other peers (default: false)
 	Peers                   []SuperPeerInfo         `yaml:"Peers"`
 	FakeTCP                 FakeTCPConfig           `yaml:"FakeTCP"`
 	Obfuscation             ObfuscationConfig       `yaml:"Obfuscation"`

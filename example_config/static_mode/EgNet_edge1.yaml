@@ -102,6 +102,8 @@ NextHopTable:
     4: 4
     5: 4
 ResetEndPointInterval: 600
+AllowPrivateIP: false  # Set to true to allow connections to private/non-routable IP addresses (e.g., 10.x, 192.168.x, 172.16-31.x). Default: false for security.
+DisableRelay: false    # Set to true to prevent this node from forwarding/relaying packets between other peers. Default: false (relaying enabled).
 FakeTCP:
   Enabled: true
   TunName: etherguard-tcp0

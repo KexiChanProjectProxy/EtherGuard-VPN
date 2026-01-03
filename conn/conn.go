@@ -249,3 +249,114 @@ func ValidIP(ip net.IP) bool {
 	}
 	return false
 }
+
+// IsPrivateIP checks if an IP address is in a private/non-routable range
+// This includes RFC 1918 private networks, loopback, link-local, etc.
+func IsPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+
+	// Check for IPv4 private ranges
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8 - Private network
+		if ip4[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12 - Private network
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		// 192.168.0.0/16 - Private network
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+		// 127.0.0.0/8 - Loopback
+		if ip4[0] == 127 {
+			return true
+		}
+		// 169.254.0.0/16 - Link-local
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+		// 100.64.0.0/10 - Carrier-grade NAT
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		// 224.0.0.0/4 - Multicast
+		if ip4[0] >= 224 && ip4[0] <= 239 {
+			return true
+		}
+		// 240.0.0.0/4 - Reserved
+		if ip4[0] >= 240 {
+			return true
+		}
+		// 0.0.0.0/8 - Current network
+		if ip4[0] == 0 {
+			return true
+		}
+		// 192.0.0.0/24 - IETF Protocol Assignments
+		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 0 {
+			return true
+		}
+		// 192.0.2.0/24 - Documentation (TEST-NET-1)
+		if ip4[0] == 192 && ip4[1] == 0 && ip4[2] == 2 {
+			return true
+		}
+		// 198.51.100.0/24 - Documentation (TEST-NET-2)
+		if ip4[0] == 198 && ip4[1] == 51 && ip4[2] == 100 {
+			return true
+		}
+		// 203.0.113.0/24 - Documentation (TEST-NET-3)
+		if ip4[0] == 203 && ip4[1] == 0 && ip4[2] == 113 {
+			return true
+		}
+		// 198.18.0.0/15 - Benchmarking
+		if ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) {
+			return true
+		}
+		return false
+	}
+
+	// Check for IPv6 private/special ranges
+	// ::1/128 - Loopback
+	if ip.IsLoopback() {
+		return true
+	}
+	// fe80::/10 - Link-local
+	if ip.IsLinkLocalUnicast() {
+		return true
+	}
+	// fc00::/7 - Unique local address (ULA)
+	if len(ip) == 16 && (ip[0]&0xfe) == 0xfc {
+		return true
+	}
+	// ff00::/8 - Multicast
+	if ip.IsMulticast() {
+		return true
+	}
+	// ::/128 - Unspecified
+	if ip.IsUnspecified() {
+		return true
+	}
+	// 2001:db8::/32 - Documentation
+	if len(ip) == 16 && ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
+		return true
+	}
+	// ::ffff:0:0/96 - IPv4-mapped IPv6 addresses
+	// Check the embedded IPv4 address
+	if len(ip) == 16 && ip[0] == 0 && ip[1] == 0 && ip[2] == 0 && ip[3] == 0 &&
+		ip[4] == 0 && ip[5] == 0 && ip[6] == 0 && ip[7] == 0 &&
+		ip[8] == 0 && ip[9] == 0 && ip[10] == 0xff && ip[11] == 0xff {
+		// Extract the IPv4 address and check it
+		ipv4 := net.IPv4(ip[12], ip[13], ip[14], ip[15])
+		return IsPrivateIP(ipv4)
+	}
+
+	return false
+}
+
+// IsPublicIP checks if an IP address is routable on the public internet
+func IsPublicIP(ip net.IP) bool {
+	return !IsPrivateIP(ip)
+}
