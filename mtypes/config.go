@@ -20,26 +20,27 @@ const (
 )
 
 type EdgeConfig struct {
-	Interface             InterfaceConf    `yaml:"Interface"`
-	NodeID                Vertex           `yaml:"NodeID"`
-	NodeName              string           `yaml:"NodeName"`
-	PostScript            string           `yaml:"PostScript"`
-	DefaultTTL            uint8            `yaml:"DefaultTTL"`
-	L2FIBTimeout          float64          `yaml:"L2FIBTimeout"`
-	PrivKey               string           `yaml:"PrivKey"`
-	ListenPort            int              `yaml:"ListenPort"`
-	FwMark                uint32           `yaml:"FwMark"`
-	DisableAf             conn.EnabledAf   `yaml:"DisabledAf"`
-	AfPrefer              int              `yaml:"AfPrefer"`
-	LogLevel              LoggerInfo       `yaml:"LogLevel"`
-	DynamicRoute          DynamicRouteInfo `yaml:"DynamicRoute"`
-	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
-	ResetEndPointInterval float64             `yaml:"ResetEndPointInterval"`
-	AllowPrivateIP        bool                `yaml:"AllowPrivateIP"`        // Allow connections to private/non-routable IPs (default: false)
-	DisableRelay          bool                `yaml:"DisableRelay"`          // Disable packet forwarding/relay to other peers (default: false)
+	Interface             InterfaceConf      `yaml:"Interface"`
+	NodeID                Vertex             `yaml:"NodeID"`
+	NodeName              string             `yaml:"NodeName"`
+	PostScript            string             `yaml:"PostScript"`
+	DefaultTTL            uint8              `yaml:"DefaultTTL"`
+	L2FIBTimeout          float64            `yaml:"L2FIBTimeout"`
+	PrivKey               string             `yaml:"PrivKey"`
+	ListenPort            int                `yaml:"ListenPort"`
+	FwMark                uint32             `yaml:"FwMark"`
+	DisableAf             conn.EnabledAf     `yaml:"DisabledAf"`
+	AfPrefer              int                `yaml:"AfPrefer"`
+	LogLevel              LoggerInfo         `yaml:"LogLevel"`
+	DynamicRoute          DynamicRouteInfo   `yaml:"DynamicRoute"`
+	NextHopTable          NextHopTable       `yaml:"NextHopTable"`
+	ResetEndPointInterval float64            `yaml:"ResetEndPointInterval"`
+	AllowPrivateIP        bool               `yaml:"AllowPrivateIP"`        // Allow connections to private/non-routable IPs (default: false)
+	DisableRelay          bool               `yaml:"DisableRelay"`          // Disable packet forwarding/relay to other peers (default: false)
 	Peers                 []PeerInfo         `yaml:"Peers"`
 	FakeTCP               FakeTCPConfig      `yaml:"FakeTCP"`
 	Obfuscation           ObfuscationConfig  `yaml:"Obfuscation"`
+	DualStack             DualStackConfig    `yaml:"DualStack"`             // Dual-stack IPv6/IPv4 failover configuration
 }
 
 type FakeTCPConfig struct {
@@ -55,6 +56,14 @@ type FakeTCPConfig struct {
 type ObfuscationConfig struct {
 	Enabled bool   `yaml:"Enabled"` // Enable obfuscation with zero-overhead encryption
 	PSK     string `yaml:"PSK"`     // Pre-shared key for obfuscation (32 bytes base64)
+}
+
+type DualStackConfig struct {
+	Enabled        bool    `yaml:"Enabled"`        // Enable dual-stack IPv6/IPv4 failover (default: true if both AFs available)
+	IPv6Preferred  bool    `yaml:"IPv6Preferred"`  // Prefer IPv6 over IPv4 (default: true)
+	FailbackDelay  float64 `yaml:"FailbackDelay"`  // Seconds to wait before failing back to IPv6 after recovery (default: 30.0)
+	ProbeInterval  float64 `yaml:"ProbeInterval"`  // Seconds between IPv6 recovery probe attempts (default: 10.0)
+	BackupKeepalive float64 `yaml:"BackupKeepalive"` // Seconds between keepalives on backup channel (default: 30.0)
 }
 
 type SuperConfig struct {
@@ -114,7 +123,9 @@ type PeerInfo struct {
 	NodeID              Vertex `yaml:"NodeID"`
 	PubKey              string `yaml:"PubKey"`
 	PSKey               string `yaml:"PSKey"`
-	EndPoint            string `yaml:"EndPoint"`
+	EndPoint            string `yaml:"EndPoint"`            // Legacy: works for both IPv4/IPv6 (auto-resolves)
+	EndPointIPv4        string `yaml:"EndPointIPv4"`        // Optional: explicit IPv4 endpoint
+	EndPointIPv6        string `yaml:"EndPointIPv6"`        // Optional: explicit IPv6 endpoint
 	PersistentKeepalive uint32 `yaml:"PersistentKeepalive"`
 	Static              bool   `yaml:"Static"`
 }

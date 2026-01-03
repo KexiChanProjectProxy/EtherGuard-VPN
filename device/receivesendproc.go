@@ -832,6 +832,134 @@ func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
 	}
 }
 
+// RoutineIPv6Recovery probes IPv6 connectivity when failed over to IPv4,
+// implements delayed failback (30s default) when IPv6 recovers,
+// and sends keepalives on the backup channel to maintain NAT mappings
+func (device *Device) RoutineIPv6Recovery() {
+	if device.IsSuperNode {
+		return // Only run on edge nodes
+	}
+
+	// Check if dual-stack is enabled
+	if !device.EdgeConfig.DualStack.Enabled {
+		return
+	}
+
+	// Get probe interval from config (default: 10s)
+	probeInterval := 10.0
+	if device.EdgeConfig.DualStack.ProbeInterval > 0 {
+		probeInterval = device.EdgeConfig.DualStack.ProbeInterval
+	}
+
+	// Get failback delay from config (default: 30s)
+	failbackDelay := 30.0
+	if device.EdgeConfig.DualStack.FailbackDelay > 0 {
+		failbackDelay = device.EdgeConfig.DualStack.FailbackDelay
+	}
+
+	// Get backup keepalive interval from config (default: 30s)
+	backupKeepalive := 30.0
+	if device.EdgeConfig.DualStack.BackupKeepalive > 0 {
+		backupKeepalive = device.EdgeConfig.DualStack.BackupKeepalive
+	}
+
+	ticker := time.NewTicker(mtypes.S2TD(probeInterval))
+	defer ticker.Stop()
+
+	lastBackupKeepalive := make(map[mtypes.Vertex]time.Time)
+
+	for range ticker.C {
+		// Iterate through all peers
+		device.peers.RLock()
+		for _, peer := range device.peers.keyMap {
+			// Only process peers with dual-stack endpoints
+			if peer.endpointIPv4 == nil || peer.endpointIPv6 == nil {
+				continue
+			}
+
+			// Check if peer is currently using IPv4 (failed over)
+			activeAFPtr := peer.activeAF.Load()
+			if activeAFPtr == nil {
+				continue
+			}
+			activeAF := *activeAFPtr.(*int)
+
+			if activeAF == 4 {
+				// Failed over to IPv4, check if IPv6 has recovered
+				if !peer.ipv6Failed.Get() {
+					// IPv6 is not marked as failed, check recovery timer
+					recoveryStartPtr := peer.ipv6RecoveryStartTime.Load()
+
+					if recoveryStartPtr == nil || recoveryStartPtr.(*time.Time) == nil {
+						// Start recovery timer
+						now := time.Now()
+						peer.ipv6RecoveryStartTime.Store(&now)
+						if device.LogLevel.LogControl {
+							fmt.Printf("Control: IPv6 recovery started for peer %v\n", peer.ID)
+						}
+						continue
+					}
+
+					recoveryStart := *recoveryStartPtr.(*time.Time)
+					elapsed := time.Since(recoveryStart)
+
+					if elapsed >= mtypes.S2TD(failbackDelay) {
+						// IPv6 has been healthy for failbackDelay duration, fail back
+						newAF := 6
+						peer.activeAF.Store(&newAF)
+
+						peer.Lock()
+						peer.endpoint = peer.endpointIPv6
+						peer.faketcpEndpoint = peer.faketcpEndpointIPv6
+						peer.Unlock()
+
+						// Reset recovery timer
+						peer.ipv6RecoveryStartTime.Store((*time.Time)(nil))
+
+						device.log.Verbosef("Failed back from IPv4 to IPv6 for peer %v after %.1fs stability",
+							peer.ID, elapsed.Seconds())
+
+						if device.LogLevel.LogControl {
+							fmt.Printf("Control: Failed back to IPv6 for peer %v\n", peer.ID)
+						}
+					}
+				} else {
+					// IPv6 is still marked as failed, reset recovery timer if it was set
+					recoveryStartPtr := peer.ipv6RecoveryStartTime.Load()
+					if recoveryStartPtr != nil && recoveryStartPtr.(*time.Time) != nil {
+						peer.ipv6RecoveryStartTime.Store((*time.Time)(nil))
+						if device.LogLevel.LogControl {
+							fmt.Printf("Control: IPv6 recovery interrupted for peer %v (still failing)\n", peer.ID)
+						}
+					}
+				}
+			} else if activeAF == 6 {
+				// Active on IPv6, send periodic keepalives on IPv4 backup channel
+				// to maintain NAT mappings
+				lastKA, exists := lastBackupKeepalive[peer.ID]
+				if !exists || time.Since(lastKA) >= mtypes.S2TD(backupKeepalive) {
+					// Send a small keepalive probe via IPv4
+					peer.SendKeepalive() // This goes via active (IPv6)
+
+					// Also try to send via IPv4 to keep NAT alive (if not failed)
+					if !peer.ipv4Failed.Get() {
+						// Create an empty buffer for keepalive probe
+						buffer := make([]byte, 32) // Minimal probe packet
+						err := device.net.bind.Send(buffer, peer.endpointIPv4)
+						if err == nil {
+							lastBackupKeepalive[peer.ID] = time.Now()
+							if device.LogLevel.LogInternal {
+								fmt.Printf("Internal: Sent backup keepalive via IPv4 for peer %v\n", peer.ID)
+							}
+						}
+					}
+				}
+			}
+		}
+		device.peers.RUnlock()
+	}
+}
+
 func (device *Device) RoutineSendPing(startchan chan struct{}) {
 	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
 		return

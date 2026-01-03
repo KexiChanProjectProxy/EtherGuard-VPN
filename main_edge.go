@@ -49,6 +49,16 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		return err
 	}
 
+	// Set DualStack defaults if not explicitly configured
+	if econfig.DualStack.Enabled == false && econfig.DualStack.FailbackDelay == 0 {
+		// DualStack config not set, apply defaults
+		econfig.DualStack.Enabled = true // Auto-enable if both AFs available
+		econfig.DualStack.IPv6Preferred = true
+		econfig.DualStack.FailbackDelay = 30.0
+		econfig.DualStack.ProbeInterval = 10.0
+		econfig.DualStack.BackupKeepalive = 30.0
+	}
+
 	NodeName := econfig.NodeName
 	if len(NodeName) > 32 {
 		return errors.New("Node name can't longer than 32 :" + NodeName)

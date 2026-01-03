@@ -241,6 +241,100 @@ func LookupIP(host_port string, Af EnabledAf, AfPrefer int) (string, string, err
 	return NetStr, conn.RemoteAddr().String(), nil
 }
 
+// LookupIPDualStack resolves both IPv4 and IPv6 addresses for a host in parallel
+// Returns (v4NetStr, v4Addr, v6NetStr, v6Addr, primaryAF, error)
+// primaryAF is 4 or 6 based on AfPrefer, indicating which should be used as primary
+func LookupIPDualStack(host_port string, Af EnabledAf, AfPrefer int) (string, string, string, string, int, error) {
+	if host_port == "" {
+		return "", "", "", "", 0, fmt.Errorf("error lookup ip from empty string")
+	}
+
+	type lookupResult struct {
+		netStr string
+		addr   string
+		err    error
+		af     int // 4 or 6
+	}
+
+	resultChan := make(chan lookupResult, 2)
+
+	// Try IPv4 lookup in goroutine if enabled
+	if Af.IPv4 {
+		go func() {
+			conn, err := net.Dial("udp4", host_port)
+			if err != nil {
+				resultChan <- lookupResult{"", "", err, 4}
+				return
+			}
+			defer conn.Close()
+			resultChan <- lookupResult{"udp4", conn.RemoteAddr().String(), nil, 4}
+		}()
+	}
+
+	// Try IPv6 lookup in goroutine if enabled
+	if Af.IPv6 {
+		go func() {
+			conn, err := net.Dial("udp6", host_port)
+			if err != nil {
+				resultChan <- lookupResult{"", "", err, 6}
+				return
+			}
+			defer conn.Close()
+			resultChan <- lookupResult{"udp6", conn.RemoteAddr().String(), nil, 6}
+		}()
+	}
+
+	// Collect results
+	var v4NetStr, v4Addr, v6NetStr, v6Addr string
+	var v4Err, v6Err error
+	expectedResults := 0
+	if Af.IPv4 {
+		expectedResults++
+	}
+	if Af.IPv6 {
+		expectedResults++
+	}
+
+	for i := 0; i < expectedResults; i++ {
+		result := <-resultChan
+		if result.af == 4 {
+			v4NetStr = result.netStr
+			v4Addr = result.addr
+			v4Err = result.err
+		} else {
+			v6NetStr = result.netStr
+			v6Addr = result.addr
+			v6Err = result.err
+		}
+	}
+
+	// Determine primary AF based on preference and availability
+	primaryAF := 6 // Default to IPv6 preference
+	if AfPrefer == 4 {
+		primaryAF = 4
+	} else if AfPrefer == 0 {
+		// Auto: prefer whichever succeeded first, or IPv6 if both succeeded
+		if v6Err != nil && v4Err == nil {
+			primaryAF = 4
+		}
+	}
+
+	// Return error only if both failed
+	if v4Err != nil && v6Err != nil {
+		return "", "", "", "", 0, fmt.Errorf("both IPv4 and IPv6 lookup failed: v4=%v, v6=%v", v4Err, v6Err)
+	}
+
+	// If only one AF was requested and it failed, return its error
+	if !Af.IPv4 && v6Err != nil {
+		return "", "", "", "", 0, v6Err
+	}
+	if !Af.IPv6 && v4Err != nil {
+		return "", "", "", "", 0, v4Err
+	}
+
+	return v4NetStr, v4Addr, v6NetStr, v6Addr, primaryAF, nil
+}
+
 func ValidIP(ip net.IP) bool {
 	for b := range ip {
 		if b != 0 {

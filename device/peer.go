@@ -35,17 +35,27 @@ type endpoint_trylist struct {
 	timeout      time.Duration
 	enabledAf    conn.EnabledAf
 	peer         *Peer
-	trymap_super map[string]*endpoint_tryitem
-	trymap_p2p   map[string]*endpoint_tryitem
+	trymap_super map[string]*endpoint_tryitem // Legacy: combined map for backward compatibility
+	trymap_p2p   map[string]*endpoint_tryitem // Legacy: combined map for backward compatibility
+
+	// Dual-stack endpoint try maps (separated by address family)
+	trymap_super_v4 map[string]*endpoint_tryitem // IPv4 supernode endpoints
+	trymap_super_v6 map[string]*endpoint_tryitem // IPv6 supernode endpoints
+	trymap_p2p_v4   map[string]*endpoint_tryitem // IPv4 P2P discovered endpoints
+	trymap_p2p_v6   map[string]*endpoint_tryitem // IPv6 P2P discovered endpoints
 }
 
 func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.EnabledAf) *endpoint_trylist {
 	return &endpoint_trylist{
-		timeout:      timeout,
-		peer:         peer,
-		enabledAf:    enabledAf,
-		trymap_super: make(map[string]*endpoint_tryitem),
-		trymap_p2p:   make(map[string]*endpoint_tryitem),
+		timeout:         timeout,
+		peer:            peer,
+		enabledAf:       enabledAf,
+		trymap_super:    make(map[string]*endpoint_tryitem),
+		trymap_p2p:      make(map[string]*endpoint_tryitem),
+		trymap_super_v4: make(map[string]*endpoint_tryitem),
+		trymap_super_v6: make(map[string]*endpoint_tryitem),
+		trymap_p2p_v4:   make(map[string]*endpoint_tryitem),
+		trymap_p2p_v6:   make(map[string]*endpoint_tryitem),
 	}
 }
 
@@ -53,32 +63,96 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 	et.Lock()
 	defer et.Unlock()
 	newmap_super := make(map[string]*endpoint_tryitem)
+	newmap_super_v4 := make(map[string]*endpoint_tryitem)
+	newmap_super_v6 := make(map[string]*endpoint_tryitem)
+
 	if urls.IsEmpty() {
 		if et.peer.device.LogLevel.LogInternal {
 			fmt.Printf("Internal: Peer %v : Reset trylist(super) %v\n", et.peer.ID.ToString(), "nil")
 		}
 	}
+
+	// Check if dual-stack is enabled
+	dualStackEnabled := false
+	if !et.peer.device.IsSuperNode {
+		dualStackEnabled = et.peer.device.EdgeConfig.DualStack.Enabled
+	}
+
 	for url, it := range urls.GetList(UseLocalIP) {
 		if url == "" {
 			continue
 		}
-		addr, _, err := conn.LookupIP(url, et.enabledAf, AfPerfer)
-		switch AfPerfer {
-		case 4:
-			if addr == "udp4" {
-				it = it - AfPerferVal
+
+		// Try dual-stack lookup if enabled
+		if dualStackEnabled && et.enabledAf.IPv4 && et.enabledAf.IPv6 {
+			_, v4Addr, _, v6Addr, _, err := conn.LookupIPDualStack(url, et.enabledAf, AfPerfer)
+			if err == nil {
+				// Add IPv4 endpoint if available
+				if v4Addr != "" {
+					v4It := it
+					if AfPerfer == 4 {
+						v4It = v4It - AfPerferVal
+					}
+					if val, ok := et.trymap_super_v4[v4Addr]; ok {
+						newmap_super_v4[v4Addr] = val
+					} else {
+						newmap_super_v4[v4Addr] = &endpoint_tryitem{
+							URL:      v4Addr,
+							lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(v4It)),
+							firstTry: time.Time{},
+						}
+					}
+					if et.peer.device.LogLevel.LogInternal {
+						fmt.Printf("Internal: Peer %v : Add trylist(super,v4) %v\n", et.peer.ID.ToString(), v4Addr)
+					}
+				}
+
+				// Add IPv6 endpoint if available
+				if v6Addr != "" {
+					v6It := it
+					if AfPerfer == 6 {
+						v6It = v6It - AfPerferVal
+					}
+					if val, ok := et.trymap_super_v6[v6Addr]; ok {
+						newmap_super_v6[v6Addr] = val
+					} else {
+						newmap_super_v6[v6Addr] = &endpoint_tryitem{
+							URL:      v6Addr,
+							lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(v6It)),
+							firstTry: time.Time{},
+						}
+					}
+					if et.peer.device.LogLevel.LogInternal {
+						fmt.Printf("Internal: Peer %v : Add trylist(super,v6) %v\n", et.peer.ID.ToString(), v6Addr)
+					}
+				}
+				continue
 			}
-		case 6:
-			if addr == "udp6" {
-				it = it - AfPerferVal
-			}
+			// If dual-stack lookup failed, fall through to single lookup
 		}
+
+		// Legacy single-AF lookup
+		addr, connIP, err := conn.LookupIP(url, et.enabledAf, AfPerfer)
 		if err != nil {
 			if et.peer.device.LogLevel.LogInternal {
 				fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), url, err)
 			}
 			continue
 		}
+
+		adjustedIt := it
+		switch AfPerfer {
+		case 4:
+			if addr == "udp4" {
+				adjustedIt = it - AfPerferVal
+			}
+		case 6:
+			if addr == "udp6" {
+				adjustedIt = it - AfPerferVal
+			}
+		}
+
+		// Add to legacy map
 		if val, ok := et.trymap_super[url]; ok {
 			if et.peer.device.LogLevel.LogInternal {
 				fmt.Printf("Internal: Peer %v : Update trylist(super) %v\n", et.peer.ID.ToString(), url)
@@ -90,12 +164,39 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 			}
 			newmap_super[url] = &endpoint_tryitem{
 				URL:      url,
-				lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(it)),
+				lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(adjustedIt)),
 				firstTry: time.Time{},
 			}
 		}
+
+		// Also add to AF-specific map
+		if addr == "udp4" || addr == "udp" {
+			if val, ok := et.trymap_super_v4[connIP]; ok {
+				newmap_super_v4[connIP] = val
+			} else {
+				newmap_super_v4[connIP] = &endpoint_tryitem{
+					URL:      connIP,
+					lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(adjustedIt)),
+					firstTry: time.Time{},
+				}
+			}
+		}
+		if addr == "udp6" {
+			if val, ok := et.trymap_super_v6[connIP]; ok {
+				newmap_super_v6[connIP] = val
+			} else {
+				newmap_super_v6[connIP] = &endpoint_tryitem{
+					URL:      connIP,
+					lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(adjustedIt)),
+					firstTry: time.Time{},
+				}
+			}
+		}
 	}
+
 	et.trymap_super = newmap_super
+	et.trymap_super_v4 = newmap_super_v4
+	et.trymap_super_v6 = newmap_super_v6
 }
 
 func (et *endpoint_trylist) UpdateP2P(url string) {
@@ -243,11 +344,27 @@ type Peer struct {
 	keypairs         Keypairs
 	handshake        Handshake
 	device           *Device
-	endpoint         conn.Endpoint    // Primary endpoint (UDP)
-	faketcpEndpoint  conn.Endpoint    // FakeTCP endpoint (fallback)
+	endpoint         conn.Endpoint    // Primary endpoint (UDP) - points to active AF endpoint
+	faketcpEndpoint  conn.Endpoint    // FakeTCP endpoint (fallback) - points to active AF endpoint
 	endpoint_trylist *endpoint_trylist
 	udpFailed        AtomicBool       // Track if UDP communication has failed
 	lastUDPSuccess   atomic.Value     // *time.Time - last successful UDP communication
+
+	// Dual-stack endpoints for IPv4/IPv6 failover
+	endpointIPv4        conn.Endpoint // IPv4 UDP endpoint
+	endpointIPv6        conn.Endpoint // IPv6 UDP endpoint
+	faketcpEndpointIPv4 conn.Endpoint // IPv4 FakeTCP endpoint
+	faketcpEndpointIPv6 conn.Endpoint // IPv6 FakeTCP endpoint
+
+	// Dual-stack health tracking
+	ipv4Failed      AtomicBool   // Track if IPv4 communication has failed
+	ipv6Failed      AtomicBool   // Track if IPv6 communication has failed
+	lastIPv4Success atomic.Value // *time.Time - last successful IPv4 communication
+	lastIPv6Success atomic.Value // *time.Time - last successful IPv6 communication
+	activeAF        atomic.Value // *int - currently active address family (4 or 6)
+
+	// IPv6 recovery tracking for delayed failback
+	ipv6RecoveryStartTime atomic.Value // *time.Time - when IPv6 recovery started
 
 	LastPacketReceivedAdd1Sec atomic.Value // *time.Time
 
@@ -401,6 +518,162 @@ func (peer *Peer) IsPeerAlive() bool {
 	return true
 }
 
+// getActiveEndpoint returns the current primary endpoint based on activeAF
+func (peer *Peer) getActiveEndpoint() conn.Endpoint {
+	activeAFPtr := peer.activeAF.Load()
+	if activeAFPtr == nil {
+		// No active AF set, return first available
+		if peer.endpointIPv6 != nil {
+			return peer.endpointIPv6
+		}
+		return peer.endpointIPv4
+	}
+
+	activeAF := *activeAFPtr.(*int)
+	if activeAF == 6 && peer.endpointIPv6 != nil && !peer.ipv6Failed.Get() {
+		return peer.endpointIPv6
+	}
+	if activeAF == 4 && peer.endpointIPv4 != nil && !peer.ipv4Failed.Get() {
+		return peer.endpointIPv4
+	}
+
+	// Fallback to any available endpoint
+	if peer.endpointIPv4 != nil && !peer.ipv4Failed.Get() {
+		return peer.endpointIPv4
+	}
+	if peer.endpointIPv6 != nil && !peer.ipv6Failed.Get() {
+		return peer.endpointIPv6
+	}
+
+	return nil
+}
+
+// tryIPv6Send attempts to send buffer via IPv6 endpoint
+// Returns (sent bool, error)
+func (peer *Peer) tryIPv6Send(buffer []byte) (bool, error) {
+	if peer.endpointIPv6 == nil {
+		return false, nil
+	}
+
+	// Skip if IPv6 is marked as failed
+	if peer.ipv6Failed.Get() {
+		return false, nil
+	}
+
+	err := peer.device.net.bind.Send(buffer, peer.endpointIPv6)
+	if err == nil {
+		// IPv6 success - update last success time
+		now := time.Now()
+		peer.lastIPv6Success.Store(&now)
+		peer.ipv6Failed.Set(false)
+
+		// Clear recovery timer if we were recovering
+		peer.ipv6RecoveryStartTime.Store((*time.Time)(nil))
+
+		if peer.device.LogLevel.LogInternal {
+			fmt.Printf("Internal: Sent packet via IPv6 for peer %v\n", peer.ID)
+		}
+		return true, nil
+	}
+
+	// IPv6 failed - mark it and trigger failover
+	peer.device.log.Verbosef("IPv6 send failed for peer %v: %v", peer.ID, err)
+	peer.ipv6Failed.Set(true)
+
+	// Switch to IPv4 if available
+	if peer.endpointIPv4 != nil {
+		newAF := 4
+		peer.activeAF.Store(&newAF)
+		peer.Lock()
+		peer.endpoint = peer.endpointIPv4
+		peer.faketcpEndpoint = peer.faketcpEndpointIPv4
+		peer.Unlock()
+		peer.device.log.Verbosef("Failed over from IPv6 to IPv4 for peer %v", peer.ID)
+	}
+
+	return false, err
+}
+
+// tryIPv4Send attempts to send buffer via IPv4 endpoint
+// Returns (sent bool, error)
+func (peer *Peer) tryIPv4Send(buffer []byte) (bool, error) {
+	if peer.endpointIPv4 == nil {
+		return false, nil
+	}
+
+	// Skip if IPv4 is marked as failed
+	if peer.ipv4Failed.Get() {
+		return false, nil
+	}
+
+	err := peer.device.net.bind.Send(buffer, peer.endpointIPv4)
+	if err == nil {
+		// IPv4 success - update last success time
+		now := time.Now()
+		peer.lastIPv4Success.Store(&now)
+		peer.ipv4Failed.Set(false)
+
+		if peer.device.LogLevel.LogInternal {
+			fmt.Printf("Internal: Sent packet via IPv4 for peer %v\n", peer.ID)
+		}
+		return true, nil
+	}
+
+	// IPv4 failed - mark it
+	peer.device.log.Verbosef("IPv4 send failed for peer %v: %v", peer.ID, err)
+	peer.ipv4Failed.Set(true)
+
+	return false, err
+}
+
+// tryFakeTCPSend attempts to send via FakeTCP (respecting activeAF)
+// Returns (sent bool, error)
+func (peer *Peer) tryFakeTCPSend(buffer []byte) (bool, error) {
+	if peer.device.net.faketcpBind == nil {
+		return false, nil
+	}
+
+	activeAFPtr := peer.activeAF.Load()
+	if activeAFPtr == nil {
+		return false, nil
+	}
+	activeAF := *activeAFPtr.(*int)
+
+	var faketcpEndpoint conn.Endpoint
+	var afName string
+
+	// Try FakeTCP for active AF first
+	if activeAF == 6 && peer.faketcpEndpointIPv6 != nil {
+		faketcpEndpoint = peer.faketcpEndpointIPv6
+		afName = "IPv6"
+	} else if activeAF == 4 && peer.faketcpEndpointIPv4 != nil {
+		faketcpEndpoint = peer.faketcpEndpointIPv4
+		afName = "IPv4"
+	} else {
+		// Fallback to any available FakeTCP endpoint
+		if peer.faketcpEndpointIPv4 != nil {
+			faketcpEndpoint = peer.faketcpEndpointIPv4
+			afName = "IPv4"
+		} else if peer.faketcpEndpointIPv6 != nil {
+			faketcpEndpoint = peer.faketcpEndpointIPv6
+			afName = "IPv6"
+		}
+	}
+
+	if faketcpEndpoint == nil {
+		return false, nil
+	}
+
+	err := peer.device.net.faketcpBind.Send(buffer, faketcpEndpoint)
+	if err == nil {
+		peer.device.log.Verbosef("Sent packet via FakeTCP %s for peer %v", afName, peer.ID)
+		return true, nil
+	}
+
+	peer.device.log.Errorf("FakeTCP %s send failed for peer %v: %v", afName, peer.ID, err)
+	return false, err
+}
+
 func (peer *Peer) SendBuffer(buffer []byte) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
@@ -412,52 +685,97 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 	peer.RLock()
 	defer peer.RUnlock()
 
-	if peer.endpoint == nil && peer.faketcpEndpoint == nil {
+	// Check if any endpoint is available
+	if peer.endpoint == nil && peer.faketcpEndpoint == nil &&
+	   peer.endpointIPv4 == nil && peer.endpointIPv6 == nil {
 		return errors.New("no known endpoint for peer")
 	}
 
 	var err error
 	var sent bool
 
-	// Try UDP first if available and not marked as failed
-	if peer.endpoint != nil && !peer.udpFailed.Get() {
-		err = peer.device.net.bind.Send(buffer, peer.endpoint)
-		if err == nil {
-			// UDP success - update last success time
-			now := time.Now()
-			peer.lastUDPSuccess.Store(&now)
-			atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
-			sent = true
+	// Determine if dual-stack is enabled
+	dualStackEnabled := false
+	if !peer.device.IsSuperNode && peer.endpointIPv4 != nil && peer.endpointIPv6 != nil {
+		dualStackEnabled = peer.device.EdgeConfig.DualStack.Enabled
+	}
 
-			// If UDP was previously failed, mark it as recovered
-			if peer.udpFailed.Get() {
-				peer.device.log.Verbosef("UDP communication recovered for peer %v", peer.ID)
-				peer.udpFailed.Set(false)
+	if dualStackEnabled {
+		// Dual-stack failover logic: IPv6 primary, IPv4 hot standby
+		activeAFPtr := peer.activeAF.Load()
+		if activeAFPtr == nil {
+			// Initialize to IPv6 if no active AF is set
+			defaultAF := 6
+			peer.activeAF.Store(&defaultAF)
+			activeAFPtr = peer.activeAF.Load()
+		}
+		activeAF := *activeAFPtr.(*int)
+
+		if activeAF == 6 {
+			// Try IPv6 → IPv4 → FakeTCP
+			sent, err = peer.tryIPv6Send(buffer)
+			if !sent {
+				sent, err = peer.tryIPv4Send(buffer)
+			}
+			if !sent {
+				sent, err = peer.tryFakeTCPSend(buffer)
 			}
 		} else {
-			// UDP failed - try FakeTCP
-			peer.device.log.Verbosef("UDP send failed for peer %v: %v, trying FakeTCP", peer.ID, err)
-			peer.udpFailed.Set(true)
+			// activeAF == 4: Try IPv4 → IPv6 (for recovery) → FakeTCP
+			sent, err = peer.tryIPv4Send(buffer)
+			if !sent {
+				// Try IPv6 to check if it has recovered
+				sent, err = peer.tryIPv6Send(buffer)
+				if sent {
+					// IPv6 recovered! Switch back (will be handled in tryIPv6Send)
+					peer.device.log.Verbosef("IPv6 recovered for peer %v", peer.ID)
+				}
+			}
+			if !sent {
+				sent, err = peer.tryFakeTCPSend(buffer)
+			}
+		}
+	} else {
+		// Legacy single-endpoint logic (backward compatibility)
+		// Try UDP first if available and not marked as failed
+		if peer.endpoint != nil && !peer.udpFailed.Get() {
+			err = peer.device.net.bind.Send(buffer, peer.endpoint)
+			if err == nil {
+				// UDP success - update last success time
+				now := time.Now()
+				peer.lastUDPSuccess.Store(&now)
+				sent = true
+
+				// If UDP was previously failed, mark it as recovered
+				if peer.udpFailed.Get() {
+					peer.device.log.Verbosef("UDP communication recovered for peer %v", peer.ID)
+					peer.udpFailed.Set(false)
+				}
+			} else {
+				// UDP failed - try FakeTCP
+				peer.device.log.Verbosef("UDP send failed for peer %v: %v, trying FakeTCP", peer.ID, err)
+				peer.udpFailed.Set(true)
+			}
+		}
+
+		// If UDP failed or was skipped, try FakeTCP
+		if !sent && peer.faketcpEndpoint != nil && peer.device.net.faketcpBind != nil {
+			err = peer.device.net.faketcpBind.Send(buffer, peer.faketcpEndpoint)
+			if err == nil {
+				sent = true
+				peer.device.log.Verbosef("Sent packet via FakeTCP for peer %v", peer.ID)
+			} else {
+				peer.device.log.Errorf("FakeTCP send also failed for peer %v: %v", peer.ID, err)
+			}
 		}
 	}
 
-	// If UDP failed or was skipped, try FakeTCP
-	if !sent && peer.faketcpEndpoint != nil && peer.device.net.faketcpBind != nil {
-		err = peer.device.net.faketcpBind.Send(buffer, peer.faketcpEndpoint)
-		if err == nil {
-			atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
-			sent = true
-			peer.device.log.Verbosef("Sent packet via FakeTCP for peer %v", peer.ID)
-		} else {
-			peer.device.log.Errorf("FakeTCP send also failed for peer %v: %v", peer.ID, err)
-		}
+	if sent {
+		atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
+		return nil
 	}
 
-	if !sent {
-		return errors.New(fmt.Sprintf("failed to send packet via both UDP and FakeTCP: %v", err))
-	}
-
-	return nil
+	return errors.New(fmt.Sprintf("failed to send packet: %v", err))
 }
 
 func (peer *Peer) String() string {
@@ -603,26 +921,11 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	if peer.device.LogLevel.LogInternal {
 		fmt.Printf("Internal: Set endpoint to %v for NodeID: %v static:%v\n", connurl, peer.ID.ToString(), static)
 	}
-	var err error
-	_, connIP, err := conn.LookupIP(connurl, af, af_perfer)
-	if err != nil {
-		return err
-	}
-	if peer.GetEndpointDstStr() == connIP {
-		//if peer.device.LogLevel.LogInternal {
-		//	fmt.Printf("Internal: Same as original endpoint:%v, skip for NodeID:%v\n", connurl, peer.ID.ToString())
-		//}
-		return nil
-	}
 
-	// Extract IP address from connIP (format: "ip:port")
-	host, _, err := net.SplitHostPort(connIP)
-	if err != nil {
-		return fmt.Errorf("failed to parse endpoint %s: %w", connIP, err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return fmt.Errorf("invalid IP address in endpoint: %s", host)
+	// Check if dual-stack is enabled
+	dualStackEnabled := true
+	if !peer.device.IsSuperNode {
+		dualStackEnabled = peer.device.EdgeConfig.DualStack.Enabled
 	}
 
 	// Check if private IPs are allowed
@@ -633,32 +936,139 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 		allowPrivate = peer.device.EdgeConfig.AllowPrivateIP
 	}
 
-	// Reject private/non-routable IPs unless explicitly allowed
-	if !allowPrivate && conn.IsPrivateIP(ip) {
-		return fmt.Errorf("connection to private/non-routable IP %s rejected (set AllowPrivateIP: true to allow)", connIP)
+	var err error
+	var v4Addr, v6Addr string
+	var primaryAF int
+
+	// Try dual-stack lookup if both AFs enabled and dual-stack enabled
+	if dualStackEnabled && af.IPv4 && af.IPv6 {
+		_, v4Addr, _, v6Addr, primaryAF, err = conn.LookupIPDualStack(connurl, af, af_perfer)
+		if err != nil {
+			// If dual-stack fails, fall back to single AF lookup
+			_, v4Addr, err = conn.LookupIP(connurl, af, af_perfer)
+			if err != nil {
+				return err
+			}
+			primaryAF = 4
+		}
+	} else {
+		// Single AF or dual-stack disabled
+		_, v4Addr, err = conn.LookupIP(connurl, af, af_perfer)
+		if err != nil {
+			return err
+		}
+		primaryAF = 4
+		if af.IPv6 && !af.IPv4 {
+			primaryAF = 6
+			v6Addr = v4Addr
+			v4Addr = ""
+		}
 	}
 
-	// Set up UDP endpoint
-	endpoint, err := peer.device.net.bind.ParseEndpoint(connIP)
-	if err != nil {
-		return err
+	// Validate and setup IPv4 endpoint
+	if v4Addr != "" {
+		host, _, err := net.SplitHostPort(v4Addr)
+		if err == nil {
+			ip := net.ParseIP(host)
+			if ip != nil {
+				// Check private IP restriction
+				if allowPrivate || !conn.IsPrivateIP(ip) {
+					// Set up IPv4 UDP endpoint
+					endpoint, err := peer.device.net.bind.ParseEndpoint(v4Addr)
+					if err == nil {
+						peer.Lock()
+						peer.endpointIPv4 = endpoint
+						peer.ipv4Failed.Set(false)
+						peer.Unlock()
+						if peer.device.LogLevel.LogInternal {
+							fmt.Printf("Internal: Set IPv4 endpoint to %v for NodeID: %v\n", v4Addr, peer.ID.ToString())
+						}
+					}
+
+					// Set up IPv4 FakeTCP endpoint if enabled
+					if peer.device.net.faketcpBind != nil {
+						faketcpEndpoint, err := peer.device.net.faketcpBind.ParseEndpoint(v4Addr)
+						if err == nil {
+							peer.Lock()
+							peer.faketcpEndpointIPv4 = faketcpEndpoint
+							peer.Unlock()
+						}
+					}
+				} else if peer.device.LogLevel.LogInternal {
+					fmt.Printf("Internal: Skipped private IPv4 endpoint %v for NodeID: %v\n", v4Addr, peer.ID.ToString())
+				}
+			}
+		}
 	}
+
+	// Validate and setup IPv6 endpoint
+	if v6Addr != "" {
+		host, _, err := net.SplitHostPort(v6Addr)
+		if err == nil {
+			ip := net.ParseIP(host)
+			if ip != nil {
+				// Check private IP restriction
+				if allowPrivate || !conn.IsPrivateIP(ip) {
+					// Set up IPv6 UDP endpoint
+					endpoint, err := peer.device.net.bind.ParseEndpoint(v6Addr)
+					if err == nil {
+						peer.Lock()
+						peer.endpointIPv6 = endpoint
+						peer.ipv6Failed.Set(false)
+						peer.Unlock()
+						if peer.device.LogLevel.LogInternal {
+							fmt.Printf("Internal: Set IPv6 endpoint to %v for NodeID: %v\n", v6Addr, peer.ID.ToString())
+						}
+					}
+
+					// Set up IPv6 FakeTCP endpoint if enabled
+					if peer.device.net.faketcpBind != nil {
+						faketcpEndpoint, err := peer.device.net.faketcpBind.ParseEndpoint(v6Addr)
+						if err == nil {
+							peer.Lock()
+							peer.faketcpEndpointIPv6 = faketcpEndpoint
+							peer.Unlock()
+						}
+					}
+				} else if peer.device.LogLevel.LogInternal {
+					fmt.Printf("Internal: Skipped private IPv6 endpoint %v for NodeID: %v\n", v6Addr, peer.ID.ToString())
+				}
+			}
+		}
+	}
+
+	// Ensure at least one endpoint was set
+	if peer.endpointIPv4 == nil && peer.endpointIPv6 == nil {
+		return fmt.Errorf("failed to set any valid endpoint for %s", connurl)
+	}
+
+	// Set active AF and update legacy endpoint fields
+	peer.activeAF.Store(&primaryAF)
 	peer.StaticConn = static
 	peer.ConnURL = connurl
 	peer.ConnAF = af
-	peer.SetEndpointFromPacket(endpoint)
 
-	// Also set up FakeTCP endpoint if FakeTCP is enabled
-	if peer.device.net.faketcpBind != nil {
-		faketcpEndpoint, err := peer.device.net.faketcpBind.ParseEndpoint(connIP)
-		if err != nil {
-			peer.device.log.Verbosef("Failed to parse FakeTCP endpoint for %v: %v", peer.ID, err)
-		} else {
-			peer.Lock()
-			peer.faketcpEndpoint = faketcpEndpoint
-			peer.Unlock()
-			peer.device.log.Verbosef("Set FakeTCP endpoint for peer %v to %v", peer.ID, connIP)
+	// Update legacy endpoint field to point to active AF
+	peer.Lock()
+	if primaryAF == 6 && peer.endpointIPv6 != nil {
+		peer.endpoint = peer.endpointIPv6
+		peer.faketcpEndpoint = peer.faketcpEndpointIPv6
+	} else if peer.endpointIPv4 != nil {
+		peer.endpoint = peer.endpointIPv4
+		peer.faketcpEndpoint = peer.faketcpEndpointIPv4
+	} else {
+		// Fallback to whatever is available
+		if peer.endpointIPv6 != nil {
+			peer.endpoint = peer.endpointIPv6
+			peer.faketcpEndpoint = peer.faketcpEndpointIPv6
+			primaryAF = 6
+			peer.activeAF.Store(&primaryAF)
 		}
+	}
+	peer.Unlock()
+
+	if peer.device.LogLevel.LogInternal {
+		fmt.Printf("Internal: Active AF=%v for NodeID: %v\n", primaryAF, peer.ID.ToString())
 	}
 
 	return nil

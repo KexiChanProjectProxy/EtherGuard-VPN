@@ -391,6 +391,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 		} else {
 			go device.RoutineTryReceivedEndpoint()
 			go device.RoutineDetectOfflineAndTryNextEndpoint()
+			go device.RoutineIPv6Recovery()
 			go device.RoutineRegister(device.Chan_SendRegisterStart)
 			go device.RoutineSendPing(device.Chan_SendPingStart)
 			go device.RoutineSpreadAllMyNeighbor()
