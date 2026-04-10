@@ -14,7 +14,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.21
+          go-version: 1.26.2
       - name: Install requirements
         run: |
           echo "deb [trusted=yes] https://packagecloud.io/fdio/release/ubuntu focal main" | sudo tee -a /etc/apt/sources.list.d/99fd.io.list > /dev/null
@@ -62,7 +62,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v2
         with:
-          go-version: 1.21
+          go-version: 1.26.2
       - name: Run regression tests
         run: go test -v ./...
       - uses: uraimo/run-on-arch-action@v2.0.5
@@ -82,15 +82,23 @@ jobs:
           install: |
             apt-get -y update
 
-            apt install software-properties-common curl -y
+            apt-get install -y curl
 
             echo "deb [trusted=yes] https://packagecloud.io/fdio/release/ubuntu focal main" > /etc/apt/sources.list.d/99fd.io.list
             curl -L https://packagecloud.io/fdio/release/gpgkey | apt-key add -
-            add-apt-repository ppa:longsleep/golang-backports
-
             apt-get -y update
             apt-get install -y libmemif libmemif-dev || true
-            apt-get install -y wireguard-tools golang-go build-essential git
+            apt-get install -y wireguard-tools build-essential git
+            case "${artifact_dir}" in
+              aarch64) GO_ARCH=arm64 ;;
+              armv7) GO_ARCH=armv6l ;;
+              *) echo "Unsupported arch: ${artifact_dir}"; exit 1 ;;
+            esac
+            curl -L "https://go.dev/dl/go1.26.2.linux-${GO_ARCH}.tar.gz" -o /tmp/go1.26.2.tar.gz
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go1.26.2.tar.gz
+            ln -sf /usr/local/go/bin/go /usr/local/bin/go
+            ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
           run: |
             make all static
             mkdir /artifacts/${artifact_dir}
