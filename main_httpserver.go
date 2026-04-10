@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -118,7 +119,7 @@ func extractParamsStr(params url.Values, key string, w http.ResponseWriter) (str
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(errstr))
 		}
-		return "", fmt.Errorf(errstr)
+		return "", errors.New(errstr)
 	}
 	return valA[0], nil
 }
@@ -135,7 +136,7 @@ func extractParamsFloat(params url.Values, key string, bitSize int, w http.Respo
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(errstr))
 		}
-		return 0, fmt.Errorf(errstr)
+		return 0, errors.New(errstr)
 	}
 	return ret, nil
 }
@@ -152,7 +153,7 @@ func extractParamsUint(params url.Values, key string, bitSize int, w http.Respon
 			w.WriteHeader(http.StatusBadRequest)
 			w.Write([]byte(errstr))
 		}
-		return 0, fmt.Errorf(errstr)
+		return 0, errors.New(errstr)
 	}
 	return ret, nil
 }
