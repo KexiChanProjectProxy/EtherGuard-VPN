@@ -223,7 +223,9 @@ func (device *Device) RoutineReadFromTUN() {
 		elem = device.NewOutboundElement()
 		// read packet
 		offset := MessageTransportHeaderSize
+		readStart := device.progress.tunReadWaitStart()
 		size, err := device.tap.device.Read(elem.buffer[:], offset+path.EgHeaderLen)
+		device.progress.tunReadWaitDone(readStart, size)
 
 		if err != nil {
 			if !device.isClosed() {
@@ -277,10 +279,10 @@ func (device *Device) RoutineReadFromTUN() {
 				if peer == nil {
 					continue
 				}
-				device.chan_send_packet <- &packet_send_params{
+				device.enqueueSendPacket(&packet_send_params{
 					peer: peer,
 					elem: elem,
-				}
+				})
 			}
 		} else {
 			device.BoardcastPacket(make(map[mtypes.Vertex]bool, 0), elem.Type, elem.TTL, elem.packet, offset)

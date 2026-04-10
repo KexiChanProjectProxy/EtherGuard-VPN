@@ -39,6 +39,26 @@ type endpoint_trylist struct {
 	trymap_p2p   map[string]*endpoint_tryitem
 }
 
+func endpointTryItemLess(a *endpoint_tryitem, b *endpoint_tryitem) bool {
+	if a == nil {
+		return false
+	}
+	if b == nil {
+		return true
+	}
+	if a.lastTry.Before(b.lastTry) {
+		return true
+	}
+	if b.lastTry.Before(a.lastTry) {
+		return false
+	}
+	return a.URL < b.URL
+}
+
+func (et *endpoint_trylist) p2pExpiredLocked(item *endpoint_tryitem, now time.Time) bool {
+	return !item.firstTry.IsZero() && item.firstTry.Add(et.timeout).Before(now)
+}
+
 func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.EnabledAf) *endpoint_trylist {
 	return &endpoint_trylist{
 		timeout:      timeout,
@@ -63,6 +83,7 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 			continue
 		}
 		addr, _, err := conn.LookupIP(url, et.enabledAf, AfPerfer)
+		transient := conn.IsTransientEndpointError(err)
 		switch AfPerfer {
 		case 4:
 			if addr == "udp4" {
@@ -74,10 +95,16 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 			}
 		}
 		if err != nil {
-			if et.peer.device.LogLevel.LogInternal {
-				fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), url, err)
+			if transient {
+				if et.peer.device.LogLevel.LogInternal {
+					fmt.Printf("Internal: Peer %v : Retain trylist(super) %v after transient error: %v\n", et.peer.ID.ToString(), url, err)
+				}
+			} else {
+				if et.peer.device.LogLevel.LogInternal {
+					fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), url, err)
+				}
+				continue
 			}
-			continue
 		}
 		if val, ok := et.trymap_super[url]; ok {
 			if et.peer.device.LogLevel.LogInternal {
@@ -100,20 +127,26 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 
 func (et *endpoint_trylist) UpdateP2P(url string) {
 	_, _, err := conn.LookupIP(url, et.enabledAf, 0)
-	if err != nil {
+	if err != nil && !conn.IsTransientEndpointError(err) {
 		return
 	}
+	now := time.Now()
 	et.Lock()
 	defer et.Unlock()
-	if _, ok := et.trymap_p2p[url]; !ok {
+	if current, ok := et.trymap_p2p[url]; ok {
+		if !et.p2pExpiredLocked(current, now) {
+			return
+		}
 		if et.peer.device.LogLevel.LogInternal {
-			fmt.Printf("Internal: Peer %v : Add trylist(p2p) %v\n", et.peer.ID.ToString(), url)
+			fmt.Printf("Internal: Peer %v : Refresh trylist(p2p) %v\n", et.peer.ID.ToString(), url)
 		}
-		et.trymap_p2p[url] = &endpoint_tryitem{
-			URL:      url,
-			lastTry:  time.Now(),
-			firstTry: time.Time{},
-		}
+	} else if et.peer.device.LogLevel.LogInternal {
+		fmt.Printf("Internal: Peer %v : Add trylist(p2p) %v\n", et.peer.ID.ToString(), url)
+	}
+	et.trymap_p2p[url] = &endpoint_tryitem{
+		URL:      url,
+		lastTry:  now,
+		firstTry: time.Time{},
 	}
 }
 
@@ -125,37 +158,35 @@ func (et *endpoint_trylist) Delete(url string) {
 }
 
 func (et *endpoint_trylist) GetNextTry() (bool, string) {
-	et.RLock()
-	defer et.RUnlock()
+	now := time.Now()
+	et.Lock()
+	defer et.Unlock()
 	var smallest *endpoint_tryitem
-	FastTry := true
 	for _, v := range et.trymap_super {
-		if smallest == nil || smallest.lastTry.After(v.lastTry) {
+		if endpointTryItemLess(v, smallest) {
 			smallest = v
 		}
 	}
 	for url, v := range et.trymap_p2p {
-		if v.firstTry.After(time.Time{}) && v.firstTry.Add(et.timeout).Before(time.Now()) {
+		if et.p2pExpiredLocked(v, now) {
 			if et.peer.device.LogLevel.LogInternal {
 				fmt.Printf("Internal: Peer %v : Delete trylist(p2p) %v\n", et.peer.ID.ToString(), url)
 			}
 			delete(et.trymap_p2p, url)
+			continue
 		}
-		if smallest == nil || smallest.lastTry.After(v.lastTry) {
+		if endpointTryItemLess(v, smallest) {
 			smallest = v
 		}
 	}
 	if smallest == nil {
 		return false, ""
 	}
-	smallest.lastTry = time.Now()
-	if !smallest.firstTry.After(time.Time{}) {
-		smallest.firstTry = time.Now()
+	smallest.lastTry = now
+	if smallest.firstTry.IsZero() {
+		smallest.firstTry = now
 	}
-	if smallest.firstTry.Add(et.timeout).Before(time.Now()) {
-		FastTry = false
-	}
-	return FastTry, smallest.URL
+	return smallest.firstTry.Add(et.timeout).After(now), smallest.URL
 }
 
 type filterwindow struct {
@@ -284,6 +315,10 @@ type Peer struct {
 
 	state struct {
 		sync.Mutex // protects against concurrent Start/Stop
+	}
+
+	retry struct {
+		holePunching AtomicBool
 	}
 
 	queue struct {

@@ -13,6 +13,8 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 // A ReceiveFunc receives a single inbound packet from the network.
@@ -124,7 +126,53 @@ type Endpoint interface {
 var (
 	ErrBindAlreadyOpen   = errors.New("bind is already open")
 	ErrWrongEndpointType = errors.New("endpoint type does not correspond with bind type")
+	ErrTransientEndpoint = errors.New("transient endpoint dial failure")
 )
+
+type lookupIPError struct {
+	err       error
+	transient bool
+}
+
+func (e *lookupIPError) Error() string { return e.err.Error() }
+
+func (e *lookupIPError) Unwrap() error { return e.err }
+
+func (e *lookupIPError) Is(target error) bool {
+	return target == ErrTransientEndpoint && e.transient
+}
+
+func IsTransientEndpointError(err error) bool {
+	return errors.Is(err, ErrTransientEndpoint)
+}
+
+func isTransientRouteError(err error) bool {
+	return errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH)
+}
+
+var (
+	lookupIPDialMu sync.RWMutex
+	lookupIPDial   = net.Dial
+)
+
+func dialLookupIP(network, address string) (net.Conn, error) {
+	lookupIPDialMu.RLock()
+	dial := lookupIPDial
+	lookupIPDialMu.RUnlock()
+	return dial(network, address)
+}
+
+func SetLookupIPDialForTest(fn func(network, address string) (net.Conn, error)) func() {
+	lookupIPDialMu.Lock()
+	prev := lookupIPDial
+	lookupIPDial = fn
+	lookupIPDialMu.Unlock()
+	return func() {
+		lookupIPDialMu.Lock()
+		lookupIPDial = prev
+		lookupIPDialMu.Unlock()
+	}
+}
 
 func (fn ReceiveFunc) PrettyName() string {
 	name := runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
@@ -205,6 +253,7 @@ func LookupIP(host_port string, Af EnabledAf, AfPrefer int) (string, string, err
 	}
 	var conn net.Conn
 	var err error
+	transient := false
 	var af_try_order []string
 
 	var NetStr string
@@ -227,15 +276,18 @@ func LookupIP(host_port string, Af EnabledAf, AfPrefer int) (string, string, err
 		return "", "", fmt.Errorf("no EnabledAf:%v", Af)
 	}
 	for _, af := range af_try_order {
-		conn, err = net.Dial(af, host_port)
+		conn, err = dialLookupIP(af, host_port)
 		if err == nil {
 			NetStr = af
 			break
 		}
+		if isTransientRouteError(err) {
+			transient = true
+		}
 	}
 
 	if err != nil {
-		return "", "", err
+		return "", "", &lookupIPError{err: err, transient: transient}
 	}
 	defer conn.Close()
 	return NetStr, conn.RemoteAddr().String(), nil

@@ -41,6 +41,9 @@ jobs:
           sudo apt-get -y update
           sudo apt-get install -y wireguard-tools upx-ucl
 
+      - name: Run regression tests
+        run: go test -v ./...
+
       - name: Build x86_64
         run: |
           make all static
@@ -129,6 +132,12 @@ jobs:
           git describe --abbrev=0
           git describe --tags --abbrev=0
           echo $VERSION
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.21
+      - name: Run regression tests
+        run: go test -v ./...
       - uses: uraimo/run-on-arch-action@v2.0.5
         name: Build artifact
         id: build

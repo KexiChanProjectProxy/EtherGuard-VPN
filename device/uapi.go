@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,11 +47,41 @@ var byteBufferPool = &sync.Pool{
 	New: func() interface{} { return new(bytes.Buffer) },
 }
 
+const envEGUAPITrace = "EG_UAPI_TRACE"
+
+func UAPITraceEnabled() bool {
+	return os.Getenv(envEGUAPITrace) != ""
+}
+
+func TraceUAPI(logger *Logger, format string, args ...interface{}) {
+	if logger == nil || !UAPITraceEnabled() {
+		return
+	}
+	logger.Errorf("UAPI trace: "+format, args...)
+}
+
+func uapiRemoteAddrString(conn net.Conn) string {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return "<unknown>"
+	}
+	return conn.RemoteAddr().String()
+}
+
 // IpcGetOperation implements the WireGuard configuration protocol "get" operation.
 // See https://www.wireguard.com/xplatform/#configuration-protocol for details.
 func (device *Device) IpcGetOperation(w io.Writer) error {
+	opStart := time.Now()
+	TraceUAPI(device.log, "get begin")
+	lockWaitStart := time.Now()
+	TraceUAPI(device.log, "get ipcMutex wait-begin mode=read")
 	device.ipcMutex.RLock()
-	defer device.ipcMutex.RUnlock()
+	lockAcquiredAt := time.Now()
+	TraceUAPI(device.log, "get ipcMutex wait-end mode=read wait=%s", lockAcquiredAt.Sub(lockWaitStart))
+	defer func() {
+		TraceUAPI(device.log, "get ipcMutex hold-end mode=read held=%s", time.Since(lockAcquiredAt))
+		device.ipcMutex.RUnlock()
+		TraceUAPI(device.log, "get end total=%s", time.Since(opStart))
+	}()
 
 	buf := byteBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -83,6 +114,8 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 
 		device.peers.RLock()
 		defer device.peers.RUnlock()
+		TraceUAPI(device.log, "get serialize begin peers=%d", len(device.peers.keyMap))
+		peerIterationStart := time.Now()
 
 		// serialize device related values
 
@@ -123,12 +156,17 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("allowed_ip=%s/%d", net.IPv4zero.String(), 0)
 			sendf("allowed_ip=%s/%d", net.IPv6zero.String(), 0)
 		}
+		TraceUAPI(device.log, "get serialize end peers=%d duration=%s", len(device.peers.keyMap), time.Since(peerIterationStart))
 	}()
 
 	// send lines (does not require resource locks)
+	writeStart := time.Now()
+	TraceUAPI(device.log, "get write begin bytes=%d", buf.Len())
 	if _, err := w.Write(buf.Bytes()); err != nil {
+		TraceUAPI(device.log, "get write end bytes=%d duration=%s err=%v", buf.Len(), time.Since(writeStart), err)
 		return ipcErrorf(ipc.IpcErrorIO, "failed to write output: %w", err)
 	}
+	TraceUAPI(device.log, "get write end bytes=%d duration=%s", buf.Len(), time.Since(writeStart))
 
 	return nil
 }
@@ -136,8 +174,18 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 // IpcSetOperation implements the WireGuard configuration protocol "set" operation.
 // See https://www.wireguard.com/xplatform/#configuration-protocol for details.
 func (device *Device) IpcSetOperation(r io.Reader) (err error) {
+	opStart := time.Now()
+	TraceUAPI(device.log, "set begin")
+	lockWaitStart := time.Now()
+	TraceUAPI(device.log, "set ipcMutex wait-begin mode=write")
 	device.ipcMutex.Lock()
-	defer device.ipcMutex.Unlock()
+	lockAcquiredAt := time.Now()
+	TraceUAPI(device.log, "set ipcMutex wait-end mode=write wait=%s", lockAcquiredAt.Sub(lockWaitStart))
+	defer func() {
+		TraceUAPI(device.log, "set ipcMutex hold-end mode=write held=%s", time.Since(lockAcquiredAt))
+		device.ipcMutex.Unlock()
+		TraceUAPI(device.log, "set end total=%s err=%v", time.Since(opStart), err)
+	}()
 
 	defer func() {
 		if err != nil {
@@ -147,12 +195,17 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 
 	peer := new(ipcSetPeer)
 	deviceConfig := true
+	lineCount := 0
+	applyStart := time.Now()
+	TraceUAPI(device.log, "set apply begin")
 
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
+		lineCount++
 		line := scanner.Text()
 		if line == "" {
 			// Blank line means terminate operation.
+			TraceUAPI(device.log, "set apply end lines=%d duration=%s terminated=blank-line", lineCount, time.Since(applyStart))
 			return nil
 		}
 		parts := strings.Split(line, "=")
@@ -190,6 +243,7 @@ func (device *Device) IpcSetOperation(r io.Reader) (err error) {
 	if err := scanner.Err(); err != nil {
 		return ipcErrorf(ipc.IpcErrorIO, "failed to read input: %w", err)
 	}
+	TraceUAPI(device.log, "set apply end lines=%d duration=%s terminated=eof", lineCount, time.Since(applyStart))
 	return nil
 }
 
@@ -351,9 +405,6 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 
 		// Send immediate keepalive if we're turning it on and before it wasn't on.
 		if old == 0 && secs != 0 {
-			if err != nil {
-				return ipcErrorf(ipc.IpcErrorIO, "failed to get tun device status: %w", err)
-			}
 			if device.isUp() && !peer.dummy {
 				peer.SendKeepalive()
 			}
@@ -405,7 +456,21 @@ func (device *Device) IpcSet(uapiConf string) error {
 }
 
 func (device *Device) IpcHandle(socket net.Conn) {
+	device.IpcHandleWithAcceptedAt(socket, time.Time{})
+}
+
+func (device *Device) IpcHandleWithAcceptedAt(socket net.Conn, acceptedAt time.Time) {
 	defer socket.Close()
+	remote := uapiRemoteAddrString(socket)
+	handleStart := time.Now()
+	if acceptedAt.IsZero() {
+		TraceUAPI(device.log, "handle begin remote=%s", remote)
+	} else {
+		TraceUAPI(device.log, "handle begin remote=%s accept-to-handle=%s", remote, handleStart.Sub(acceptedAt))
+	}
+	defer func() {
+		TraceUAPI(device.log, "handle end remote=%s total=%s", remote, time.Since(handleStart))
+	}()
 
 	buffered := func(s io.ReadWriter) *bufio.ReadWriter {
 		reader := bufio.NewReader(s)
@@ -414,26 +479,37 @@ func (device *Device) IpcHandle(socket net.Conn) {
 	}(socket)
 
 	for {
+		readStart := time.Now()
+		TraceUAPI(device.log, "handle op-read begin remote=%s", remote)
 		op, err := buffered.ReadString('\n')
 		if err != nil {
+			TraceUAPI(device.log, "handle op-read end remote=%s duration=%s err=%v", remote, time.Since(readStart), err)
 			return
 		}
+		TraceUAPI(device.log, "handle op-read end remote=%s duration=%s op=%q", remote, time.Since(readStart), strings.TrimSpace(op))
 
 		// handle operation
+		dispatchStart := time.Now()
 		switch op {
 		case "set=1\n":
+			TraceUAPI(device.log, "handle dispatch begin remote=%s op=set", remote)
 			err = device.IpcSetOperation(buffered.Reader)
+			TraceUAPI(device.log, "handle dispatch end remote=%s op=set duration=%s err=%v", remote, time.Since(dispatchStart), err)
 		case "get=1\n":
+			TraceUAPI(device.log, "handle dispatch begin remote=%s op=get", remote)
 			var nextByte byte
 			nextByte, err = buffered.ReadByte()
 			if err != nil {
+				TraceUAPI(device.log, "handle dispatch end remote=%s op=get duration=%s err=%v", remote, time.Since(dispatchStart), err)
 				return
 			}
 			if nextByte != '\n' {
 				err = ipcErrorf(ipc.IpcErrorInvalid, "trailing character in UAPI get: %q", nextByte)
+				TraceUAPI(device.log, "handle dispatch end remote=%s op=get duration=%s err=%v", remote, time.Since(dispatchStart), err)
 				break
 			}
 			err = device.IpcGetOperation(buffered.Writer)
+			TraceUAPI(device.log, "handle dispatch end remote=%s op=get duration=%s err=%v", remote, time.Since(dispatchStart), err)
 		default:
 			device.log.Errorf("invalid UAPI operation: %v", op)
 			return

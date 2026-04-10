@@ -79,6 +79,7 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 		fmt.Printf("Error read config: %v\t%v\n", configPath, err)
 		return err
 	}
+	capture := newSuperModeHangCaptureFromEnv(*pprofaddr)
 	httpobj.http_sconfig = &sconfig
 	http_econfig_tmp, _ := gencfg.GetExampleEdgeConf(sconfig.EdgeTemplate, true)
 	httpobj.http_econfig_tmp = &http_econfig_tmp
@@ -140,10 +141,12 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 		Event_server_pong:     make(chan mtypes.PongMsg, 1<<5),
 		Event_server_register: make(chan mtypes.RegisterMsg, 1<<5),
 	}
+	superProgress := newSuperEventProgress(capture.enabled)
 	httpobj.http_graph, err = path.NewGraph(3, true, sconfig.GraphRecalculateSetting, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
 	if err != nil {
 		return err
 	}
+	httpobj.http_graph.EnableProgressSnapshots(capture.enabled)
 	httpobj.http_graph.SetNHTable(httpobj.http_sconfig.NextHopTable)
 	if sconfig.GraphRecalculateSetting.StaticMode {
 		err = checkNhTable(httpobj.http_sconfig.NextHopTable, sconfig.Peers)
@@ -154,9 +157,21 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 	thetap4, _ := tap.CreateDummyTAP()
 	httpobj.http_device4 = device.NewDevice(thetap4, mtypes.NodeID_SuperNode, conn.NewDefaultBind(EnabledAf.GetOnly4(), bindmode, sconfig.FwMark), logger4, httpobj.http_graph, true, configPath, nil, &sconfig, httpobj.http_super_chains, Version)
 	defer httpobj.http_device4.Close()
+	httpobj.http_device4.EnableProgressSnapshots(capture.enabled)
+	httpobj.http_device4.SetSuperEventTraceHook(superProgress.trace)
 	thetap6, _ := tap.CreateDummyTAP()
 	httpobj.http_device6 = device.NewDevice(thetap6, mtypes.NodeID_SuperNode, conn.NewDefaultBind(EnabledAf.GetOnly6(), bindmode, sconfig.FwMark), logger6, httpobj.http_graph, true, configPath, nil, &sconfig, httpobj.http_super_chains, Version)
 	defer httpobj.http_device6.Close()
+	httpobj.http_device6.EnableProgressSnapshots(capture.enabled)
+	httpobj.http_device6.SetSuperEventTraceHook(superProgress.trace)
+	capture.addSection("device-v4-progress", httpobj.http_device4.ProgressSnapshotLines)
+	capture.addSection("device-v4-shutdown-trace", httpobj.http_device4.ShutdownTraceSnapshot)
+	capture.addSection("device-v6-progress", httpobj.http_device6.ProgressSnapshotLines)
+	capture.addSection("device-v6-shutdown-trace", httpobj.http_device6.ShutdownTraceSnapshot)
+	capture.addSection("super-events", func() []string {
+		return superProgress.snapshotLines(cap(httpobj.http_super_chains.Event_server_register), len(httpobj.http_super_chains.Event_server_register), cap(httpobj.http_super_chains.Event_server_pong), len(httpobj.http_super_chains.Event_server_pong))
+	})
+	capture.addSection("graph-ntp", httpobj.http_graph.ProgressSnapshotLines)
 	if sconfig.PrivKeyV4 != "" {
 		pk4, err := device.Str2PriKey(sconfig.PrivKeyV4)
 		if err != nil {
@@ -205,9 +220,9 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 		defer uapi6.Close()
 	}
 
-	go Event_server_event_hendler(httpobj.http_graph, httpobj.http_super_chains)
-	go RoutinePushSettings(mtypes.S2TD(sconfig.RePushConfigInterval))
-	go RoutineTimeoutCheck()
+	go Event_server_event_hendler(httpobj.http_graph, httpobj.http_super_chains, superProgress)
+	go RoutinePushSettings(mtypes.S2TD(sconfig.RePushConfigInterval), superProgress)
+	go RoutineTimeoutCheck(superProgress)
 	HttpServer(sconfig.ListenPort_EdgeAPI, sconfig.ListenPort_ManageAPI, sconfig.API_Prefix, errs)
 
 	if sconfig.PostScript != "" {
@@ -239,13 +254,14 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 		fmt.Printf("Internal: SdNotify:%v err:%v\n", SdNotify, err)
 	}
 
+	stopCaptureSignals := capture.armSignalHandler(logger4)
+	defer stopCaptureSignals()
+
 	signal.Notify(term, syscall.SIGTERM)
 	signal.Notify(term, os.Interrupt)
-	select {
-	case <-term:
-	case <-errs:
-	case <-httpobj.http_device4.Wait():
-	case <-httpobj.http_device6.Wait():
+	defer signal.Stop(term)
+	if _, err := capture.captureOnShutdown(term, errs, httpobj.http_device4.Wait(), httpobj.http_device6.Wait()); err != nil {
+		return err
 	}
 	logger4.Verbosef("Shutting down")
 	return
@@ -374,10 +390,12 @@ func super_peerdel_notify(toDelete mtypes.Vertex, PubKey string) {
 	httpobj.http_graph.RemoveVirt(toDelete, true, false)
 }
 
-func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events) {
+func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events, progress *superEventProgress) {
 	for {
+		progress.loopWaitStart()
 		select {
 		case reg_msg := <-events.Event_server_register:
+			progress.loopReceived("register", len(events.Event_server_register))
 			var should_push_peer bool
 			var should_push_nh bool
 			var should_push_superparams bool
@@ -405,16 +423,20 @@ func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events) {
 
 			httpobj.http_PeerInfo, httpobj.http_PeerInfo_hash, peer_state_changed = get_api_peers(httpobj.http_PeerInfo_hash)
 			if should_push_peer || peer_state_changed {
+				progress.recordFanOut("PushPeerinfo")
 				PushPeerinfo(false)
 			}
 			if should_push_nh {
+				progress.recordFanOut("PushNhTable")
 				PushNhTable(false)
 			}
 			if should_push_superparams {
+				progress.recordFanOut("PushServerParams")
 				PushServerParams(false)
 			}
 			httpobj.RUnlock()
 		case pong_msg := <-events.Event_server_pong:
+			progress.loopReceived("pong", len(events.Event_server_pong))
 			var changed bool
 			httpobj.RLock()
 			if pong_msg.Src_nodeID < mtypes.NodeID_Special && pong_msg.Dst_nodeID < mtypes.NodeID_Special {
@@ -434,6 +456,7 @@ func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events) {
 				new_hash_str := hex.EncodeToString(md5_hash_raw[:])
 				httpobj.http_NhTable_Hash = new_hash_str
 				httpobj.http_NhTableStr = NhTablestr
+				progress.recordFanOut("PushNhTable")
 				PushNhTable(false)
 			}
 			httpobj.RUnlock()
@@ -441,10 +464,11 @@ func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events) {
 	}
 }
 
-func RoutinePushSettings(interval time.Duration) {
+func RoutinePushSettings(interval time.Duration, progress *superEventProgress) {
 	force := false
 	var lastforce time.Time
 	for {
+		progress.pushSettingsTick()
 		if time.Now().After(lastforce.Add(interval)) {
 			lastforce = time.Now()
 			force = true
@@ -454,21 +478,30 @@ func RoutinePushSettings(interval time.Duration) {
 		PushNhTable(force)
 		PushPeerinfo(false)
 		PushServerParams(false)
+		progress.pushSettingsSleepStart()
 		time.Sleep(mtypes.S2TD(1))
 	}
 }
 
-func RoutineTimeoutCheck() {
+func RoutineTimeoutCheck(progress *superEventProgress) {
 	for {
+		progress.timeoutTick()
+		start := time.Now()
+		progress.trace("register", "fan-in-begin", len(httpobj.http_super_chains.Event_server_register), cap(httpobj.http_super_chains.Event_server_register), 0)
 		httpobj.http_super_chains.Event_server_register <- mtypes.RegisterMsg{
 			Node_id: mtypes.NodeID_SuperNode,
 			Version: "dummy",
 		}
+		progress.trace("register", "fan-in-end", len(httpobj.http_super_chains.Event_server_register), cap(httpobj.http_super_chains.Event_server_register), time.Since(start))
+		start = time.Now()
+		progress.trace("pong", "fan-in-begin", len(httpobj.http_super_chains.Event_server_pong), cap(httpobj.http_super_chains.Event_server_pong), 0)
 		httpobj.http_super_chains.Event_server_pong <- mtypes.PongMsg{
 			RequestID:  0,
 			Src_nodeID: mtypes.NodeID_SuperNode,
 			Dst_nodeID: mtypes.NodeID_SuperNode,
 		}
+		progress.trace("pong", "fan-in-end", len(httpobj.http_super_chains.Event_server_pong), cap(httpobj.http_super_chains.Event_server_pong), time.Since(start))
+		progress.timeoutSleepStart()
 		time.Sleep(httpobj.http_graph.TimeoutCheckInterval)
 	}
 }
@@ -597,16 +630,28 @@ func startUAPI(interfaceName string, logger *device.Logger, the_device *device.D
 		return nil, err
 	}
 
+	serveUAPI(uapi, logger, errs, func(conn net.Conn, acceptedAt time.Time) {
+		go the_device.IpcHandleWithAcceptedAt(conn, acceptedAt)
+	})
+	logger.Verbosef("UAPI listener started")
+	return uapi, err
+}
+
+func serveUAPI(listener net.Listener, logger *device.Logger, errs chan error, handleConn func(net.Conn, time.Time)) {
 	go func() {
 		for {
-			conn, err := uapi.Accept()
+			waitStart := time.Now()
+			device.TraceUAPI(logger, "accept wait-begin local=%s", listener.Addr())
+			conn, err := listener.Accept()
+			acceptedAt := time.Now()
 			if err != nil {
+				device.TraceUAPI(logger, "accept wait-end local=%s duration=%s err=%v", listener.Addr(), acceptedAt.Sub(waitStart), err)
 				errs <- err
 				return
 			}
-			go the_device.IpcHandle(conn)
+			device.TraceUAPI(logger, "accept wait-end local=%s duration=%s remote=%s", listener.Addr(), acceptedAt.Sub(waitStart), conn.RemoteAddr())
+			device.TraceUAPI(logger, "accept dispatch remote=%s", conn.RemoteAddr())
+			handleConn(conn, acceptedAt)
 		}
 	}()
-	logger.Verbosef("UAPI listener started")
-	return uapi, err
 }

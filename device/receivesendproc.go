@@ -27,11 +27,18 @@ import (
 	"github.com/golang-jwt/jwt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"golang.org/x/crypto/sha3"
 )
 
 type packet_send_params struct {
 	peer *Peer
 	elem *QueueOutboundElement
+}
+
+func (device *Device) enqueueSendPacket(params *packet_send_params) {
+	start := device.progress.sendProducerWaitStart(len(device.chan_send_packet))
+	device.chan_send_packet <- params
+	device.progress.sendProducerWaitDone(start, len(device.chan_send_packet))
 }
 
 func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet []byte, offset int) {
@@ -75,10 +82,10 @@ func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet
 	elem.Type = usage
 	elem.TTL = ttl
 	elem.packet = elem.buffer[offset : offset+len(packet)]
-	device.chan_send_packet <- &packet_send_params{
+	device.enqueueSendPacket(&packet_send_params{
 		peer: peer,
 		elem: elem,
-	}
+	})
 }
 
 func (device *Device) RoutineSendPacket() {
@@ -89,7 +96,9 @@ func (device *Device) RoutineSendPacket() {
 			device.PutOutboundElement(elem)
 		}
 		elem = device.NewOutboundElement()
+		waitStart := device.progress.sendWorkerWaitStart(len(device.chan_send_packet))
 		params := <-device.chan_send_packet
+		device.progress.sendWorkerWaitDone(waitStart, len(device.chan_send_packet))
 		elem := params.elem
 		peer := params.peer
 		if peer.isRunning.Get() {
@@ -226,6 +235,52 @@ func (device *Device) process_received(msg_type path.Usage, peer *Peer, body []b
 	return
 }
 
+func (device *Device) signalTryEndpoint() {
+	if device.event_tryendpoint == nil {
+		return
+	}
+	if device.tryEndpointPending.Swap(true) {
+		return
+	}
+	select {
+	case device.event_tryendpoint <- struct{}{}:
+	default:
+		device.tryEndpointPending.Set(false)
+	}
+}
+
+func (device *Device) startRetryHolePunch(peer *Peer) {
+	attempts := int(device.EdgeConfig.DynamicRoute.ConnNextTry + 1)
+	if attempts < 1 {
+		attempts = 1
+	}
+	if peer.retry.holePunching.Swap(true) {
+		return
+	}
+	go func() {
+		defer peer.retry.holePunching.Set(false)
+		for i := 0; i < attempts; i++ {
+			if device.isClosed() || peer.IsPeerAlive() {
+				return
+			}
+			packet, usage, ttl, err := device.GeneratePingPacket(device.ID, 1)
+			if err != nil {
+				device.log.Errorf("failed to generate retry ping: %v", err)
+				return
+			}
+			device.SendPacket(peer, usage, ttl, packet, MessageTransportOffsetContent)
+			if i == attempts-1 {
+				return
+			}
+			select {
+			case <-device.closed:
+				return
+			case <-time.After(mtypes.S2TD(1)):
+			}
+		}
+	}()
+}
+
 func (device *Device) sprint_received(msg_type path.Usage, body []byte) string {
 	switch msg_type {
 	case path.Register:
@@ -291,6 +346,79 @@ func (device *Device) SendPing(peer *Peer, times int, replies int, interval floa
 	}
 }
 
+func (device *Device) collectReportedLocalAddresses() (map[string]float64, map[string]float64) {
+	localV4s := make(map[string]float64)
+	localV6s := make(map[string]float64)
+	if device.EdgeConfig.DynamicRoute.SuperNode.SkipLocalIP {
+		return localV4s, localV6s
+	}
+
+	device.peers.RLock()
+	learnedV4 := append(net.IP(nil), device.peers.LocalV4...)
+	learnedV6 := append(net.IP(nil), device.peers.LocalV6...)
+	device.peers.RUnlock()
+
+	device.net.RLock()
+	port := int(device.net.port)
+	device.net.RUnlock()
+
+	if conn.ValidIP(learnedV4) {
+		localV4s[(&net.UDPAddr{IP: learnedV4, Port: port}).String()] = 100
+	}
+	if conn.ValidIP(learnedV6) {
+		localV6s[(&net.UDPAddr{IP: learnedV6, Port: port}).String()] = 100
+	}
+
+	for _, additionalIP := range device.EdgeConfig.DynamicRoute.SuperNode.AdditionalLocalIP {
+		success := false
+		_, ipStr, err := conn.LookupIP(additionalIP, conn.EnabledAf4, 0)
+		if err == nil {
+			success = true
+			localV4s[ipStr] = 50
+		}
+		_, ipStr, err = conn.LookupIP(additionalIP, conn.EnabledAf6, 0)
+		if err == nil {
+			success = true
+			localV6s[ipStr] = 50
+		}
+		if !success {
+			device.log.Errorf("AdditionalLocalIP: Failed to LookupIP %v", additionalIP)
+		}
+	}
+
+	return localV4s, localV6s
+}
+
+func (device *Device) buildPeerInfoReport() mtypes.API_report_peerinfo {
+	device.peers.RLock()
+	pongs := make([]mtypes.PongMsg, 0, len(device.peers.IDMap))
+	for id, peer := range device.peers.IDMap {
+		device.peers.RUnlock()
+		if peer.IsPeerAlive() {
+			pong := mtypes.PongMsg{
+				RequestID:   0,
+				Src_nodeID:  id,
+				Dst_nodeID:  device.ID,
+				Timediff:    peer.SingleWayLatency.GetVal(),
+				TimeToAlive: -time.Since(*peer.LastPacketReceivedAdd1Sec.Load().(*time.Time)).Seconds() + device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+			}
+			pongs = append(pongs, pong)
+			if device.LogLevel.LogControl {
+				fmt.Printf("Control: Pack %v S:%v D:%v To:Post body\n", pong.ToString(), pong.Src_nodeID.ToString(), pong.Dst_nodeID.ToString())
+			}
+		}
+		device.peers.RLock()
+	}
+	device.peers.RUnlock()
+
+	localV4s, localV6s := device.collectReportedLocalAddresses()
+	return mtypes.API_report_peerinfo{
+		Pongs:    pongs,
+		LocalV4s: localV4s,
+		LocalV6s: localV6s,
+	}
+}
+
 func compareVersion(v1 string, v2 string) bool {
 	if strings.Contains(v1, "-") {
 		v1 = strings.Split(v1, "-")[0]
@@ -337,12 +465,18 @@ func (device *Device) server_process_RegisterMsg(peer *Peer, content mtypes.Regi
 		device.SendPacket(peer, path.ServerUpdate, 0, buf, MessageTransportOffsetContent)
 		return nil
 	}
+	start := time.Now()
+	device.progress.traceSuperEvent("register", "fan-in-begin", len(device.Chan_server_register), cap(device.Chan_server_register), 0)
 	device.Chan_server_register <- content
+	device.progress.traceSuperEvent("register", "fan-in-end", len(device.Chan_server_register), cap(device.Chan_server_register), time.Since(start))
 	return nil
 }
 
 func (device *Device) server_process_Pong(peer *Peer, content mtypes.PongMsg) error {
+	start := time.Now()
+	device.progress.traceSuperEvent("pong", "fan-in-begin", len(device.Chan_server_pong), cap(device.Chan_server_pong), 0)
 	device.Chan_server_pong <- content
+	device.progress.traceSuperEvent("pong", "fan-in-end", len(device.Chan_server_pong), cap(device.Chan_server_pong), time.Since(start))
 	return nil
 }
 
@@ -518,7 +652,7 @@ func (device *Device) process_UpdatePeerMsg(peer *Peer, State_hash string) error
 		}
 		device.state_hashes.Peer.Store(State_hash)
 		if send_signal {
-			device.event_tryendpoint <- struct{}{}
+			device.signalTryEndpoint()
 		}
 	}
 	return nil
@@ -668,10 +802,10 @@ func (device *Device) process_ServerUpdateMsg(peer *Peer, content mtypes.ServerU
 	switch content.Action {
 	case mtypes.Shutdown:
 		device.log.Errorf("Shutdown: " + content.Params)
-		device.closed <- 0
+		device.sendClosedCode(0, "shutdown")
 	case mtypes.ThrowError:
 		device.log.Errorf(strconv.Itoa(int(content.Code)) + ": " + content.Params)
-		device.closed <- content.Code
+		device.sendClosedCode(content.Code, "throw-error")
 	case mtypes.Panic:
 		device.log.Errorf(strconv.Itoa(int(content.Code)) + ": " + content.Params)
 		panic(content.ToString())
@@ -685,6 +819,13 @@ func (device *Device) process_ServerUpdateMsg(peer *Peer, content mtypes.ServerU
 		device.log.Errorf("Unknown Action: %v", content.ToString())
 	}
 	return nil
+}
+
+func (device *Device) sendClosedCode(code int, reason string) {
+	start := time.Now()
+	device.traceShutdownf("device.closed send begin reason=%s code=%d", reason, code)
+	device.closed <- code
+	device.traceShutdownf("device.closed send end reason=%s code=%d wait=%s", reason, code, time.Since(start))
 }
 
 func (device *Device) process_RequestPeerMsg(content mtypes.QueryPeerMsg) error { //Send all my peers to all my peers
@@ -757,7 +898,7 @@ func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.Boardc
 		if !thepeer.IsPeerAlive() {
 			//Peer died, try to switch to this new endpoint
 			thepeer.endpoint_trylist.UpdateP2P(content.ConnURL) //another gorouting will process it
-			device.event_tryendpoint <- struct{}{}
+			device.signalTryEndpoint()
 		}
 
 	}
@@ -771,49 +912,71 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 	timeout := mtypes.S2TD(device.EdgeConfig.DynamicRoute.ConnNextTry)
 	for {
 		NextRun := false
-		<-device.event_tryendpoint
+		select {
+		case <-device.closed:
+			return
+		case <-device.event_tryendpoint:
+			device.tryEndpointPending.Set(false)
+		}
+		device.peers.RLock()
+		peers := make([]*Peer, 0, len(device.peers.IDMap))
 		for _, thepeer := range device.peers.IDMap {
-			if thepeer.LastPacketReceivedAdd1Sec.Load().(*time.Time).Add(mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)).After(time.Now()) {
-				//Peer alives
+			peers = append(peers, thepeer)
+		}
+		device.peers.RUnlock()
+		for _, thepeer := range peers {
+			if thepeer.IsPeerAlive() {
 				continue
-			} else {
-				FastTry, connurl := thepeer.endpoint_trylist.GetNextTry()
-				if connurl == "" {
-					continue
-				}
-				if thepeer.StaticConn {
-					continue
-				}
-				err := thepeer.SetEndpointFromConnURL(connurl, device.enabledAf, device.EdgeConfig.AfPrefer, thepeer.StaticConn) //trying to bind first url in the list and wait ConnNextTry seconds
-				if err != nil {
-					device.log.Errorf("Bind " + connurl + " failed!")
-					thepeer.endpoint_trylist.Delete(connurl)
-					continue
-				}
-				if FastTry {
+			}
+			FastTry, connurl := thepeer.endpoint_trylist.GetNextTry()
+			if connurl == "" {
+				continue
+			}
+			if thepeer.StaticConn {
+				continue
+			}
+			err := thepeer.SetEndpointFromConnURL(connurl, device.enabledAf, device.EdgeConfig.AfPrefer, thepeer.StaticConn) //trying to bind first url in the list and wait ConnNextTry seconds
+			if err != nil {
+				if conn.IsTransientEndpointError(err) {
 					NextRun = true
-					if device.LogLevel.LogControl {
-						fmt.Printf("Control: First try for peer %v at endpoint %v, sending hole-punching ping\n", thepeer.ID.ToString(), connurl)
+					if device.LogLevel.LogInternal {
+						fmt.Printf("Internal: Bind %v deferred after transient error: %v\n", connurl, err)
 					}
-					go device.SendPing(thepeer, int(device.EdgeConfig.DynamicRoute.ConnNextTry+1), 1, 1)
+					continue
 				}
-
+				device.log.Errorf("Bind " + connurl + " failed!")
+				thepeer.endpoint_trylist.Delete(connurl)
+				continue
+			}
+			if FastTry {
+				NextRun = true
+				if device.LogLevel.LogControl {
+					fmt.Printf("Control: First try for peer %v at endpoint %v, sending hole-punching ping\n", thepeer.ID.ToString(), connurl)
+				}
+				device.startRetryHolePunch(thepeer)
 			}
 		}
 	ClearChanLoop:
 		for {
 			select {
+			case <-device.closed:
+				return
 			case <-device.event_tryendpoint:
+				device.tryEndpointPending.Set(false)
 			default:
 				break ClearChanLoop
 			}
 		}
-		time.Sleep(timeout)
+		select {
+		case <-device.closed:
+			return
+		case <-time.After(timeout):
+		}
 		if device.LogLevel.LogInternal {
 			fmt.Printf("Internal: RoutineSetEndpoint: NextRun:%v\n", NextRun)
 		}
 		if NextRun {
-			device.event_tryendpoint <- struct{}{}
+			device.signalTryEndpoint()
 		}
 	}
 }
@@ -827,8 +990,12 @@ func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
 	}
 	timeout := mtypes.S2TD(device.EdgeConfig.DynamicRoute.TimeoutCheckInterval)
 	for {
-		device.event_tryendpoint <- struct{}{}
-		time.Sleep(timeout)
+		device.signalTryEndpoint()
+		select {
+		case <-device.closed:
+			return
+		case <-time.After(timeout):
+		}
 	}
 }
 
@@ -923,71 +1090,11 @@ func (device *Device) RoutinePostPeerInfo(startchan <-chan struct{}) {
 				<-startchan
 			}
 		}
-		// Stat all latency
-		device.peers.RLock()
-		pongs := make([]mtypes.PongMsg, 0, len(device.peers.IDMap))
-		for id, peer := range device.peers.IDMap {
-			device.peers.RUnlock()
-			if peer.IsPeerAlive() {
-				pong := mtypes.PongMsg{
-					RequestID:   0,
-					Src_nodeID:  id,
-					Dst_nodeID:  device.ID,
-					Timediff:    peer.SingleWayLatency.GetVal(),
-					TimeToAlive: -time.Since(*peer.LastPacketReceivedAdd1Sec.Load().(*time.Time)).Seconds() + device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
-				}
-				pongs = append(pongs, pong)
-				if device.LogLevel.LogControl {
-					fmt.Printf("Control: Pack %v S:%v D:%v To:Post body\n", pong.ToString(), pong.Src_nodeID.ToString(), pong.Dst_nodeID.ToString())
-				}
-			}
-			device.peers.RLock()
-		}
-		device.peers.RUnlock()
-		// Prepare post paramater and post body
-		LocalV4s := make(map[string]float64)
-		LocalV6s := make(map[string]float64)
-		if !device.EdgeConfig.DynamicRoute.SuperNode.SkipLocalIP {
-			if !device.peers.LocalV4.Equal(net.IP{}) {
-				LocalV4 := net.UDPAddr{
-					IP:   device.peers.LocalV4,
-					Port: int(device.net.port),
-				}
-
-				LocalV4s[LocalV4.String()] = 100
-			}
-			if !device.peers.LocalV6.Equal(net.IP{}) {
-				LocalV6 := net.UDPAddr{
-					IP:   device.peers.LocalV6,
-					Port: int(device.net.port),
-				}
-				LocalV6s[LocalV6.String()] = 100
-			}
-		}
-		for _, AIP := range device.EdgeConfig.DynamicRoute.SuperNode.AdditionalLocalIP {
-			success := false
-			_, ipstr, err := conn.LookupIP(AIP, conn.EnabledAf4, 0)
-			if err == nil {
-				success = true
-				LocalV4s[ipstr] = 50
-			}
-			_, ipstr, err = conn.LookupIP(AIP, conn.EnabledAf6, 0)
-			if err == nil {
-				success = true
-				LocalV6s[ipstr] = 50
-			}
-			if !success {
-				device.log.Errorf("AdditionalLocalIP: Failed to LookupIP %v", AIP)
-			}
-		}
-
-		body, _ := mtypes.GetByte(mtypes.API_report_peerinfo{
-			Pongs:    pongs,
-			LocalV4s: LocalV4s,
-			LocalV6s: LocalV6s,
-		})
+		report := device.buildPeerInfoReport()
+		body, _ := mtypes.GetByte(report)
 		body = mtypes.Gzip(body)
-		bodyhash := base64.StdEncoding.EncodeToString(body)
+		bodyhashRaw := sha3.Sum512(body)
+		bodyhash := base64.StdEncoding.EncodeToString(bodyhashRaw[:])
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, mtypes.API_report_peerinfo_jwt_claims{
 			PostCount: device.HttpPostCount,
 			BodyHash:  bodyhash,

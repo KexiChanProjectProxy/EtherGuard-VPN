@@ -3,6 +3,7 @@ package path
 import (
 	"fmt"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -39,7 +40,14 @@ func (g *IG) RoutineSyncTime() {
 		return
 	}
 	for {
+		if g.ntpProgress.enabled.Get() {
+			atomic.StoreInt64(&g.ntpProgress.lastRoutineWakeAt, time.Now().UnixNano())
+			atomic.StoreInt64(&g.ntpProgress.routineSleepSince, 0)
+		}
 		g.SyncTimeMultiple(g.ntp_info.MaxServerUse)
+		if g.ntpProgress.enabled.Get() {
+			atomic.StoreInt64(&g.ntpProgress.routineSleepSince, time.Now().UnixNano())
+		}
 		time.Sleep(mtypes.S2TD(g.ntp_info.SyncTimeInterval))
 	}
 }
@@ -51,6 +59,11 @@ func (a ByDuration) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByDuration) Less(i, j int) bool { return a[i] < a[j] }
 
 func (g *IG) SyncTimeMultiple(count int) {
+	if g.ntpProgress.enabled.Get() {
+		now := time.Now()
+		atomic.StoreInt64(&g.ntpProgress.lastCycleStart, now.UnixNano())
+		atomic.StoreInt64(&g.ntpProgress.cycleWaitSince, now.UnixNano())
+	}
 	var url2sync []string
 	if count < 0 {
 		count = len(g.ntp_servers.Keys())
@@ -67,9 +80,19 @@ func (g *IG) SyncTimeMultiple(count int) {
 	}
 	for _, url := range url2sync {
 		g.ntp_wg.Add(1)
+		if g.ntpProgress.enabled.Get() {
+			atomic.AddInt64(&g.ntpProgress.inFlight, 1)
+		}
 		go g.SyncTime(url, mtypes.S2TD(g.ntp_info.NTPTimeout))
 	}
+	if g.ntpProgress.enabled.Get() {
+		atomic.StoreInt64(&g.ntpProgress.lastCycleCount, int64(len(url2sync)))
+	}
 	g.ntp_wg.Wait()
+	if g.ntpProgress.enabled.Get() {
+		atomic.StoreInt64(&g.ntpProgress.cycleWaitSince, 0)
+		atomic.StoreInt64(&g.ntpProgress.lastCycleDone, time.Now().UnixNano())
+	}
 	g.ntp_servers.Sort(func(a *orderedmap.Pair, b *orderedmap.Pair) bool {
 		return a.Value().(ntp.Response).RTT < b.Value().(ntp.Response).RTT
 	})
@@ -113,17 +136,34 @@ func (g *IG) SyncTimeMultiple(count int) {
 }
 
 func (g *IG) SyncTime(url string, timeout time.Duration) {
+	if g.ntpProgress.enabled.Get() {
+		atomic.StoreInt64(&g.ntpProgress.lastQueryStart, time.Now().UnixNano())
+	}
 	if g.loglevel.LogNTP {
 		fmt.Println("NTP: Starting syncing with NTP server :" + url)
 	}
 	options := ntp.QueryOptions{Timeout: timeout}
 	response, err := ntp.QueryWithOptions(url, options)
+	if g.ntpProgress.enabled.Get() {
+		now := time.Now().UnixNano()
+		atomic.StoreInt64(&g.ntpProgress.lastQueryDone, now)
+		atomic.AddInt64(&g.ntpProgress.inFlight, -1)
+	}
 	if err == nil {
+		if g.ntpProgress.enabled.Get() {
+			atomic.StoreInt64(&g.ntpProgress.lastSuccessAt, time.Now().UnixNano())
+			atomic.StoreInt64(&g.ntpProgress.lastQueryRTT, response.RTT.Nanoseconds())
+			atomic.StoreInt64(&g.ntpProgress.lastQueryOffset, response.ClockOffset.Nanoseconds())
+		}
 		if g.loglevel.LogNTP {
 			fmt.Println("NTP:  NTP server :" + url + "\tResult:" + response.ClockOffset.String() + " RTT:" + response.RTT.String())
 		}
 		g.ntp_servers.Set(url, *response)
 	} else {
+		if g.ntpProgress.enabled.Get() {
+			atomic.StoreInt64(&g.ntpProgress.lastFailureAt, time.Now().UnixNano())
+			atomic.StoreInt64(&g.ntpProgress.lastQueryError, time.Since(g.ntp_init_t).Nanoseconds())
+		}
 		if g.loglevel.LogNTP {
 			fmt.Println("NTP:  NTP server :" + url + "\tFailed :" + err.Error())
 		}

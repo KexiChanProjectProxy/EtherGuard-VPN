@@ -76,8 +76,9 @@ type Device struct {
 
 	state_hashes mtypes.StateHash
 
-	event_tryendpoint chan struct{}
-	chan_send_packet  chan *packet_send_params
+	event_tryendpoint  chan struct{}
+	tryEndpointPending AtomicBool
+	chan_send_packet   chan *packet_send_params
 
 	EdgeConfigPath  string
 	EdgeConfig      *mtypes.EdgeConfig
@@ -127,6 +128,9 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan int
 	log      *Logger
+
+	shutdownTrace shutdownTraceBuffer
+	progress      deviceProgressTracker
 }
 
 type IdAndTime struct {
@@ -329,6 +333,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan int)
 	device.log = logger
+	device.initShutdownTraceFromEnv()
 	device.net.bind = bind
 	device.tap.device = tapDevice
 	mtu, err := device.tap.device.MTU()
@@ -356,6 +361,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.PopulatePools()
 	device.Chan_Device_Initialized = make(chan struct{}, 1<<5)
 	device.chan_send_packet = make(chan *packet_send_params, 1<<15)
+	device.progress.configure(device.shutdownTrace.enabled.Get())
 	if IsSuperNode {
 		device.SuperConfigPath = configpath
 		device.SuperConfig = sconfig
@@ -399,7 +405,6 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 			go device.RoutinePostPeerInfo(device.Chan_HttpPostStart)
 		}
 	}()
-
 	// create queues
 
 	device.queue.handshake = newHandshakeQueue()
@@ -605,16 +610,22 @@ func (device *Device) RemoveAllPeers() {
 }
 
 func (device *Device) Close() {
+	device.traceShutdownf("Device.Close begin")
 	device.state.Lock()
 	defer device.state.Unlock()
 	if device.isClosed() {
+		device.traceShutdownf("Device.Close skipped already-closed")
 		return
 	}
 	atomic.StoreUint32(&device.state.state, uint32(deviceStateClosed))
 	device.log.Verbosef("Device closing")
 
+	device.traceShutdownf("Device.Close tap.device.Close begin")
 	device.tap.device.Close()
+	device.traceShutdownf("Device.Close tap.device.Close end")
+	device.traceShutdownf("Device.Close downLocked begin")
 	device.downLocked()
+	device.traceShutdownf("Device.Close downLocked end")
 
 	// Remove peers before closing queues,
 	// because peers assume that queues are active.
@@ -623,18 +634,28 @@ func (device *Device) Close() {
 	// We kept a reference to the encryption and decryption queues,
 	// in case we started any new peers that might write to them.
 	// No new peers are coming; we are done with these queues.
+	device.traceShutdownf("Device.Close queue waitgroup release begin")
 	device.queue.encryption.wg.Done()
 	device.queue.decryption.wg.Done()
 	device.queue.handshake.wg.Done()
+	device.traceShutdownf("Device.Close queue waitgroup release end")
+	start := time.Now()
+	device.traceShutdownf("Device.Close state.stopping.Wait begin")
 	device.state.stopping.Wait()
+	device.traceShutdownf("Device.Close state.stopping.Wait end wait=%s", time.Since(start))
 
+	device.traceShutdownf("Device.Close rate.limiter.Close begin")
 	device.rate.limiter.Close()
+	device.traceShutdownf("Device.Close rate.limiter.Close end")
 
 	device.log.Verbosef("Device closed")
+	device.traceShutdownf("Device.Close close(device.closed) begin")
 	close(device.closed)
+	device.traceShutdownf("Device.Close close(device.closed) end")
 }
 
 func (device *Device) Wait() chan int {
+	device.traceShutdownf("Device.Wait return channel=%p", device.closed)
 	return device.closed
 }
 
@@ -658,15 +679,25 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 // closeBindLocked closes the device's net.bind.
 // The caller must hold the net mutex.
 func closeBindLocked(device *Device) error {
+	device.traceShutdownf("closeBindLocked begin")
 	var err error
 	netc := &device.net
 	if netc.netlinkCancel != nil {
+		device.traceShutdownf("closeBindLocked netlinkCancel.Cancel begin")
 		netc.netlinkCancel.Cancel()
+		device.traceShutdownf("closeBindLocked netlinkCancel.Cancel end")
 	}
 	if netc.bind != nil {
+		start := time.Now()
+		device.traceShutdownf("closeBindLocked bind.Close begin")
 		err = netc.bind.Close()
+		device.traceShutdownf("closeBindLocked bind.Close end wait=%s err=%v", time.Since(start), err)
 	}
+	start := time.Now()
+	device.traceShutdownf("closeBindLocked net.stopping.Wait begin")
 	netc.stopping.Wait()
+	device.traceShutdownf("closeBindLocked net.stopping.Wait end wait=%s", time.Since(start))
+	device.traceShutdownf("closeBindLocked end err=%v", err)
 	return err
 }
 
@@ -708,16 +739,19 @@ func (device *Device) BindSetMark(mark uint32) error {
 }
 
 func (device *Device) BindUpdate() error {
+	device.traceShutdownf("BindUpdate begin")
 	device.net.Lock()
 	defer device.net.Unlock()
 
 	// close existing sockets
 	if err := closeBindLocked(device); err != nil {
+		device.traceShutdownf("BindUpdate closeBindLocked failed err=%v", err)
 		return err
 	}
 
 	// open new sockets
 	if !device.isUp() {
+		device.traceShutdownf("BindUpdate skipped reopen state=%s", device.deviceState())
 		return nil
 	}
 
@@ -725,12 +759,18 @@ func (device *Device) BindUpdate() error {
 	var err error
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
+	openStart := time.Now()
+	device.traceShutdownf("BindUpdate bind.Open begin port=%d", netc.port)
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
+	device.traceShutdownf("BindUpdate bind.Open end wait=%s recvFns=%d port=%d err=%v", time.Since(openStart), len(recvFns), netc.port, err)
 	if err != nil {
 		netc.port = 0
 		return err
 	}
+	routeStart := time.Now()
+	device.traceShutdownf("BindUpdate startRouteListener begin")
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
+	device.traceShutdownf("BindUpdate startRouteListener end wait=%s err=%v", time.Since(routeStart), err)
 	if err != nil {
 		netc.bind.Close()
 		netc.port = 0
@@ -739,7 +779,10 @@ func (device *Device) BindUpdate() error {
 
 	// set fwmark
 	if netc.fwmark != 0 {
+		markStart := time.Now()
+		device.traceShutdownf("BindUpdate bind.SetMark begin mark=%d", netc.fwmark)
 		err = netc.bind.SetMark(netc.fwmark)
+		device.traceShutdownf("BindUpdate bind.SetMark end wait=%s err=%v", time.Since(markStart), err)
 		if err != nil {
 			return err
 		}
@@ -757,6 +800,7 @@ func (device *Device) BindUpdate() error {
 	device.peers.RUnlock()
 
 	// start receiving routines
+	device.traceShutdownf("BindUpdate receive routines start count=%d", len(recvFns))
 	device.net.stopping.Add(len(recvFns))
 	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
 	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake
@@ -765,12 +809,15 @@ func (device *Device) BindUpdate() error {
 	}
 
 	device.log.Verbosef("UDP bind has been updated")
+	device.traceShutdownf("BindUpdate end")
 	return nil
 }
 
 func (device *Device) BindClose() error {
+	device.traceShutdownf("BindClose begin")
 	device.net.Lock()
 	err := closeBindLocked(device)
 	device.net.Unlock()
+	device.traceShutdownf("BindClose end err=%v", err)
 	return err
 }

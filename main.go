@@ -29,8 +29,9 @@ const (
 )
 
 const (
-	ENV_EG_UAPI_FD  = "EG_UAPI_FD"
-	ENV_EG_UAPI_DIR = "EG_UAPI_DIR"
+	ENV_EG_UAPI_FD           = "EG_UAPI_FD"
+	ENV_EG_UAPI_DIR          = "EG_UAPI_DIR"
+	ENV_EG_SUPER_CAPTURE_DIR = "EG_SUPER_CAPTURE_DIR"
 )
 
 var (

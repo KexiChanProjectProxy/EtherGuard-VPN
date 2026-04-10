@@ -23,6 +23,9 @@ jobs:
           sudo apt-get install -y libmemif libmemif-dev
           sudo apt-get install -y wireguard-tools upx-ucl
 
+      - name: Run regression tests
+        run: go test -v ./...
+
       - name: Build x86_64
         run: |
           make all static
@@ -56,6 +59,12 @@ jobs:
       - uses: actions/checkout@v2
         with:
           fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.21
+      - name: Run regression tests
+        run: go test -v ./...
       - uses: uraimo/run-on-arch-action@v2.0.5
         name: Build artifact
         id: build

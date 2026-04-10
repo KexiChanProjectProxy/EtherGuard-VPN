@@ -54,6 +54,7 @@ type IG struct {
 	ntp_init_t  time.Time
 	ntp_offset  time.Duration
 	ntp_servers orderedmap.OrderedMap // serverurl:lentancy
+	ntpProgress ntpProgressTracker
 }
 
 func NewGraph(num_node int, IsSuperMode bool, theconfig mtypes.GraphRecalculateSetting, ntpinfo mtypes.NTPInfo, loglevel mtypes.LoggerInfo) (*IG, error) {

@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +31,22 @@ import (
 	"github.com/KusakabeSi/EtherGuard-VPN/path"
 	yaml "gopkg.in/yaml.v2"
 )
+
+func rewriteExternalConnURL(connURL string, externalHost string, af conn.EnabledAf) string {
+	if connURL == "" || externalHost == "" {
+		return connURL
+	}
+	_, port, err := net.SplitHostPort(connURL)
+	if err != nil {
+		return connURL
+	}
+	rewritten := net.JoinHostPort(externalHost, port)
+	_, endpoint, err := conn.LookupIP(rewritten, af, 0)
+	if err != nil {
+		return connURL
+	}
+	return endpoint
+}
 
 type http_shared_objects struct {
 	http_graph         *path.IG
@@ -156,26 +173,8 @@ func get_api_peers(old_State_hash string) (api_peerinfo mtypes.API_Peers, StateH
 		connV6 := httpobj.http_device6.GetConnurl(peerinfo.NodeID)
 
 		if peerinfo.ExternalIP != "" {
-			ExternalIP := peerinfo.ExternalIP
-			if strings.Contains(ExternalIP, ":") {
-				ExternalIP = fmt.Sprintf("[%v]", ExternalIP)
-			}
-			if strings.Contains(connV4, ":") {
-				hostport := strings.Split(connV4, ":")
-				ExternalIP = ExternalIP + ":" + hostport[len(hostport)-1]
-				_, ExternalEndPoint_v4, err := conn.LookupIP(ExternalIP, conn.EnabledAf4, 0)
-				if err == nil {
-					connV4 = ExternalEndPoint_v4
-				}
-			}
-			if strings.Contains(connV6, ":") {
-				hostport := strings.Split(connV6, ":")
-				ExternalIP = ExternalIP + ":" + hostport[len(hostport)-1]
-				_, ExternalEndPoint_v6, err := conn.LookupIP(ExternalIP, conn.EnabledAf6, 0)
-				if err == nil {
-					connV6 = ExternalEndPoint_v6
-				}
-			}
+			connV4 = rewriteExternalConnURL(connV4, peerinfo.ExternalIP, conn.EnabledAf4)
+			connV6 = rewriteExternalConnURL(connV6, peerinfo.ExternalIP, conn.EnabledAf6)
 		}
 
 		if len(connV4)+len(connV6) == 0 {
@@ -466,7 +465,7 @@ func edge_post_nodeinfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	calculated_body_hash := sha3.Sum512(client_body)
-	if base64.StdEncoding.EncodeToString(calculated_body_hash[:]) == client_body_hash {
+	if base64.StdEncoding.EncodeToString(calculated_body_hash[:]) != client_body_hash {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(fmt.Sprintf("Request body: hash not match: %v", client_body_hash)))
 		return

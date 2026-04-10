@@ -639,12 +639,16 @@ func (peer *Peer) RoutineSequentialReceiver() {
 						}
 					}
 				}
+				writeStart := device.progress.tapWriteWaitStart(len(peer.queue.inbound.c))
 				_, err = device.tap.device.Write(elem.buffer[:MessageTransportOffsetContent+len(elem.packet)], MessageTransportOffsetContent+path.EgHeaderLen)
+				device.progress.tapWriteWaitDone(writeStart, len(peer.queue.inbound.c), len(elem.packet)-path.EgHeaderLen)
 				if err != nil && !device.isClosed() {
 					device.log.Errorf("Failed to write packet to TUN device: %v", err)
 				}
 				if len(peer.queue.inbound.c) == 0 {
+					flushStart := device.progress.tapFlushWaitStart(len(peer.queue.inbound.c))
 					err = device.tap.device.Flush()
+					device.progress.tapFlushWaitDone(flushStart, len(peer.queue.inbound.c))
 					if err != nil {
 						peer.device.log.Errorf("Unable to flush packets: %v", err)
 					}
