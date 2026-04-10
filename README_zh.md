@@ -60,12 +60,14 @@ P2P Mode | 此模式是受到[tinc](https://github.com/gsliepen/tinc)的啟發�
 
 編譯沒有VPP libmemif的版本。可以在一般linux電腦上使用
 
-安裝 Go 1.16
+安裝 Go 1.26.2
+
+請先從 [go.dev/dl](https://go.dev/dl/) 下載並安裝 Go 1.26.2，再安裝其餘的編譯依賴。
 
 ```bash
 add-apt-repository ppa:longsleep/golang-backports
 apt-get -y update
-apt-get install -y wireguard-tools golang-go build-essential git
+apt-get install -y wireguard-tools build-essential git
 ```
 
 Build

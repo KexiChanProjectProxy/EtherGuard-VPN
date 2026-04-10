@@ -59,12 +59,14 @@ P2P Mode | Inspired by [tinc](https://github.com/gsliepen/tinc), There are no Su
 
 Build Etherguard.  
 
-Install Go 1.16
+Install Go 1.26.2
+
+Download and install Go 1.26.2 from [go.dev/dl](https://go.dev/dl/), then install the remaining build dependencies.
 
 ```bash
 add-apt-repository ppa:longsleep/golang-backports
 apt-get -y update
-apt-get install -y wireguard-tools golang-go build-essential git
+apt-get install -y wireguard-tools build-essential git
 ```
 
 Build
