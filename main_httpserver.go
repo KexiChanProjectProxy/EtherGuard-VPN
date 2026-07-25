@@ -77,7 +77,6 @@ type PeerState struct {
 	PeerInfoState         atomic.Value // string
 	SuperParamState       atomic.Value // string
 	SuperParamStateClient atomic.Value // string
-	JETSecret             atomic.Value // mtypes.JWTSecret
 	httpPostCount         atomic.Value // uint64
 	LastSeen              atomic.Value // time.Time
 }
