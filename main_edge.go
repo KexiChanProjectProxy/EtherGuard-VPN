@@ -144,8 +144,12 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 			peer := the_device.LookupPeer(pk)
 			err = peer.SetEndpointFromConnURL(peerconf.EndPoint, EnabledAf, econfig.AfPrefer, peerconf.Static)
 			if err != nil {
-				logger.Errorf("Failed to set endpoint %v: %w", peerconf.EndPoint, err)
-				return err
+				if endpointErr := initialPeerEndpointError(econfig.DynamicRoute.P2P.UseP2P, err); endpointErr != nil {
+					logger.Errorf("Failed to set endpoint %v: %v", peerconf.EndPoint, endpointErr)
+					return endpointErr
+				}
+				peer.AddEndpointRetry(peerconf.EndPoint, peerconf.Static)
+				logger.Errorf("Initial peer endpoint unavailable; P2P will retry: endpoint=%v error=%v", peerconf.EndPoint, err)
 			}
 		}
 	}
