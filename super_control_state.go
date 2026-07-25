@@ -11,7 +11,20 @@ import (
 	graphpath "github.com/KusakabeSi/EtherGuard-VPN/path"
 )
 
-var ErrControlStateUnknownPeer = errors.New("control state: unknown peer")
+var (
+	// ErrControlStateUnknownPeer is returned by Report when the requested
+	// NodeID has no peer entry in the Super's authorative state.
+	ErrControlStateUnknownPeer = errors.New("control state: unknown peer")
+	// ErrControlStateSpecialNodeID is returned by mutations that try to
+	// register/delete/etc. a reserved (special) NodeID — 65532..65535 —
+	// which by contract must never be assigned to a real Edge.
+	ErrControlStateSpecialNodeID = errors.New("control state: reserved / special node id")
+)
+
+// ErrControlStateInvalidParameters is returned by UpdateParameters when the
+// supplied ControlV2Parameters struct fails mtypes validation (zero or
+// negative durations, empty STUN list, unsupported protocol version, etc.).
+var ErrControlStateInvalidParameters = errors.New("control state: invalid parameters")
 
 type ControlStateConfig struct {
 	Parameters         mtypes.ControlV2Parameters
@@ -81,6 +94,77 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 		s.emit(mtypes.ControlV2EventPeerChange, req.NodeID, req.NodeName, rev)
 	}
 	return snapshot, nil
+}
+
+// DeletePeer removes a peer entry previously inserted by Register / AddPeer
+// from the Super's authorative state. It bumps the revision by exactly one
+// when a peer is actually removed and emits a single peer_gone event after
+// releasing the lock.
+//
+// Bumping semantics:
+//   - If the NodeID does not exist, returns ErrControlStateUnknownPeer and
+//     leaves the revision unchanged.
+//   - If the NodeID is reserved / special (65532..65535), returns
+//     ErrControlStateSpecialNodeID; reserved IDs must never reach this
+//     method because validators reject them at the management boundary.
+//
+// Safe to call concurrently with Register / Report / SweepTimeouts.
+func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if nodeID.IsSpecial() {
+		return ErrControlStateSpecialNodeID
+	}
+	s.mu.Lock()
+	peer, ok := s.peers[nodeID]
+	if !ok {
+		s.mu.Unlock()
+		return ErrControlStateUnknownPeer
+	}
+	delete(s.peers, nodeID)
+	name := peer.view.NodeName
+	s.revision++
+	rev := s.revision
+	s.mu.Unlock()
+	s.emit(mtypes.ControlV2EventPeerGone, nodeID, name, rev)
+	return nil
+}
+
+// UpdateParameters replaces the published control parameter stream (the
+// same stream every Edge reads via /edge/v2/snapshot). It validates the
+// supplied parameters exactly once via mtypes.ControlV2Parameters.Validate
+// and bumps the revision by exactly one on a successful replacement.
+//
+// Returns ErrControlStateInvalidParameters when validation fails (the
+// caller MUST translate mtypes.ControlV2Error into a typed response); the
+// revision is unchanged in that case.
+//
+// The event type emitted on success is params_change so SSE consumers can
+// distinguish control-plane configuration updates from peer churn.
+func (s *ControlState) UpdateParameters(ctx context.Context, p mtypes.ControlV2Parameters) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := p.Validate(); err != nil {
+		return ErrControlStateInvalidParameters
+	}
+	s.mu.Lock()
+	s.parameters = cloneParameters(p)
+	s.revision++
+	rev := s.revision
+	s.mu.Unlock()
+	if s.publish != nil {
+		s.publish(mtypes.ControlV2Event{
+			Type:     mtypes.ControlV2EventParamsChange,
+			Revision: rev,
+			// Data carries the new parameter stream so SSE consumers
+			// can observe the change without an extra snapshot fetch.
+			// (Task 7's SSEParser caveat: data must be non-empty.)
+			Data: cloneParameters(p),
+		})
+	}
+	return nil
 }
 
 func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportRequest) error {
