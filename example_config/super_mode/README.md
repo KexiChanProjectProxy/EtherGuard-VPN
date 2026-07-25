@@ -1,415 +1,225 @@
 # Etherguard
 [English](#) | [中文](README_zh.md)
 
-## Super mode
+## Super mode (HTTP-only Control API v2)
 
-This mode is inspired by [n2n](https://github.com/ntop/n2n). There 2 types of node: SuperNode and EdgeNode  
-EdgeNode must connect to SuperNode first，get connection info of other EdgeNode from the SuperNode  
-The SuperNode runs [Floyd-Warshall Algorithm](https://en.wikipedia.org/wiki/Floyd–Warshall_algorithm)，and distribute the result to all other EdgeNodes.
+This mode is inspired by [n2n](https://github.com/ntop/n2n). There are 2 types of node: SuperNode and EdgeNode.
+The SuperNode runs an HTTP-only control service. EdgeNodes register over HTTP, receive a peer snapshot, and exchange latency measurements. The SuperNode runs the [Floyd-Warshall Algorithm](https://en.wikipedia.org/wiki/Floyd%E2%80%93Warshall_algorithm) and distributes the routing result back to all EdgeNodes.
+
+**Breaking change:** Super mode no longer uses a UDP listener, WireGuard private keys, UAPI, or the `wg` command on the Super side. If you have an existing v1 config with `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`, or `API_Prefix`, it will be rejected with a `legacy_udp_field` error. You must migrate to a v2 `SuperConfigV2` YAML before upgrading.
 
 ## Quick start
 
-Edit the file `gensuper.yaml` based on your requirement first.
+### 1. Generate configs
 
-```yaml
-Config output dir: /tmp/eg_gen
-Enable generated config overwrite: false # Allow overwrite while output the config
-Add NodeID to the interface name: false  # Add NodeID to the interface name in generated edge config
-ConfigTemplate for super node: ""
-ConfigTemplate for edge node: ""
-Network name: eg_net
-Super Node:
-  Listen port: 3456
-  EdgeAPI prefix: /eg_net/eg_api
-  Endpoint(IPv4)(optional): example.com
-  Endpoint(IPv6)(optional): example.com
-  Endpoint(EdgeAPI): http://example.com:3456/eg_net/eg_api
-Edge Node:
-  Node IDs: "[1~10,11,19,23,29,31,55~66,88~99]"
-  MacAddress prefix: ""                 # Leave blank to generate randomly
-  IPv4 range: 192.168.76.0/24           # The IP part can be omitted
-  IPv6 range: fd95:71cb:a3df:e586::/64  # 
-  IPv6 LL range: fe80::a3df:0/112       #  
-```
-Then run this, and the required configuration file will be generated.
-```
-$ ./etherguard-go -mode gencfg -cfgmode super -config example_config/super_mode/gensuper.yaml
-```
-
-Run this in SuperNode 
-```
-./etherguard-go -config [config path] -mode super
-```
-Run this in EdgeNode   
-```
-./etherguard-go -config [config path] -mode edge
-```
-
-## Documentation
-
-This is the documentation of the super_mode of this example_config
-Before reading this, I'd like to suggest you read the [static mode](../static_mode/README.md) first.
-
-In the super mode of the edge node, the `NextHopTable` and `Peers` section are useless. All infos are download from super node.  
-Meanwhile, super node will generate pre shared key for inter-edge communication(if `UsePSKForInterEdge` enabled).
-
-### SuperMsg
-There are new type of DstID called `SuperMsg`(65534). All packets sends to and receive from super node are using this packet type.  
-This packet will not send to any other edge node, just like `DstID == self.NodeID`
-
-## Control Message
-In Super mode, Beside `Normal Packet`. We introduce a new packet type called `Control Message`. In Super mode, we will not relay any control message. We just receive or send it to target directly.  
-We list all the control message we use in the super mode below.
-
-### Register
-This control message works like this picture:
-![Workflow of Register](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS01.png)  
-
-1. EdgeNode send Register to the super node  
-2. SuperNode knows it's external IP and port number
-3. Update it to database and distribute `UpdatePeerMsg` to all edges
-4. Other EdgeNodes get the notification, download the updated peer infos from SuperNode via HTTP API
-
-### Ping/Pong
-While EdgeNodes get their peer info, they will trying to talk each other directly like this picture:
-![Workflow of Ping/Pong](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS02.png)  
-
-1. Send `Ping` to all other edges with local time with TTL=0
-2. Receive a `Ping`, Subtract the peer time from local time, we get a single way latency.
-3. Send a `Pong` to SuperNode with single way latency, let SuperNode calculate the NextHopTable
-4. Wait the SuperNode push `UpdateNhTable` message and download it.
-
-### <a name="AdditionalCost"></a>AdditionalCost
-While we have all latency data of all nodes, `AdditionalCost` will be applied before `Floyd-Warshall` calculated.
-
-Take the situation of this picture as an example:
-![EGS08](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS08.png)
-Path | Latency |Cost|Win
---------|:--------|:---|:--
-A->B->C | 3ms | 3 |
-A->C | 4ms | 4 | O
-
-In this situation, the difference between 3ms and 4ms is only 1ms
-It’s not worth to save this 1ms, and the forwarding itself takes time
-
-With the `AdditionalCost` parameter, each node can set the additional cost of forwarding through this node
-
-If ABC is all set to `AdditionalCost=10`
-Path | Latency |AdditionalCost|Cost|Win
---------|:--------|:-------------|:---|:--
-A->B->C | 3ms | 20 | 23 |
-A->C | 4ms | 10 | 14 | O
-
-A->C will use direct connection instead of forward via `B` in order to save 1ms  
-Here `AdditionalCost=10` can be interpreted as: It have to save 10ms to transfer by this Node.
-
-### UpdateNhTable
-While supernode get a `Pong` message, it will update the `Distance matrix` and run the [Floyd-Warshall Algorithm](https://en.wikipedia.org/wiki/Floyd–Warshall_algorithm) to calculate the NextHopTable.  
-![image](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS03.png)  
-If there are any changes of this table, it will distribute `UpdateNhTable` to all edges to till then download the latest NextHopTable via HTTP API as soon as possible.
-
-### ServerUpdate
-Send message to EdgeMode from SuperNode
-1. Turn off EdgeNode  
-    * Version Not match
-    * Wrong NodeID
-    * Deleted by SuperNode
-2. Notify EdgeNode there are something new
-    * UpdateNhTable
-    * UpdatePeer
-    * UpdateSuperParams
-
-## HTTP EdgeAPI
-Why we use HTTP API instead of pack all information in the `UpdateXXX`?  
-Because UDP is an unreliable protocol, there is an limit on the amount of content that can be carried.  
-But the peer list contains all the peer information, the length is not fixed, it may exceed  
-So we use `UpdateXXX` to tell we have a update, please download the latest information from SuperNode via HTTP API as soon as possible.
-And `UpdateXXX` itself is not reliable, maybe it didn't reach the edge node at all.  
-So the information of `UpdateXXX` carries the `state hash`. Bring it when with HTTP API. When the super node receives the HTTP API and sees the `state hash`, it knows that the edge node has received the `UpdateXXX`.  
-Otherwise, it will send `UpdateXXX` to the node again after few seconds.
-
-The default configuration is to use HTTP. **But for the sake of your security, it is recommended to use an reverse-proxy ot convert it into https**
-I have thought about the development of SuperNode to natively support https, but the dynamic update of the certificate costs me too much time.
-
-## HTTP Manage API
-HTTP also has some APIs for the front-end to help manage the entire network
-
-### super/state   
+Edit `gensuper.yaml` with your network parameters, then generate all config files:
 
 ```bash
-curl "http://127.0.0.1:3456/eg_net/eg_api/manage/super/state?Password=passwd_showstate"
-```    
-It can show some information such as single way latency or last seen time.   
-We can visualize it by Force-directed graph drawing.  
-
-There is an `Infinity` section in the json response. It should be 9999. It means infinity if the number larger than it.  
-Cuz json can't present infinity so that I use this trick.  
-While we see the latency larger than this, we doesn't need to draw lines in this two nodes.
-
-Example return value:
-```json
-{
-  "PeerInfo": {
-    "1": {
-      "Name": "Node_01",
-      "LastSeen": "2021-12-05 21:21:56.039750832 +0000 UTC m=+23.401193649"
-    },
-    "2": {
-      "Name": "Node_02",
-      "LastSeen": "2021-12-05 21:21:57.711616169 +0000 UTC m=+25.073058986"
-    }
-  },
-  "Infinity": 99999,
-  "Edges": {
-    "1": {
-      "2": 0.002179297
-    },
-    "2": {
-      "1": -0.00030252
-    }
-  },
-  "Edges_Nh": {
-    "1": {
-      "2": 0.012179297
-    },
-    "2": {
-      "1": 0.00969748
-    }
-  },
-  "NhTable": {
-    "1": {
-      "2": 2
-    },
-    "2": {
-      "1": 1
-    }
-  },
-  "Dist": {
-    "1": {
-      "1": 0,
-      "2": 0.012179297
-    },
-    "2": {
-      "1": 0.00969748,
-      "2": 0
-    }
-  }
-}
+./etherguard-go -mode gencfg -cfgmode super -config example_config/super_mode/gensuper.yaml
 ```
 
-Section meaning:  
-1. PeerInfo: NodeID，Name，LastSeen
-2. Edges: The **Single way latency**，99999 or missing means unreachable(UDP hole punching failed)
-3. Edges_Nh: Edges with AdditionalCost
-3. NhTable: Calculate result.
-4. Dist: The latency of **packet through Etherguard**
+The generator creates a v2 Super YAML and per-Edge YAML files with fresh per-Edge ControlPSKeys. Each Edge gets its own unique HMAC signing key, which appears only in that Edge's config and the matching Super peer entry.
 
-### peer/add
-We can add new edges with this API without restart the SuperNode
+### 2. Start the SuperNode
 
-Exanple:  
-```bash
-curl -X POST "http://127.0.0.1:3456/eg_net/eg_api/manage/peer/add?Password=passwd_addpeer" \
- -H "Content-Type: application/x-www-form-urlencoded" \
- -d "NodeID=100&Name=Node_100&PubKey=DG%2FLq1bFpE%2F6109emAoO3iaC%2BshgWtdRaGBhW3soiSI%3D&AdditionalCost=1000&PSKey=w5t64vFEoyNk%2FiKJP3oeSi9eiGEiPteZmf2o0oI2q2U%3D&SkipLocalIP=false"
-```
-
-Parameter:
-1. URL query: Password: Password. Configured in the config file.
-1. Post body:
-    1. NodeID: Node ID
-    1. Name: Name
-    1. PubKey: Public Key
-    1. PSKey: Pre shared Key
-    1. AdditionalCost:  Additional cost for packet transfer. Unit: ms
-    1. SkipLocalIP: Skip local IP reported by the node
-    1. nexthoptable: If the `graphrecalculatesetting` of your super node is in static mode, you need to provide a new `NextHopTable` in json format in this parameter.
-
-Return value:
-1. http code != 200: Error reason  
-2. http code == 200，An example edge config.  
-    * generate by contents in `edgetemplate` with custom data (nodeid/name/pubkey)
-    * Convenient for users to copy and paste
-
-### peer/del  
-Delete peer
-
-There are two deletion modes, namely password deletion and private key deletion.  
-Designed to be used by administrators, or for people who join the network and want to leave the network.  
-
-Use Password to delete any node. Take the newly added node above as an example, use this API to delete the node
-```bash
-curl "http://127.0.0.1:3456/eg_net/eg_api/manage/peer/del?Password=passwd_delpeer&NodeID=100"
-```
-
-We can also use privkey to delete, the same as above, but use privkey parameter only.
-```bash
-curl "http://127.0.0.1:3456/eg_net/eg_api/manage/peer/del?PrivKey=iquaLyD%2BYLzW3zvI0JGSed9GfDqHYMh%2FvUaU0PYVAbQ%3D"
-```
-
-Parameter:
-1. URL query: 
-    1. Password: Password: Password. Configured in the config file.
-    1. nodeid: Node ID that you want to delete
-    1. privkey: The private key of the edge
-
-Return value:
-1. http code != 200: Error reason  
-2. http code == 200: Success message
-
-### peer/update
-
-```bash
-curl -X POST "http://127.0.0.1:3456/eg_net/eg_api/manage/peer/update?Password=passwd_updatepeer&NodeID=1" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "AdditionalCost=10&SkipLocalIP=false"
-```
-
-### super/update
-
-```bash
-curl -X POST "http://127.0.0.1:3456/eg_net/eg_api/manage/super/update?Password=passwd_updatesuper" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "SendPingInterval=15&HttpPostInterval=60&PeerAliveTimeout=70&DampingFilterRadius=3"
-```
-
-
-
-### SuperNode Config Parameter
-
-Key                 | Description
---------------------|:-----
-NodeName            | node name
-PostScript          | Running script after initialized
-PrivKeyV4           | Private key for IPv4 session
-PrivKeyV6           | Private key for IPv6 session
-ListenPort          | UDP listen port
-ListenPort_EdgeAPI  | HTTP EdgeAPI listen port
-ListenPort_ManageAPI| HTTP ManageAPI listen port
-API_Prefix          | HTTP API prefix
-RePushConfigInterval| The interval of push`UpdateXXX`
-HttpPostInterval    | The interval of report by HTTP Edge API
-PeerAliveTimeout    | The time of inactive which marks peer offline
-SendPingInterval    | The interval that send pings/pongs between EdgeNodes
-[LogLevel](../static_mode/README.md#LogLevel)| Log related settings
-[Passwords](#Passwords) | Password for HTTP ManageAPI, 5 API passwords are independent
-[GraphRecalculateSetting](#GraphRecalculateSetting) | Some parameters related to [Floyd-Warshall algorithm](https://zh.wikipedia.org/zh-tw/Floyd-Warshall algorithm)
-[NextHopTable](../static_mode/README.md#NextHopTable) | `NextHopTable` used by StaticMode
-EdgeTemplate        |  for HTTP ManageAPI `peer/add`. Refer to this configuration file and show a sample configuration file of the edge to the user
-UsePSKForInterEdge  | Whether to enable pre-share key communication between edges.<br>If enabled, SuperNode will generate PSK for edges  automatically
-[Peers](#EdgeNodes)     | EdgeNode information
-
-<a name="Passwords"></a>Passwords      | Description
---------------------|:-----
-ShowState   | HTTP ManageAPI Password for `super/state`
-AddPeer     | HTTP ManageAPI Password for `peer/add`
-DelPeer     | HTTP ManageAPI Password for `peer/del`
-UpdatePeer  | HTTP ManageAPI Password for `peer/update`
-UpdateSuper | HTTP ManageAPI Password for `super/update`
-
-<a name="GraphRecalculateSetting"></a>GraphRecalculateSetting      | Description
---------------------|:-----
-StaticMode                 | Disable `Floyd-Warshall`, use `NextHopTable`in the configuration instead.<br>SuperNode for udp hole punching only.
-ManualLatency              | Set latency manually, ignore Edge reported latency.
-JitterTolerance            | Jitter tolerance, after receiving Pong, one 37ms and one 39ms will not trigger recalculation<br>Compared to last calculation
-JitterToleranceMultiplier  | high ping allows more errors<br>https://www.desmos.com/calculator/raoti16r5n
-DampingFilterRadius        | Windows radius for the low pass filter for latency damping prevention
-TimeoutCheckInterval       | The interval to check if there any `Pong` packet timed out, and recalculate the NhTable
-RecalculateCoolDown        | Floyd-Warshal is an O(n^3)time complexity algorithm<br>This option set a cooldown, and prevent it cost too many CPU<br>Connect/Disconnect event ignores this cooldown.
-
-<a name="EdgeNodes"></a>Peers      | Description
---------------------|:-----
-NodeID              | Peer's node ID
-PubKey              | Peer's public key
-PSKey               | Pre shared key
-[AdditionalCost](#AdditionalCost)      | AdditionalCost(unit:ms)<br> `-1` means uses client's self configuration.
-SkipLocalIP         | Ignore Edge reported local IP, use public IP only while udp-hole-punching
-
-### EdgeNode Config Parameter
-
-#### [EdgeConfig Root](../static_mode/README.md#EdgeConfig)
-
-<a name="DynamicRoute"></a>DynamicRoute      | Description
---------------------|:-----
-SendPingInterval     | The interval that send pings/pongs between EdgeNodes(sec)
-PeerAliveTimeout     | The time of inactive which marks peer offline(sec)
-TimeoutCheckInterval | The interval of check PeerAliveTimeout(sec)
-ConnNextTry          | After marked offline, the interval of switching Endpoint(sec)
-DupCheckTimeout      | Duplication chack timeout.(sec)
-[AdditionalCost](#AdditionalCost)     | AdditionalCost(unit:ms)
-SaveNewPeers         | Save peer info to local file.
-[SuperNode](#SuperNode)          | SuperNode related configs
-[P2P](../p2p_mode/README.md#P2P)                  | P2P related configs
-[NTPConfig](#NTPConfig)          | NTP related configs
-
-<a name="SuperNode"></a>SuperNode      | Description
----------------------|:-----
-UseSuperNode         | Enable SuperMode
-PSKey                | PreShared Key to communicate to SuperNode
-EndpointV4           | IPv4 Endpoint of the SuperNode
-PubKeyV4             | Public Key for IPv4 session to SuperNode
-EndpointV6           | IPv6 Endpoint of the SuperNode
-PubKeyV6             | Public Key for IPv6 session to SuperNode
-EndpointEdgeAPIUrl   | The EdgeAPI of the SuperNode
-SkipLocalIP          | Do not report local IP to SuperNode.
-SuperNodeInfoTimeout | Experimental option, SuperNode offline timeout, switch to P2P mode<br>P2P mode needs to be enabled first<br>This option is useless while `UseP2P=false`<br>P2P mode has not been tested, stability is unknown, it is not recommended for production use
-
-
-<a name="NTPConfig"></a>NTPConfig      | Description
---------------------|:-----
-UseNTP            | Sync time at startup
-MaxServerUse      | Use how many server to sync time
-SyncTimeInterval  | The interval of syncing time
-NTPTimeout        | NTP server connection Timeout
-Servers           | NTP server list
-
-
-## V4 V6 Two Keys
-Why we split IPv4 and IPv6 into two session? 
-Because of this situation
-
-![OneChannel](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS04.png)
-
-In this case, SuperNode does not know the external ipv4 address of Node02 and cannot help Node1 and Node2 to UDP hole punch.
-
-![TwoChannel](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS05.png)
-
-So like this, both V4 and V6 establish a session, so that both V4 and V6 can be taken care of at the same time.
-
-## UDP hole punch reachability
-For different NAT type, the UDP hole punch reachability can refer this table.([Origin](https://dh2i.com/kbs/kbs-2961448-understanding-different-nat-types-and-hole-punching/))
-
-![reachability between NAT types](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS06.png)  
-
-And if both sides are using ConeNAT, it's not gerenteed to punch success. It depends on the topology and the devices attributes.  
-Like the section 3.5 in [this article](https://bford.info/pub/net/p2pnat/#SECTION00035000000000000000), we can't punch success.
-
-## Notice for Relay node
-Unlike n2n, our supernode do not relay any packet for edges.  
-If the edge punch failed and no any route available, it's just unreachable. In this case we need to setup a relay node.
-
-Relay node is a regular edge in public network, but `interface=dummy`.  
-
-And we have to note that **do not** use 127.0.0.1 to connect to supernode.  
-Because supernode well distribute the source IP of the nodes to all other edges. But 127.0.0.1 is not accessible from other edge.  
-
-![Setup relay node](https://raw.githubusercontent.com/KusakabeSi/EtherGuard-VPN/master/example_config/super_mode/EGS07.png)
-
-To avoid this issue, please use the external IP of the supernode in the edge config.
-
-## Quick start
-Run this example_config (please open three terminals):
 ```bash
 ./etherguard-go -config example_config/super_mode/EgNet_super.yaml -mode super
+```
+
+The SuperNode listens on two TCP ports (Edge API and Management API). No UDP socket is created. If you pass a legacy v1 YAML file, the process exits immediately with:
+
+```
+control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super; use a v2 SuperConfigV2 YAML
+```
+
+### 3. Start EdgeNodes
+
+```bash
 ./etherguard-go -config example_config/super_mode/EgNet_edge001.yaml -mode edge
 ./etherguard-go -config example_config/super_mode/EgNet_edge002.yaml -mode edge
 ```
-Because it is in `stdio` mode, stdin will be read into the VPN network  
-Please type in one of the edge windows
+
+### 4. Try it
+
+The example configs use `stdio` mode. Type in one Edge window:
+
 ```
 b1aaaaaaaaaa
 ```
-b1 will be converted into a 12byte layer 2 header, b is the broadcast address `FF:FF:FF:FF:FF:FF`, 1 is the ordinary MAC address `AA:BB:CC:DD:EE:01`, aaaaaaaaaa is the payload, and then feed it into the VPN  
-You should be able to see the string b1aaaaaaaaaa on another window. The first 12 bytes are converted back
+
+The `b` is the broadcast address (`FF:FF:FF:FF:FF:FF`), `1` is the MAC address (`AA:BB:CC:DD:EE:01`), and `aaaaaaaaaa` is the payload. You should see the same string appear in the other Edge window.
+
+## Architecture
+
+### How it works
+
+1. Each Edge sends a signed `POST /edge/v2/register` to the SuperNode, advertising its local and STUN-derived candidates.
+2. The SuperNode records the Edge in its control state and returns a `ControlV2Snapshot` containing all known peers and current parameters.
+3. Edges periodically send `POST /edge/v2/report` with latency observations (pong results) and refreshed candidates.
+4. The SuperNode feeds latency data into the Floyd-Warshall graph and recalculates the NextHopTable.
+5. Edges subscribe to `GET /edge/v2/events` (SSE stream) or poll `GET /edge/v2/snapshot` to detect changes.
+6. When the snapshot revision changes, the Edge applies the new peer list and routing table to its WireGuard device.
+
+### Control API v2 routes
+
+All routes are served under the `APIPrefix` configured in the Super YAML (default `/edge/v2`).
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/edge/v2/register` | Edge introduces itself; returns initial snapshot |
+| POST | `/edge/v2/report` | Edge sends pongs, candidate refreshes, heartbeat |
+| GET | `/edge/v2/snapshot` | Edge fetches current peer snapshot (ETag/304) |
+| GET | `/edge/v2/events` | SSE stream of state-change events |
+
+### HMAC request signing
+
+Every Control API v2 request carries four headers:
+
+| Header | Value |
+|--------|-------|
+| `X-EG-NodeID` | Decimal NodeID |
+| `X-EG-Timestamp` | Unix seconds |
+| `X-EG-Nonce` | Unique per-request token |
+| `X-EG-Signature` | `hex(HMAC-SHA256(key=ControlPSKey, msg=canonical))` |
+
+The canonical string is:
+```
+METHOD\nescaped-path\nunix-timestamp\nnonce\nhex(SHA-256(body))
+```
+
+The Super verifies all four headers. Requests outside a 60-second clock skew window, with replayed nonces, oversized bodies (>1 MiB), or incorrect signatures are rejected with a uniform `"control auth failed"` response that never reveals which check failed or contains any key material.
+
+**Security boundary:** The ControlPSKey is a per-Edge SECRET. It must never appear in URLs, log files, snapshots, or any HTTP response to other Edges. The `json:"-"` tag on `SuperNodeV2Ref.ControlPSKey` and `SuperConfigV2Peer.ControlPSKey` prevents serialization leaks.
+
+### TLS via reverse proxy
+
+The HMAC signature authenticates but does not encrypt. In production, you **must** run a reverse proxy (nginx, Caddy, etc.) in front of the SuperNode to provide TLS. The SuperNode itself only speaks HTTP.
+
+```nginx
+server {
+    listen 443 ssl;
+    ssl_certificate /etc/ssl/etherguard.crt;
+    ssl_certificate_key /etc/ssl/etherguard.key;
+
+    location /edge/v2/ {
+        proxy_pass http://127.0.0.1:3456/edge/v2/;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_buffering off;
+    }
+    location /edge/v2/manage/ {
+        proxy_pass http://127.0.0.1:3456/edge/v2/manage/;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### SSE with polling fallback
+
+Edges connect to `GET /edge/v2/events` for real-time state-change notifications. The stream uses standard Server-Sent Events format:
+
+- `id:` fields are monotonically increasing (`evt-N`).
+- `event:` types are `peer_change`, `peer_gone`, `params_change`, or `revision`.
+- `data:` carries JSON payload (e.g. `{\"node_id\":1,\"node_name\":\"Node001\"}`).
+
+On reconnect, the Edge sends `Last-Event-ID` to resume from the retained buffer. If the server cannot replay (ID older than retention), the Edge must re-fetch the full snapshot.
+
+A dedicated polling goroutine runs alongside SSE, fetching `/edge/v2/snapshot` at `PollIntervalSeconds`. This ensures progress even when SSE is down. The Edge uses ETag/304 conditional requests to avoid transferring unchanged snapshots.
+
+### STUN candidate discovery
+
+The Super distributes STUN servers to all Edges via the `STUNServers` field in the parameters stream. Each Edge uses its existing WireGuard bind socket (same port as its UDP data path) to perform STUN binding requests. The XOR-MAPPED address becomes a `stun` candidate.
+
+**Same-socket limitation:** STUN candidates are measured from the WireGuard bind. If a STUN server sees a different source port than the WireGuard socket, the candidate is invalid because the NAT mapping is port-specific. Edges do not create a second UDP socket for STUN.
+
+STUN URIs use IP literals only: `stun:203.0.113.10:3478` or `stuns:[2001:db8::10]:5349`. DNS resolution must happen before configuration.
+
+### No relay / TURN
+
+Unlike n2n, the SuperNode does not relay any packets. If UDP hole-punching between two Edges fails and no alternative route exists, those Edges cannot communicate. There is no fallback forwarding.
+
+If you need connectivity between Edges that cannot hole-punch, deploy a relay node: a regular Edge on a public network with `interface=dummy`.
+
+## SuperNode Config Parameter (v2)
+
+| Key | Description |
+|-----|-------------|
+| NodeName | Node name (max 32 chars) |
+| APIUrl | URL of the Edge API listener (e.g. `http://host:3456`) |
+| APIPrefix | API path prefix (e.g. `/edge/v2`) |
+| ManagementAuth | `{User, PasswordHash}` for `/manage/*` endpoints |
+| STUNServers | List of STUN server URIs (`stun:host:port`) |
+| STUNRequestTimeoutSeconds | Timeout per STUN request |
+| STUNRefreshIntervalSeconds | How often to refresh STUN candidates |
+| PollIntervalSeconds | Edge polling interval for snapshot |
+| ReportIntervalSeconds | Edge report (pong/candidate) interval |
+| HeartbeatIntervalSeconds | Edge heartbeat interval |
+| EventReplay | SSE replay ring depth (default 256) |
+| PeerAliveTimeoutSeconds | Seconds of inactivity before a peer is removed |
+| UsePSKForInterEdge | Generate pairwise WireGuard PSKs for inter-Edge traffic |
+| DampingFilterRadius | Low-pass filter window radius for latency smoothing |
+| Peers | List of pre-authorized Edge peers |
+
+### Peers (Super-side)
+
+| Key | Description |
+|-----|-------------|
+| NodeID | Edge's node ID |
+| NodeName | Edge's name |
+| ControlPSKey | Per-Edge HMAC signing secret (never exposed to other Edges) |
+| AdditionalCost | Extra forwarding cost in ms (`-1` = use Edge's own setting) |
+
+## EdgeNode Config Parameter (v2)
+
+### EdgeConfig Root
+
+The Edge v2 config replaces the old `DynamicRoute.SuperNode` block with a `SuperNodeV2` reference.
+
+### SuperNodeV2
+
+| Key | Description |
+|-----|-------------|
+| APIUrl | SuperNode's Edge API URL |
+| APIPrefix | API path prefix (must match Super's `APIPrefix`) |
+| NodeID | SuperNode's non-special NodeID |
+| ControlPSKey | This Edge's HMAC signing secret (must match Super's peer entry) |
+
+### Interface, LogLevel, Peers
+
+These are identical to [Static Mode](../static_mode/README.md) configuration. In Super mode, the `Peers` list is typically empty since peer information is downloaded from the SuperNode.
+
+## V1 config migration
+
+If you run `-mode super` with an old v1 config, you will see:
+
+```
+Error: control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super
+```
+
+The rejected fields are: `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`, `API_Prefix`, `ListenPort_EdgeAPI`, `ListenPort_ManageAPI`.
+
+To migrate:
+1. Generate a fresh v2 config: `./etherguard-go -mode gencfg -cfgmode super -config gensuper.yaml`
+2. Review the generated `EgNet_super.yaml` and edge YAMLs.
+3. Start with `-mode super -config EgNet_super.yaml`.
+
+## HTTP Manage API
+
+The legacy `/manage/*` endpoints are preserved for front-end tooling:
+
+```bash
+curl "http://127.0.0.1:3456/edge/v2/manage/super/state?Password=passwd_hash_example"
+```
+
+See the [legacy Manage API documentation](#http-manage-api) below for the full endpoint list (peer/add, peer/del, peer/update, super/update, super/state).
+
+## Example configs
+
+| File | Description |
+|------|-------------|
+| `gensuper.yaml` | Generator input for creating v2 configs |
+| `EgNet_super.yaml` | Generated SuperNode v2 config |
+| `EgNet_edge001.yaml` | Generated EdgeNode 1 v2 config |
+| `EgNet_edge002.yaml` | Generated EdgeNode 2 v2 config |
+| `EgNet_edge100.yaml` | Generated EdgeNode 100 v2 config |
 
 ## Next: [P2P Mode](../p2p_mode/README.md)
