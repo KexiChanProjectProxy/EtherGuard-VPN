@@ -110,6 +110,11 @@ func (runtime *SuperHTTPRuntime) registerRequest(ready superHTTPReady, candidate
 		Version: mtypes.ControlV2ProtocolVersion, ListenPort: ready.port, FwMark: ready.fwmark,
 		DesiredTTL: runtime.config.DefaultTTL, RequestedAt: time.Now(), Implementation: "etherguard",
 	}
+	if runtime.device != nil {
+		runtime.device.staticIdentity.RLock()
+		request.PubKey = runtime.device.staticIdentity.publicKey.ToString()
+		runtime.device.staticIdentity.RUnlock()
+	}
 	for _, candidate := range candidates {
 		host, _, err := net.SplitHostPort(candidate.Address)
 		if err != nil {

@@ -77,10 +77,10 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 	candidateState = append(candidateState, addressesToCandidates(req.LocalV6, mtypes.ControlV2CandidateLocal)...)
 	candidateState = append(candidateState, addressesToCandidates(req.PublicV4, mtypes.ControlV2CandidateSTUN)...)
 	candidateState = append(candidateState, addressesToCandidates(req.PublicV6, mtypes.ControlV2CandidateSTUN)...)
-	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, LocalV4: append([]string{}, req.LocalV4...), LocalV6: append([]string{}, req.LocalV6...), PublicV4: append([]string{}, req.PublicV4...), PublicV6: append([]string{}, req.PublicV6...), LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
-	changed := !exists || old.view.NodeName != view.NodeName || old.view.LastSeen.IsZero() || old.controlKey != controlPSKey
+	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, PubKey: req.PubKey, LocalV4: append([]string{}, req.LocalV4...), LocalV6: append([]string{}, req.LocalV6...), PublicV4: append([]string{}, req.PublicV4...), PublicV6: append([]string{}, req.PublicV6...), LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
+	changed := !exists || old.view.NodeName != view.NodeName || old.view.PubKey != view.PubKey || old.view.LastSeen.IsZero() || old.controlKey != controlPSKey
 	if exists {
-		view.PubKey, view.LatencyMS = old.view.PubKey, cloneLatency(old.view.LatencyMS)
+		view.LatencyMS = cloneLatency(old.view.LatencyMS)
 		changed = changed || !sameStrings(old.view.LocalV4, view.LocalV4) || !sameStrings(old.view.LocalV6, view.LocalV6) || !sameStrings(old.view.PublicV4, view.PublicV4) || !sameStrings(old.view.PublicV6, view.PublicV6)
 	}
 	s.peers[req.NodeID] = &controlPeerRecord{view: view, controlKey: controlPSKey, candidates: candidateState}

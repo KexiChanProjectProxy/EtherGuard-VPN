@@ -177,6 +177,7 @@ func (p *ControlV2Pong) Validate() error {
 type ControlV2RegisterRequest struct {
 	NodeID         Vertex    `json:"node_id"`
 	NodeName       string    `json:"node_name"`
+	PubKey         string    `json:"pub_key"`
 	Version        string    `json:"version"`
 	ListenPort     int       `json:"listen_port"`
 	FwMark         uint32    `json:"fwmark"`

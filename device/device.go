@@ -568,12 +568,13 @@ func RandomPSK() (pk NoisePresharedKey) {
 }
 
 func (device *Device) GetConnurl(v mtypes.Vertex) string {
-	if peer, has := device.peers.IDMap[v]; has {
-		if peer.endpoint != nil {
-			return peer.endpoint.DstToString()
-		}
+	device.peers.RLock()
+	peer, has := device.peers.IDMap[v]
+	device.peers.RUnlock()
+	if !has {
+		return ""
 	}
-	return ""
+	return peer.GetEndpointDstStr()
 }
 
 func (device *Device) RemovePeerByID(id mtypes.Vertex) {
