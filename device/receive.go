@@ -127,6 +127,9 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 		// check size of packet
 
 		packet := buffer[:size]
+		if device.superSTUN != nil && device.superSTUN.HandlePacket(packet) {
+			continue
+		}
 		msgType := path.Usage(packet[0])
 		msgTTL := uint8(packet[1])
 		msgType_wg := msgType

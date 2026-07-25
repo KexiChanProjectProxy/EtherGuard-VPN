@@ -125,9 +125,10 @@ type Device struct {
 		mtu    int32
 	}
 
-	ipcMutex sync.RWMutex
-	closed   chan int
-	log      *Logger
+	ipcMutex  sync.RWMutex
+	closed    chan int
+	log       *Logger
+	superSTUN *SuperSTUNManager
 }
 
 type IdAndTime struct {
@@ -331,6 +332,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.closed = make(chan int)
 	device.log = logger
 	device.net.bind = bind
+	device.superSTUN = NewSuperSTUNManager(device)
 	device.tap.device = tapDevice
 	mtu, err := device.tap.device.MTU()
 	if err != nil {
