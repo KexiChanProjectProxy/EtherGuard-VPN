@@ -1,8 +1,3 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2021 Kusakabe Si. All Rights Reserved.
- */
-
 package gencfg
 
 import (
@@ -14,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/device"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
@@ -47,13 +41,7 @@ func readFLn(promptF string, checkFn func(string) error, defaultAns func() strin
 
 func ParseIDs(s string) ([]int, int, int, error) {
 	ret := make([]int, 0)
-	if len(s) <= 3 {
-		return ret, 0, 0, fmt.Errorf("Parse Error: %v", s)
-	}
-	if s[0] != '[' {
-		return ret, 0, 0, fmt.Errorf("Parse Error: %v", s)
-	}
-	if s[len(s)-1] != ']' {
+	if len(s) <= 3 || s[0] != '[' || s[len(s)-1] != ']' {
 		return ret, 0, 0, fmt.Errorf("Parse Error: %v", s)
 	}
 	s = s[1 : len(s)-1]
@@ -110,190 +98,180 @@ func ParseIDs(s string) ([]int, int, int, error) {
 }
 
 func printExampleSMCfg() {
-	tconfig := SMCfg{}
-	toprint, _ := yaml.Marshal(tconfig)
+	toprint, _ := yaml.Marshal(SMCfg{})
 	fmt.Print(string(toprint))
 }
 
-func GenSuperCfg(SMCinfigPath string, printExample bool) (err error) {
-	SMCfg := SMCfg{}
+func GenSuperCfg(configPath string, printExample bool) error {
 	if printExample {
 		printExampleSMCfg()
-		return
+		return nil
 	}
-	err = mtypes.ReadYaml(SMCinfigPath, &SMCfg)
-	if err != nil {
+	var input SMCfg
+	if err := mtypes.ReadYaml(configPath, &input); err != nil {
+		return err
+	}
+	if err := validateSuperGeneratorInput(&input); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(input.ConfigOutputDir, 0o700); err != nil {
 		return err
 	}
 
-	os.Chdir(filepath.Dir(SMCinfigPath))
+	super, err := GetExampleSuperConf(resolveTemplate(configPath, input.SuperConfigTemplate), false)
+	if input.SuperConfigTemplate != "" && err != nil {
+		return fmt.Errorf("read Super v2 template: %w", err)
+	}
+	edgeTemplate, err := GetExampleEdgeConfV2(resolveTemplate(configPath, input.EdgeConfigTemplate))
+	if err != nil {
+		return fmt.Errorf("read Edge v2 template: %w", err)
+	}
+	applySuperInputs(&super, &input)
 
-	err = os.MkdirAll(SMCfg.ConfigOutputDir, 0o700)
+	nodeIDs, _, maxNodeID, err := ParseIDs(input.EdgeNode.NodeIDs)
 	if err != nil {
 		return err
 	}
-	var fileWriter bulkFileWriter
-	fileWriter.files = make(map[string]fileWriterfile)
-	fileWriter.ow = SMCfg.ConfigOutputDirOW
-
-	if SMCfg.SuperConfigTemplate != "" {
-		var sconfig mtypes.SuperConfig
-		err = mtypes.ReadYaml(SMCfg.SuperConfigTemplate, &sconfig)
-		if err != nil {
-			fmt.Printf("Error read config: %v\t%v\n", SMCfg.SuperConfigTemplate, err)
-			return err
-		}
+	macPrefix, err := edgeMacPrefix(input.EdgeNode.MacPrefix, maxNodeID)
+	if err != nil {
+		return err
+	}
+	if _, _, err := tap.GetIP(4, input.EdgeNode.IPv4Range, uint32(maxNodeID)); input.EdgeNode.IPv4Range != "" && err != nil {
+		return err
+	}
+	if _, _, err := tap.GetIP(6, input.EdgeNode.IPv6Range, uint32(maxNodeID)); input.EdgeNode.IPv6Range != "" && err != nil {
+		return err
+	}
+	if _, _, err := tap.GetIP(6, input.EdgeNode.IPv6LLRange, uint32(maxNodeID)); input.EdgeNode.IPv6LLRange != "" && err != nil {
+		return err
 	}
 
-	if SMCfg.EdgeConfigTemplate != "" {
-		var econfig mtypes.EdgeConfig
-		err = mtypes.ReadYaml(SMCfg.EdgeConfigTemplate, &econfig)
+	writer := bulkFileWriter{files: make(map[string]fileWriterfile), ow: input.ConfigOutputDirOW}
+	super.Peers = make([]mtypes.SuperConfigV2Peer, 0, len(nodeIDs))
+	width := len(strconv.Itoa(maxNodeID))
+	for _, rawID := range nodeIDs {
+		nodeID := mtypes.Vertex(rawID)
+		idstr := fmt.Sprintf("%0"+strconv.Itoa(width)+"d", rawID)
+		controlKey := device.RandomPSK().ToString()
+		edge := edgeTemplate
+		edge.NodeID = nodeID
+		edge.NodeName = input.NetworkName
+		edge.Interface.Name = input.NetworkName
+		if input.NetworkIFNameID {
+			edge.NodeName += idstr
+			edge.Interface.Name += idstr
+		}
+		edge.Interface.MacAddrPrefix = macPrefix
+		edge.Interface.IPv4CIDR = input.EdgeNode.IPv4Range
+		edge.Interface.IPv6CIDR = input.EdgeNode.IPv6Range
+		edge.Interface.IPv6LLPrefix = input.EdgeNode.IPv6LLRange
+		edge.SuperNodeV2 = mtypes.SuperNodeV2Ref{APIUrl: super.APIUrl, APIPrefix: super.APIPrefix, NodeID: input.Supernode.NodeID, ControlPSKey: controlKey}
+		edge.Peers = clonePeersWithPairwisePSKs(edgeTemplate.Peers, super.UsePSKForInterEdge)
+		if err := edge.Validate(); err != nil {
+			return fmt.Errorf("validate Edge %d: %w", nodeID, err)
+		}
+		super.Peers = append(super.Peers, mtypes.SuperConfigV2Peer{NodeID: nodeID, NodeName: edge.NodeName, ControlPSKey: controlKey, AdditionalCost: 10})
+		data, err := yaml.Marshal(edge)
 		if err != nil {
-			fmt.Printf("Error read config: %v\t%v\n", SMCfg.EdgeConfigTemplate, err)
 			return err
 		}
+		writer.WriteFile(filepath.Join(input.ConfigOutputDir, input.NetworkName+"_edge"+idstr+".yaml"), data, 0o600)
 	}
+	if err := super.Validate(); err != nil {
+		return fmt.Errorf("validate Super v2 config: %w", err)
+	}
+	data, err := yaml.Marshal(super)
+	if err != nil {
+		return err
+	}
+	writer.WriteFile(filepath.Join(input.ConfigOutputDir, input.NetworkName+"_super.yaml"), data, 0o600)
+	return writer.Commit()
+}
 
-	sconfig, _ := GetExampleSuperConf(SMCfg.SuperConfigTemplate, false)
-
-	if len(SMCfg.NetworkName) > 10 {
+func validateSuperGeneratorInput(input *SMCfg) error {
+	if len(input.NetworkName) > 10 {
 		return fmt.Errorf("Name too long")
 	}
-	allowed := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
-	for _, c := range []byte(SMCfg.NetworkName) {
-		if strings.Contains(allowed, string(c)) == false {
+	const allowed = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-"
+	for _, c := range []byte(input.NetworkName) {
+		if !strings.Contains(allowed, string(c)) {
 			return fmt.Errorf("Name can only contain %v", allowed)
 		}
 	}
-
-	ListenPort := fmt.Sprintf("%v", SMCfg.Supernode.ListenPort)
-
-	API_Prefix := SMCfg.Supernode.EdgeAPI_Prefix
-	EndpointV4 := SMCfg.Supernode.EndpointV4
-	if EndpointV4 != "" {
-		_, _, err = conn.LookupIP(EndpointV4+":"+ListenPort, conn.EnabledAf4, 0)
-		if err != nil {
-			return err
-		}
-
+	if input.Supernode.APIURL == "" {
+		return fmt.Errorf("Super Node API URL is required")
 	}
-
-	EndpointV6 := SMCfg.Supernode.EndpointV6
-	if EndpointV6 != "" {
-		if strings.Contains(EndpointV6, ":") && (EndpointV6[0] != '[' || EndpointV6[len(EndpointV6)-1] != ']') {
-			return fmt.Errorf("Invalid IPv6 format, please use [%v] instead", EndpointV6)
-		}
-		_, _, err = conn.LookupIP(EndpointV6+":"+ListenPort, conn.EnabledAf6, 0)
-		if err != nil {
-			return
-		}
-	} else if EndpointV4 == "" {
-		return fmt.Errorf("Muse provide at lease v4 v6 address")
+	if input.Supernode.APIPrefix == "" {
+		input.Supernode.APIPrefix = mtypes.ControlV2APIPrefix
 	}
-
-	EndpointEdgeAPIUrl := SMCfg.Supernode.Endpoint_EdgeAPI
-
-	sconfig.NodeName = SMCfg.NetworkName + "SN"
-	sconfig.API_Prefix = API_Prefix
-	sconfig.ListenPort, _ = strconv.Atoi(ListenPort)
-	sconfig.ListenPort_EdgeAPI = ListenPort
-	sconfig.ListenPort_ManageAPI = ListenPort
-	sconfig.EdgeTemplate = SMCfg.EdgeConfigTemplate
-
-	NodeIDs, _, ModeIDmax, err := ParseIDs(SMCfg.EdgeNode.NodeIDs)
-	if err != nil {
-		return
+	if input.Supernode.NodeID == 0 {
+		input.Supernode.NodeID = 1
 	}
-	MacPrefix := SMCfg.EdgeNode.MacPrefix
+	return nil
+}
 
-	if MacPrefix != "" {
-		_, err = tap.GetMacAddr(MacPrefix, uint32(ModeIDmax))
-		if err != nil {
-			return err
-		}
-	} else {
-		pbyte := mtypes.RandomBytes(4, []byte{0xaa, 0xbb, 0xcc, 0xdd})
-		pbyte[0] &^= 0b00000001
-		pbyte[0] |= 0b00000010
-		MacPrefix = fmt.Sprintf("%02X:%02X:%02X:%02X", pbyte[0], pbyte[1], pbyte[2], pbyte[3])
+func applySuperInputs(super *mtypes.SuperConfigV2, input *SMCfg) {
+	super.NodeName = input.NetworkName + "SN"
+	super.APIUrl = input.Supernode.APIURL
+	super.APIPrefix = input.Supernode.APIPrefix
+	if len(input.Supernode.STUNServers) > 0 {
+		super.STUNServers = append([]string(nil), input.Supernode.STUNServers...)
 	}
+	setPositiveFloat(&super.STUNRequestTimeoutSeconds, input.Supernode.STUNRequestTimeoutSeconds)
+	setPositiveFloat(&super.STUNRefreshIntervalSeconds, input.Supernode.STUNRefreshIntervalSeconds)
+	setPositiveFloat(&super.PollIntervalSeconds, input.Supernode.PollIntervalSeconds)
+	setPositiveFloat(&super.ReportIntervalSeconds, input.Supernode.ReportIntervalSeconds)
+	setPositiveFloat(&super.HeartbeatIntervalSeconds, input.Supernode.HeartbeatIntervalSeconds)
+	setPositiveFloat(&super.PeerAliveTimeoutSeconds, input.Supernode.PeerAliveTimeoutSeconds)
+	if input.Supernode.EventReplay > 0 {
+		super.EventReplay = input.Supernode.EventReplay
+	}
+	if input.Supernode.DampingFilterRadius > 0 {
+		super.DampingFilterRadius = input.Supernode.DampingFilterRadius
+	}
+	if input.Supernode.UsePSKForInterEdge != nil {
+		super.UsePSKForInterEdge = *input.Supernode.UsePSKForInterEdge
+	}
+	if input.Supernode.ManagementUser != "" {
+		super.ManagementAuth.User = input.Supernode.ManagementUser
+	}
+	if input.Supernode.ManagementPasswordHash != "" {
+		super.ManagementAuth.PasswordHash = input.Supernode.ManagementPasswordHash
+	}
+}
 
-	IPv4Block := SMCfg.EdgeNode.IPv4Range
-	if IPv4Block != "" {
-		_, _, err = tap.GetIP(4, IPv4Block, uint32(ModeIDmax))
-		if err != nil {
-			return err
+func setPositiveFloat(target *float64, candidate float64) {
+	if candidate > 0 {
+		*target = candidate
+	}
+}
+
+func resolveTemplate(configPath, template string) string {
+	if template == "" || filepath.IsAbs(template) {
+		return template
+	}
+	return filepath.Join(filepath.Dir(configPath), template)
+}
+
+func edgeMacPrefix(requested string, maxNodeID int) (string, error) {
+	if requested != "" {
+		if _, err := tap.GetMacAddr(requested, uint32(maxNodeID)); err != nil {
+			return "", err
+		}
+		return requested, nil
+	}
+	prefix := mtypes.RandomBytes(4, []byte{0xaa, 0xbb, 0xcc, 0xdd})
+	prefix[0] &^= 1
+	prefix[0] |= 2
+	return fmt.Sprintf("%02X:%02X:%02X:%02X", prefix[0], prefix[1], prefix[2], prefix[3]), nil
+}
+
+func clonePeersWithPairwisePSKs(peers []mtypes.PeerInfo, enabled bool) []mtypes.PeerInfo {
+	result := append([]mtypes.PeerInfo(nil), peers...)
+	if enabled {
+		for i := range result {
+			result[i].PSKey = device.RandomPSK().ToString()
 		}
 	}
-
-	IPv6Block := SMCfg.EdgeNode.IPv6Range
-	if IPv6Block != "" {
-		_, _, err = tap.GetIP(6, IPv6Block, uint32(ModeIDmax))
-		if err != nil {
-			return err
-		}
-	}
-
-	IPv6LLBlock := SMCfg.EdgeNode.IPv6LLRange
-	if IPv6LLBlock != "" {
-		_, _, err = tap.GetIP(6, IPv6LLBlock, uint32(ModeIDmax))
-		if err != nil {
-			return err
-		}
-	}
-
-	SuperPeerInfo := make([]mtypes.SuperPeerInfo, 0, ModeIDmax)
-	PrivKeyS4, PubKeyS4 := device.RandomKeyPair()
-	PrivKeyS6, PubKeyS6 := device.RandomKeyPair()
-	sconfig.PrivKeyV4 = PrivKeyS4.ToString()
-	sconfig.PrivKeyV6 = PrivKeyS6.ToString()
-	allec := make(map[mtypes.Vertex]mtypes.EdgeConfig)
-	peerceconf, _ := GetExampleEdgeConf(sconfig.EdgeTemplate, false)
-	for _, ii := range NodeIDs {
-		i := mtypes.Vertex(ii)
-		PSKeyE := device.RandomPSK()
-		PrivKeyE, PubKeyE := device.RandomKeyPair()
-		idstr := fmt.Sprintf("%0"+strconv.Itoa(len(strconv.Itoa(ModeIDmax)))+"d", i)
-
-		allec[i] = peerceconf
-		if EndpointV4 != "" {
-			peerceconf.DynamicRoute.SuperNode.EndpointV4 = EndpointV4 + ":" + ListenPort
-		}
-		if EndpointV6 != "" {
-			peerceconf.DynamicRoute.SuperNode.EndpointV6 = EndpointV6 + ":" + ListenPort
-		}
-		peerceconf.DynamicRoute.SuperNode.EndpointEdgeAPIUrl = EndpointEdgeAPIUrl
-		peerceconf.NodeName = SMCfg.NetworkName
-		peerceconf.Interface.Name = SMCfg.NetworkName
-		if SMCfg.NetworkIFNameID {
-			peerceconf.NodeName += idstr
-			peerceconf.Interface.Name += idstr
-		}
-		peerceconf.Interface.MacAddrPrefix = MacPrefix
-		peerceconf.Interface.IPv4CIDR = IPv4Block
-		peerceconf.Interface.IPv6CIDR = IPv6Block
-		peerceconf.Interface.IPv6LLPrefix = IPv6LLBlock
-
-		peerceconf.NodeID = i
-		peerceconf.DynamicRoute.SuperNode.PubKeyV4 = PubKeyS4.ToString()
-		peerceconf.DynamicRoute.SuperNode.PubKeyV6 = PubKeyS6.ToString()
-		peerceconf.DynamicRoute.SuperNode.PSKey = PSKeyE.ToString()
-		peerceconf.PrivKey = PrivKeyE.ToString()
-
-		SuperPeerInfo = append(SuperPeerInfo, mtypes.SuperPeerInfo{
-			NodeID:         i,
-			Name:           SMCfg.NetworkName + idstr,
-			PubKey:         PubKeyE.ToString(),
-			PSKey:          PSKeyE.ToString(),
-			AdditionalCost: peerceconf.DynamicRoute.AdditionalCost,
-			SkipLocalIP:    peerceconf.DynamicRoute.SuperNode.SkipLocalIP,
-		})
-		mtypesBytes, _ := yaml.Marshal(peerceconf)
-		fileWriter.WriteFile(filepath.Join(SMCfg.ConfigOutputDir, SMCfg.NetworkName+"_edge"+idstr+".yaml"), mtypesBytes, 0o600)
-	}
-	sconfig.Peers = SuperPeerInfo
-	mtypesBytes, _ := yaml.Marshal(sconfig)
-	fileWriter.WriteFile(filepath.Join(SMCfg.ConfigOutputDir, SMCfg.NetworkName+"_super.yaml"), mtypesBytes, 0o600)
-	err = fileWriter.Commit()
-	return err
+	return result
 }

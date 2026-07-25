@@ -13,18 +13,7 @@ Interface:
   L2HeaderMode: kbdbg
 NodeID: 100
 NodeName: EgNet100
-PostScript: ""
 DefaultTTL: 200
-L2FIBTimeout: 3600
-PrivKey: U68wDkoic4xviKbOed9EBykI/wgpfpHGmc8N4ML5spE=
-ListenPort: 0
-FwMark: 0
-DisabledAf:
-  IPv4: false
-  IPv6: false
-  ListenIPv4: ""
-  ListenIPv6: ""
-AfPrefer: 4
 LogLevel:
   LogLevel: error
   LogTransit: true
@@ -32,69 +21,9 @@ LogLevel:
   LogControl: true
   LogInternal: true
   LogNTP: true
-DynamicRoute:
-  SendPingInterval: 16
-  PeerAliveTimeout: 70
-  TimeoutCheckInterval: 20
-  ConnNextTry: 5
-  DupCheckTimeout: 40
-  AdditionalCost: 10
-  DampingFilterRadius: 4
-  SaveNewPeers: true
-  SuperNode:
-    UseSuperNode: true
-    PSKey: Ffe8veAmFX/L8lmNxbb2sofBx/K1CCY3u1osKh0sL2g=
-    EndpointV4: 127.0.0.1:3456
-    PubKeyV4: j6+qNLYwGLILh4VKXc2fGeQy828RnRasA6zKHk3T/kw=
-    EndpointV6: ""
-    PubKeyV6: SdrhLctYIQ7lEurGNn0ZjM8ezkPaKPCI+nAbrnwvUDA=
-    EndpointEdgeAPIUrl: http://127.0.0.1:3456/eg_net/eg_api
-    SkipLocalIP: false
-    AdditionalLocalIP: []
-    SuperNodeInfoTimeout: 50
-  P2P:
-    UseP2P: false
-    SendPeerInterval: 20
-    GraphRecalculateSetting:
-      StaticMode: false
-      ManualLatency: {}
-      JitterTolerance: 50
-      JitterToleranceMultiplier: 1.1
-      TimeoutCheckInterval: 5
-      RecalculateCoolDown: 5
-  NTPConfig:
-    UseNTP: true
-    MaxServerUse: 8
-    SyncTimeInterval: 99999
-    NTPTimeout: 3
-    Servers:
-    - time.google.com
-    - time1.google.com
-    - time2.google.com
-    - time3.google.com
-    - time4.google.com
-    - time1.facebook.com
-    - time2.facebook.com
-    - time3.facebook.com
-    - time4.facebook.com
-    - time5.facebook.com
-    - time.cloudflare.com
-    - time.apple.com
-    - time.asia.apple.com
-    - time.euro.apple.com
-    - time.windows.com
-    - pool.ntp.org
-    - 0.pool.ntp.org
-    - 1.pool.ntp.org
-    - 2.pool.ntp.org
-    - 3.pool.ntp.org
-    - cn.ntp.org.cn
-    - edu.ntp.org.cn
-    - hk.ntp.org.cn
-    - tw.ntp.org.cn
-    - ntp.aliyun.com
-    - time1.cloud.tencent.com
-    - ntp.tuna.tsinghua.edu.cn
-NextHopTable: {}
-ResetEndPointInterval: 600
+SuperNodeV2:
+  APIUrl: http://127.0.0.1:3456
+  APIPrefix: /edge/v2
+  NodeID: 10
+  ControlPSKey: Ffe8veAmFX/L8lmNxbb2sofBx/K1CCY3u1osKh0sL2g=
 Peers: []

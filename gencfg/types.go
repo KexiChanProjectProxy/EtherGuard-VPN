@@ -1,14 +1,8 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2021 Kusakabe Si. All Rights Reserved.
- */
-
 package gencfg
 
 import (
 	"fmt"
 	"io/fs"
-	"io/ioutil"
 	"os"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -22,11 +16,21 @@ type SMCfg struct {
 	NetworkName         string `yaml:"Network name"`
 	NetworkIFNameID     bool   `yaml:"Add NodeID to the interface name"`
 	Supernode           struct {
-		ListenPort       int    `yaml:"Listen port"`
-		EdgeAPI_Prefix   string `yaml:"EdgeAPI prefix"`
-		EndpointV4       string `yaml:"Endpoint(IPv4)(optional)"`
-		EndpointV6       string `yaml:"Endpoint(IPv6)(optional)"`
-		Endpoint_EdgeAPI string `yaml:"Endpoint(EdgeAPI)"`
+		APIURL                     string        `yaml:"API URL"`
+		APIPrefix                  string        `yaml:"API prefix"`
+		STUNServers                []string      `yaml:"STUN servers"`
+		STUNRequestTimeoutSeconds  float64       `yaml:"STUN request timeout seconds"`
+		STUNRefreshIntervalSeconds float64       `yaml:"STUN refresh interval seconds"`
+		PollIntervalSeconds        float64       `yaml:"Poll interval seconds"`
+		ReportIntervalSeconds      float64       `yaml:"Report interval seconds"`
+		HeartbeatIntervalSeconds   float64       `yaml:"Heartbeat interval seconds"`
+		EventReplay                uint64        `yaml:"Event replay"`
+		PeerAliveTimeoutSeconds    float64       `yaml:"Peer alive timeout seconds"`
+		DampingFilterRadius        uint64        `yaml:"Damping filter radius"`
+		UsePSKForInterEdge         *bool         `yaml:"Use PSK for inter-edge"`
+		ManagementUser             string        `yaml:"Management user"`
+		ManagementPasswordHash     string        `yaml:"Management password hash"`
+		NodeID                     mtypes.Vertex `yaml:"Node ID"`
 	} `yaml:"Super Node"`
 	EdgeNode struct {
 		NodeIDs     string `yaml:"Node IDs"`
@@ -76,10 +80,7 @@ type fileWriterfile struct {
 }
 
 func (f *bulkFileWriter) WriteFile(path string, content []byte, perm fs.FileMode) {
-	f.files[path] = fileWriterfile{
-		content: content,
-		perm:    perm,
-	}
+	f.files[path] = fileWriterfile{content: content, perm: perm}
 }
 
 func (f *bulkFileWriter) Commit() error {
@@ -89,18 +90,14 @@ func (f *bulkFileWriter) Commit() error {
 	f.committed = true
 	for path, file := range f.files {
 		if !f.ow {
-			if _, err := os.Stat(path); os.IsNotExist(err) {
-				// path/to/whatever does not exist
-			} else {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
 				return fmt.Errorf("file %v exists, overwrite disabled", path)
 			}
 		}
-
-		if err := ioutil.WriteFile(path, file.content, file.perm); err != nil {
+		if err := os.WriteFile(path, file.content, file.perm); err != nil {
 			return err
-		} else {
-			fmt.Println(path)
 		}
+		fmt.Println(path)
 	}
 	return nil
 }
