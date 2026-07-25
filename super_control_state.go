@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -60,10 +60,10 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 	}
 	s.mu.Lock()
 	old, exists := s.peers[req.NodeID]
-	candidateState := make([]mtypes.ControlV2Candidate, 0, len(req.LocalV4)+len(req.LocalV6)+len(req.PublicV4)+len(req.PublicV6))
-	for _, address := range append(append(append(append([]string{}, req.LocalV4...), req.LocalV6...), req.PublicV4...), req.PublicV6...) {
-		candidateState = append(candidateState, mtypes.ControlV2Candidate{Address: address, Source: mtypes.ControlV2CandidateLocal})
-	}
+	candidateState := append([]mtypes.ControlV2Candidate{}, addressesToCandidates(req.LocalV4, mtypes.ControlV2CandidateLocal)...)
+	candidateState = append(candidateState, addressesToCandidates(req.LocalV6, mtypes.ControlV2CandidateLocal)...)
+	candidateState = append(candidateState, addressesToCandidates(req.PublicV4, mtypes.ControlV2CandidateSTUN)...)
+	candidateState = append(candidateState, addressesToCandidates(req.PublicV6, mtypes.ControlV2CandidateSTUN)...)
 	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, LocalV4: append([]string{}, req.LocalV4...), LocalV6: append([]string{}, req.LocalV6...), PublicV4: append([]string{}, req.PublicV4...), PublicV6: append([]string{}, req.PublicV6...), LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
 	changed := !exists || old.view.NodeName != view.NodeName || old.view.LastSeen.IsZero() || old.controlKey != controlPSKey
 	if exists {
@@ -96,27 +96,27 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		s.mu.Unlock()
 		return ErrControlStateUnknownPeer
 	}
-	changed := !sameCandidates(peer.candidates, req.Candidates)
 	peer.candidates = cloneCandidates(req.Candidates)
 	peer.view.LastSeen = s.now()
+	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
 	for _, pong := range req.Pongs {
 		if pong.SourceNode != req.NodeID {
 			continue
 		}
 		if peer.view.LatencyMS[pong.DestNode] != pong.LatencyMS {
 			peer.view.LatencyMS[pong.DestNode] = pong.LatencyMS
-			changed = true
+			viewChanged = true
 		}
 		if s.graph != nil {
 			s.graph.UpdateLatency(pong.SourceNode, pong.DestNode, pong.LatencyMS, pong.AliveSeconds, 0, true, true)
 		}
 	}
-	if changed {
+	if viewChanged {
 		s.revision++
 	}
 	rev := s.revision
 	s.mu.Unlock()
-	if changed {
+	if viewChanged {
 		s.emit(mtypes.ControlV2EventPeerChange, req.NodeID, peer.view.NodeName, rev)
 	}
 	return nil
@@ -215,28 +215,57 @@ func sameStrings(a, b []string) bool {
 	}
 	return true
 }
-func sameCandidates(a, b []mtypes.ControlV2Candidate) bool {
-	if len(a) != len(b) {
-		return false
+
+// addressesToCandidates wraps raw address strings into typed candidate
+// records with the given source so the register-time lists survive into
+// the canonical controlPeerRecord.candidates list.
+func addressesToCandidates(addresses []string, source mtypes.ControlV2CandidateSource) []mtypes.ControlV2Candidate {
+	out := make([]mtypes.ControlV2Candidate, 0, len(addresses))
+	for _, address := range addresses {
+		out = append(out, mtypes.ControlV2Candidate{Address: address, Source: source})
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	return out
+}
+
+// mergeCandidatesIntoView rebuilds the LocalV4/LocalV6/PublicV4/PublicV6
+// fields on view from the latest reported candidate list, partitioning by
+// IP family and source. Returns true when any observable field changes,
+// so the caller can decide whether the revision must bump.
+func mergeCandidatesIntoView(view *mtypes.ControlV2Peer, candidates []mtypes.ControlV2Candidate) bool {
+	var local4, local6, public4, public6 []string
+	for _, candidate := range candidates {
+		if candidate.Address == "" {
+			continue
+		}
+		host, _, err := net.SplitHostPort(candidate.Address)
+		if err != nil {
+			host = candidate.Address
+		}
+		isV6 := func() bool {
+			ip := net.ParseIP(host)
+			return ip != nil && ip.To4() == nil
+		}
+		switch candidate.Source {
+		case mtypes.ControlV2CandidateLocal:
+			if isV6() {
+				local6 = append(local6, candidate.Address)
+			} else {
+				local4 = append(local4, candidate.Address)
+			}
+		case mtypes.ControlV2CandidateSTUN:
+			if isV6() {
+				public6 = append(public6, candidate.Address)
+			} else {
+				public4 = append(public4, candidate.Address)
+			}
 		}
 	}
-	return true
+	changed := !sameStrings(view.LocalV4, local4) || !sameStrings(view.LocalV6, local6) || !sameStrings(view.PublicV4, public4) || !sameStrings(view.PublicV6, public6)
+	if changed {
+		view.LocalV4 = local4
+		view.LocalV6 = local6
+		view.PublicV4 = public4
+		view.PublicV6 = public6
+	}
+	return changed
 }
-
-// Test clock is shared by the TDD tests below; the production state
-// service accepts any Now func, so we expose this only inside _test.go.
-var testClockNanos atomic.Int64
-
-func currentTime() time.Time {
-	return time.Unix(0, testClockNanos.Load())
-}
-
-func advance(d time.Duration) {
-	testClockNanos.Add(int64(d))
-}
-
-type timeValue = time.Time

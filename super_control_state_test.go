@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,48 @@ func TestControlStateRegistrationAndReport(t *testing.T) {
 	}
 	if peers := svc.SnapshotFor(req.NodeID).Peers; len(peers) != 0 {
 		t.Fatal("self peer must not appear in own snapshot after report")
+	}
+}
+
+func TestControlStateReportedCandidateReachesOtherEdges(t *testing.T) {
+	// Given two registered edges on a fresh service
+	svc := NewControlState(ControlStateConfig{})
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "key-a"); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(2, "edge-b"), "key-b"); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	baseline := svc.Revision()
+
+	// When edge A reports a new STUN-derived candidate
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: 1, Candidates: []mtypes.ControlV2Candidate{
+		{Address: "192.0.2.1:51820", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "203.0.113.10:51820", Source: mtypes.ControlV2CandidateSTUN},
+		{Address: "[2001:db8::10]:51820", Source: mtypes.ControlV2CandidateSTUN},
+	}}); err != nil {
+		t.Fatalf("report a: %v", err)
+	}
+
+	// Then edge B's snapshot exposes the new candidate and the revision bumped
+	snap := svc.SnapshotFor(2)
+	if svc.Revision() <= baseline {
+		t.Fatalf("revision did not bump: baseline=%d now=%d", baseline, svc.Revision())
+	}
+	if len(snap.Peers) != 1 || snap.Peers[0].NodeID != 1 {
+		t.Fatalf("unexpected peers: %#v", snap.Peers)
+	}
+	if !contains(snap.Peers[0].PublicV4, "203.0.113.10:51820") {
+		t.Fatalf("STUN v4 candidate missing from public list: %#v", snap.Peers[0].PublicV4)
+	}
+	if !contains(snap.Peers[0].PublicV6, "[2001:db8::10]:51820") {
+		t.Fatalf("STUN v6 candidate missing from public list: %#v", snap.Peers[0].PublicV6)
+	}
+	if !contains(snap.Peers[0].LocalV4, "192.0.2.1:51820") {
+		t.Fatalf("Local v4 candidate missing: %#v", snap.Peers[0].LocalV4)
+	}
+	if snap.Peers[0].PSKey != "" {
+		t.Fatalf("control PSKey leaked into peer view")
 	}
 }
 
@@ -90,3 +133,27 @@ func TestControlStateConcurrentMutation(t *testing.T) {
 func controlRegisterRequest(id mtypes.Vertex, name string) mtypes.ControlV2RegisterRequest {
 	return mtypes.ControlV2RegisterRequest{NodeID: id, NodeName: name, Version: mtypes.ControlV2ProtocolVersion}
 }
+
+func contains(list []string, needle string) bool {
+	for _, item := range list {
+		if item == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// Test clock — package-private helpers shared across the TDD tests in
+// this file only; production code passes its own Now function.
+var testClockNanos atomic.Int64
+
+func currentTime() time.Time {
+	return time.Unix(0, testClockNanos.Load())
+}
+
+func advance(d time.Duration) {
+	testClockNanos.Add(int64(d))
+}
+
+// Test clock — package-private helpers shared across the TDD tests in
+// this file only; production code passes its own Now function.
