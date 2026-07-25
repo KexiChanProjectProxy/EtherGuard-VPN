@@ -1,76 +1,31 @@
 NodeName: EgNetSN
-PostScript: ""
-PrivKeyV4: vm2M7cNXbrUFORMiLvlbAxXX0l0yduo5TAJ9vyRTQZE=
-PrivKeyV6: xUJ4yaVl/O//PRS24UFMNXgmeF/rhykroCxdJrljFgE=
-ListenPort: 3456
-ListenPort_EdgeAPI: "3456"
-ListenPort_ManageAPI: "3456"
-FwMark: 0
-DisabledAf:
-  IPv4: false
-  IPv6: false
-  ListenIPv4: ""
-  ListenIPv6: ""
-API_Prefix: /eg_net/eg_api
-RePushConfigInterval: 30
-HttpPostInterval: 50
-PeerAliveTimeout: 70
-SendPingInterval: 15
-DampingFilterRadius: 4
-LogLevel:
-  LogLevel: error
-  LogTransit: false
-  LogNormal: false
-  LogControl: true
-  LogInternal: true
-  LogNTP: true
-Passwords:
-  ShowState: passwd_showstate
-  AddPeer: passwd_addpeer
-  DelPeer: passwd_delpeer
-  UpdatePeer: passwd_updatepeer
-  UpdateSuper: passwd_updatesuper
-GraphRecalculateSetting:
-  StaticMode: false
-  ManualLatency: 
-    1:
-      2: 1.14
-    2:
-      1: 5.14
-    100:
-      65535: 1.919
-    65535:
-      100: 8.1
-  JitterTolerance: 30
-  JitterToleranceMultiplier: 1.01
-  TimeoutCheckInterval: 5
-  RecalculateCoolDown: 5
-NextHopTable: {}
-EdgeTemplate: EgNet_edge001.yaml
+APIUrl: http://127.0.0.1:3456
+APIPrefix: /edge/v2
+ManagementAuth:
+  User: admin
+  PasswordHash: passwd_hash_example
+STUNServers:
+- stun:203.0.113.10:3478
+- 'stuns:[2001:db8::10]:5349'
+STUNRequestTimeoutSeconds: 3
+STUNRefreshIntervalSeconds: 60
+PollIntervalSeconds: 15
+ReportIntervalSeconds: 15
+HeartbeatIntervalSeconds: 10
+EventReplay: 256
+PeerAliveTimeoutSeconds: 70
 UsePSKForInterEdge: true
-ResetEndPointInterval: 600
+DampingFilterRadius: 4
 Peers:
 - NodeID: 1
-  Name: EgNet001
-  PubKey: lMiu9Qvf9qTo+X539+IxyA3YOleXMVTKtfOVHAnOIic=
-  PSKey: Ld8FN/TNcmR21xdhMTCSeZBxrJ1z+FFvnQSnTwSxgUE=
+  NodeName: EgNet001
+  ControlPSKey: Ld8FN/TNcmR21xdhMTCSeZBxrJ1z+FFvnQSnTwSxgUE=
   AdditionalCost: 10
-  SkipLocalIP: false
-  EndPoint: ""
-  ExternalIP: ""
 - NodeID: 2
-  Name: EgNet002
-  PubKey: Ev271azq3FXmjhCWtwgVvqe9EN017mijjqMiB9LVQU8=
-  PSKey: Wmhz6SvUNBGczD0iJjHn7gUGy15ahjQsr4lKJAqDE3A=
+  NodeName: EgNet002
+  ControlPSKey: Wmhz6SvUNBGczD0iJjHn7gUGy15ahjQsr4lKJAqDE3A=
   AdditionalCost: 10
-  SkipLocalIP: false
-  EndPoint: ""
-  ExternalIP: ""
 - NodeID: 100
-  Name: EgNet100
-  PubKey: nL3BdnKYt+DGl783iYe/7JETVTZU31RkHQu4x49Wk0s=
-  PSKey: Ffe8veAmFX/L8lmNxbb2sofBx/K1CCY3u1osKh0sL2g=
+  NodeName: EgNet100
+  ControlPSKey: Ffe8veAmFX/L8lmNxbb2sofBx/K1CCY3u1osKh0sL2g=
   AdditionalCost: 10
-  SkipLocalIP: false
-  EndPoint: ""
-  ExternalIP: ""

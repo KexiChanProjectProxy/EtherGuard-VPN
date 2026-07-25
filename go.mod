@@ -8,6 +8,7 @@ require (
 	github.com/golang-jwt/jwt v3.2.2+incompatible
 	github.com/google/gopacket v1.1.19
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
+	github.com/pion/stun/v3 v3.1.6
 	github.com/sirupsen/logrus v1.9.4
 	go.fd.io/govpp v0.13.0
 	go.fd.io/govpp/extras v0.6.1-0.20241115131743-4ccd4339c942
@@ -21,5 +22,9 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lunixbochs/struc v0.0.0-20241101090106-8d528fa2c543 // indirect
+	github.com/pion/dtls/v3 v3.1.4 // indirect
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	golang.org/x/net v0.57.0 // indirect
 )

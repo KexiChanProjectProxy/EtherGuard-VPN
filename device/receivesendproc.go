@@ -7,24 +7,16 @@ package device
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io/ioutil"
-	"net"
-	"net/http"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 	"github.com/KusakabeSi/EtherGuard-VPN/path"
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
-	"github.com/golang-jwt/jwt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
@@ -35,9 +27,7 @@ type packet_send_params struct {
 }
 
 func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet []byte, offset int) {
-	if peer == nil {
-		return
-	} else if peer.endpoint == nil {
+	if peer == nil || peer.GetEndpointDstStr() == "" {
 		return
 	}
 	if usage == path.NormalPacket && len(packet)-path.EgHeaderLen <= 12 {
@@ -147,19 +137,6 @@ func (device *Device) TransitBoardcastPacket(src_nodeID mtypes.Vertex, in_id mty
 	device.peers.RUnlock()
 }
 
-func (device *Device) Send2Super(usage path.Usage, ttl uint8, packet []byte, offset int) {
-	device.peers.RLock()
-	if device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode {
-		for _, peer_out := range device.peers.SuperPeer {
-			/*if device.LogTransit {
-				fmt.Printf("Send to supernode %s\n", peer_out.endpoint.DstToString())
-			}*/
-			go device.SendPacket(peer_out, usage, ttl, packet, offset)
-		}
-	}
-	device.peers.RUnlock()
-}
-
 func (device *Device) CheckNoDup(packet []byte) bool {
 	hasher := crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	hasher.Write(packet)
@@ -189,12 +166,6 @@ func (device *Device) process_received(msg_type path.Usage, peer *Peer, body []b
 		}
 	} else {
 		switch msg_type {
-		case path.ServerUpdate:
-			if content, err := mtypes.ParseServerUpdateMsg(body); err == nil {
-				device.process_ServerUpdateMsg(peer, content)
-			} else {
-				return err
-			}
 		case path.PingPacket:
 			if content, err := mtypes.ParsePingMsg(body); err == nil {
 				return device.process_ping(peer, content)
@@ -368,10 +339,6 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
 	header.SetSrc(device.ID)
 	copy(buf[path.EgHeaderLen:], body)
-	if device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode {
-		header.SetDst(mtypes.NodeID_SuperNode)
-		device.Send2Super(path.PongPacket, 0, buf, MessageTransportOffsetContent)
-	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		header.SetDst(mtypes.NodeID_Spread)
 		device.SpreadPacket(make(map[mtypes.Vertex]bool), path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
@@ -400,289 +367,6 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 			copy(buf[path.EgHeaderLen:], body)
 			device.SendPacket(peer, path.QueryPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 		}
-	}
-	return nil
-}
-
-func (device *Device) process_UpdatePeerMsg(peer *Peer, State_hash string) error {
-	var send_signal bool
-	if device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode {
-		if device.state_hashes.Peer.Load().(string) == State_hash {
-			if device.LogLevel.LogControl {
-				fmt.Println("Control: Same Hash, skip download PeerInfo")
-			}
-			return nil
-		}
-		var peer_infos mtypes.API_Peers
-		//
-		client := http.Client{
-			Timeout: 8 * time.Second,
-		}
-		downloadurl := device.EdgeConfig.DynamicRoute.SuperNode.EndpointEdgeAPIUrl + "/edge/peerinfo" ////////////////////////////////////////////////////////////////////////////////////////////////
-		req, err := http.NewRequest("GET", downloadurl, nil)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		q := req.URL.Query()
-		q.Add("NodeID", device.ID.ToString())
-		q.Add("PubKey", device.staticIdentity.publicKey.ToString())
-		q.Add("State", State_hash)
-		req.URL.RawQuery = q.Encode()
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download PeerInfo from :" + req.URL.RequestURI())
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		defer resp.Body.Close()
-		allbytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		if resp.StatusCode != 200 {
-			device.log.Errorf("Control: Download peerinfo failed: " + strconv.Itoa(resp.StatusCode) + " " + string(allbytes))
-			return nil
-		}
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download peerinfo result :" + string(allbytes))
-		}
-		if err := json.Unmarshal(allbytes, &peer_infos); err != nil {
-			device.log.Errorf("JSON decode error:", err.Error())
-			return err
-		}
-
-		for nodeID, thepeer := range device.peers.IDMap {
-			pk := thepeer.handshake.remoteStatic
-			psk := thepeer.handshake.presharedKey
-			if val, ok := peer_infos[pk.ToString()]; ok {
-				if val.NodeID != nodeID {
-					device.RemovePeer(pk)
-					continue
-				} else if val.PSKey != psk.ToString() {
-					device.RemovePeer(pk)
-					continue
-				}
-			} else {
-				device.RemovePeer(pk)
-				continue
-			}
-		}
-
-		for PubKey, peerinfo := range peer_infos {
-			sk, err := Str2PubKey(PubKey)
-			if err != nil {
-				device.log.Errorf("Error decode base64:", err)
-				continue
-			}
-			if bytes.Equal(sk[:], device.staticIdentity.publicKey[:]) {
-				continue
-			}
-			thepeer := device.LookupPeer(sk)
-			if thepeer == nil { //not exist in local
-				if len(peerinfo.Connurl.ExternalV4)+len(peerinfo.Connurl.ExternalV6)+len(peerinfo.Connurl.LocalV4)+len(peerinfo.Connurl.LocalV6) == 0 {
-					continue
-				}
-				if device.LogLevel.LogControl {
-					fmt.Println("Control: Add new peer to local ID:" + peerinfo.NodeID.ToString() + " PubKey:" + PubKey)
-				}
-				if device.graph.Weight(device.ID, peerinfo.NodeID, false) == mtypes.Infinity { // add node to graph
-					device.graph.UpdateLatency(device.ID, peerinfo.NodeID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
-				}
-				if device.graph.Weight(peerinfo.NodeID, device.ID, false) == mtypes.Infinity { // add node to graph
-					device.graph.UpdateLatency(peerinfo.NodeID, device.ID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
-				}
-				thepeer, err = device.NewPeer(sk, peerinfo.NodeID, false, 0)
-				if err != nil {
-					device.log.Errorf("Failed to create peer with ID:%v PunKey:%v :%v", peerinfo.NodeID.ToString(), PubKey, err)
-					continue
-				}
-			}
-			if peerinfo.PSKey != "" {
-				pk, err := Str2PSKey(peerinfo.PSKey)
-				if err != nil {
-					device.log.Errorf("Error decode base64:", err)
-					continue
-				}
-				thepeer.SetPSK(pk)
-			}
-
-			thepeer.endpoint_trylist.UpdateSuper(*peerinfo.Connurl, !device.EdgeConfig.DynamicRoute.SuperNode.SkipLocalIP, device.EdgeConfig.AfPrefer)
-			if !thepeer.IsPeerAlive() {
-				//Peer died, try to switch to this new endpoint
-				send_signal = true
-			}
-		}
-		device.state_hashes.Peer.Store(State_hash)
-		if send_signal {
-			device.signalEndpointRetry()
-		}
-	}
-	return nil
-}
-
-func (device *Device) process_UpdateNhTableMsg(peer *Peer, State_hash string) error {
-	if device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode {
-		if device.state_hashes.NhTable.Load().(string) == State_hash {
-			if device.LogLevel.LogControl {
-				fmt.Println("Control: Same Hash, skip download nhTable")
-			}
-			device.graph.NhTableExpire = time.Now().Add(device.graph.SuperNodeInfoTimeout)
-			return nil
-		}
-		var NhTable mtypes.NextHopTable
-		// Download from supernode
-		client := &http.Client{
-			Timeout: 8 * time.Second,
-		}
-		downloadurl := device.EdgeConfig.DynamicRoute.SuperNode.EndpointEdgeAPIUrl + "/edge/nhtable" ////////////////////////////////////////////////////////////////////////////////////////////////
-		req, err := http.NewRequest("GET", downloadurl, nil)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		q := req.URL.Query()
-		q.Add("NodeID", device.ID.ToString())
-		q.Add("PubKey", device.staticIdentity.publicKey.ToString())
-		q.Add("State", State_hash)
-		req.URL.RawQuery = q.Encode()
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download NhTable from :" + req.URL.RequestURI())
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		defer resp.Body.Close()
-		allbytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		if resp.StatusCode != 200 {
-			device.log.Errorf("Control: Download NhTable failed: " + strconv.Itoa(resp.StatusCode) + " " + string(allbytes))
-			return nil
-		}
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download NhTable result :" + string(allbytes))
-		}
-		if err := json.Unmarshal(allbytes, &NhTable); err != nil {
-			device.log.Errorf("JSON decode error:", err.Error())
-			return err
-		}
-		device.graph.SetNHTable(NhTable)
-		device.state_hashes.NhTable.Store(State_hash)
-	}
-	return nil
-}
-
-func (device *Device) process_UpdateSuperParamsMsg(peer *Peer, State_hash string) error {
-	if device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode {
-		if device.state_hashes.SuperParam.Load().(string) == State_hash {
-			if device.LogLevel.LogControl {
-				fmt.Println("Control: Same Hash, skip download SuperParams")
-			}
-			device.graph.NhTableExpire = time.Now().Add(device.graph.SuperNodeInfoTimeout)
-			return nil
-		}
-		var SuperParams mtypes.API_SuperParams
-		client := &http.Client{
-			Timeout: 8 * time.Second,
-		}
-		downloadurl := device.EdgeConfig.DynamicRoute.SuperNode.EndpointEdgeAPIUrl + "/edge/superparams" ////////////////////////////////////////////////////////////////////////////////////////////////
-		req, err := http.NewRequest("GET", downloadurl, nil)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		q := req.URL.Query()
-		q.Add("NodeID", device.ID.ToString())
-		q.Add("PubKey", device.staticIdentity.publicKey.ToString())
-		q.Add("State", State_hash)
-		req.URL.RawQuery = q.Encode()
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download SuperParams from :" + req.URL.RequestURI())
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		defer resp.Body.Close()
-		allbytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			device.log.Errorf(err.Error())
-			return err
-		}
-		if resp.StatusCode != 200 {
-			device.log.Errorf("Control: Download SuperParams failed: " + strconv.Itoa(resp.StatusCode) + " " + string(allbytes))
-			return nil
-		}
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Download SuperParams result :" + string(allbytes))
-		}
-		if err := json.Unmarshal(allbytes, &SuperParams); err != nil {
-			device.log.Errorf("JSON decode error:", err.Error())
-			return err
-		}
-		if SuperParams.PeerAliveTimeout <= 0 {
-			device.log.Errorf("SuperParams.PeerAliveTimeout <= 0: %v, please check the config of the supernode", SuperParams.PeerAliveTimeout)
-			return fmt.Errorf("SuperParams.PeerAliveTimeout <= 0: %v, please check the config of the supernode", SuperParams.PeerAliveTimeout)
-		}
-		if SuperParams.SendPingInterval <= 0 {
-			device.log.Errorf("SuperParams.SendPingInterval <= 0: %v, please check the config of the supernode", SuperParams.SendPingInterval)
-			return fmt.Errorf("SuperParams.SendPingInterval <= 0: %v, please check the config of the supernode", SuperParams.SendPingInterval)
-		}
-		if SuperParams.HttpPostInterval < 0 {
-			device.log.Errorf("SuperParams.HttpPostInterval < 0: %v, please check the config of the supernode", SuperParams.HttpPostInterval)
-			return fmt.Errorf("SuperParams.HttpPostInterval < 0: %v, please check the config of the supernode", SuperParams.HttpPostInterval)
-		}
-
-		device.EdgeConfig.DynamicRoute.PeerAliveTimeout = SuperParams.PeerAliveTimeout
-		device.EdgeConfig.DynamicRoute.SendPingInterval = SuperParams.SendPingInterval
-		device.SuperConfig.HttpPostInterval = SuperParams.HttpPostInterval
-		device.SuperConfig.DampingFilterRadius = SuperParams.DampingFilterRadius
-		device.Chan_SendPingStart <- struct{}{}
-		device.Chan_HttpPostStart <- struct{}{}
-		if SuperParams.AdditionalCost >= 0 {
-			device.EdgeConfig.DynamicRoute.AdditionalCost = SuperParams.AdditionalCost
-		}
-
-		device.state_hashes.SuperParam.Store(State_hash)
-	}
-	return nil
-}
-
-func (device *Device) process_ServerUpdateMsg(peer *Peer, content mtypes.ServerUpdateMsg) error {
-	if peer.ID != mtypes.NodeID_SuperNode {
-		if device.LogLevel.LogControl {
-			fmt.Println("Control: Ignored UpdateErrorMsg. Not from supernode.")
-		}
-		return nil
-	}
-
-	switch content.Action {
-	case mtypes.Shutdown:
-		device.log.Errorf("Shutdown: " + content.Params)
-		device.closed <- 0
-	case mtypes.ThrowError:
-		device.log.Errorf(strconv.Itoa(int(content.Code)) + ": " + content.Params)
-		device.closed <- content.Code
-	case mtypes.Panic:
-		device.log.Errorf(strconv.Itoa(int(content.Code)) + ": " + content.Params)
-		panic(content.ToString())
-	case mtypes.UpdateNhTable:
-		return device.process_UpdateNhTableMsg(peer, content.Params)
-	case mtypes.UpdatePeer:
-		return device.process_UpdatePeerMsg(peer, content.Params)
-	case mtypes.UpdateSuperParams:
-		return device.process_UpdateSuperParamsMsg(peer, content.Params)
-	default:
-		device.log.Errorf("Unknown Action: %v", content.ToString())
 	}
 	return nil
 }
@@ -848,178 +532,6 @@ func (device *Device) RoutineSendPing(startchan chan struct{}) {
 		}
 		packet, usage, ttl, _ := device.GeneratePingPacket(device.ID, 0)
 		device.SpreadPacket(make(map[mtypes.Vertex]bool), usage, ttl, packet, MessageTransportOffsetContent)
-	}
-}
-
-func (device *Device) RoutineRegister(startchan chan struct{}) {
-	if !(device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
-		return
-	}
-	var waitchan <-chan time.Time
-	startchan <- struct{}{}
-	for {
-		if device.EdgeConfig.DynamicRoute.SendPingInterval > 0 {
-			waitchan = time.After(mtypes.S2TD(device.EdgeConfig.DynamicRoute.SendPingInterval))
-		} else {
-			waitchan = time.After(8 * time.Second)
-		}
-		select {
-		case <-startchan:
-			if device.LogLevel.LogControl {
-				fmt.Println("Control: Start RoutineRegister()")
-			}
-			for len(startchan) > 0 {
-				<-startchan
-			}
-		case <-waitchan:
-		}
-		local_PeerStateHash := device.state_hashes.Peer.Load().(string)
-		local_NhTableHash := device.state_hashes.NhTable.Load().(string)
-		local_SuperParamState := device.state_hashes.SuperParam.Load().(string)
-		body, _ := mtypes.GetByte(mtypes.RegisterMsg{
-			Node_id:             device.ID,
-			PeerStateHash:       local_PeerStateHash,
-			NhStateHash:         local_NhTableHash,
-			SuperParamStateHash: local_SuperParamState,
-			Version:             device.Version,
-			JWTSecret:           device.JWTSecret,
-			HttpPostCount:       device.HttpPostCount,
-		})
-		buf := make([]byte, path.EgHeaderLen+len(body))
-		header, _ := path.NewEgHeader(buf[0:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
-		header.SetDst(mtypes.NodeID_SuperNode)
-		header.SetSrc(device.ID)
-		copy(buf[path.EgHeaderLen:], body)
-		device.Send2Super(path.Register, 0, buf, MessageTransportOffsetContent)
-	}
-}
-
-func (device *Device) RoutinePostPeerInfo(startchan <-chan struct{}) {
-	if !(device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
-		return
-	}
-	var waitchan <-chan time.Time
-	for {
-		if device.SuperConfig.HttpPostInterval > 0 {
-			waitchan = time.After(mtypes.S2TD(device.SuperConfig.HttpPostInterval))
-		} else {
-			waitchan = make(<-chan time.Time)
-		}
-		select {
-		case <-waitchan:
-		case <-startchan:
-			if device.LogLevel.LogControl {
-				fmt.Println("Control: Start RoutinePostPeerInfo()")
-			}
-			for len(startchan) > 0 {
-				<-startchan
-			}
-		}
-		// Stat all latency
-		device.peers.RLock()
-		pongs := make([]mtypes.PongMsg, 0, len(device.peers.IDMap))
-		for id, peer := range device.peers.IDMap {
-			device.peers.RUnlock()
-			if peer.IsPeerAlive() {
-				pong := mtypes.PongMsg{
-					RequestID:   0,
-					Src_nodeID:  id,
-					Dst_nodeID:  device.ID,
-					Timediff:    peer.SingleWayLatency.GetVal(),
-					TimeToAlive: -time.Since(*peer.LastPacketReceivedAdd1Sec.Load().(*time.Time)).Seconds() + device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
-				}
-				pongs = append(pongs, pong)
-				if device.LogLevel.LogControl {
-					fmt.Printf("Control: Pack %v S:%v D:%v To:Post body\n", pong.ToString(), pong.Src_nodeID.ToString(), pong.Dst_nodeID.ToString())
-				}
-			}
-			device.peers.RLock()
-		}
-		device.peers.RUnlock()
-		// Prepare post paramater and post body
-		LocalV4s := make(map[string]float64)
-		LocalV6s := make(map[string]float64)
-		if !device.EdgeConfig.DynamicRoute.SuperNode.SkipLocalIP {
-			if !device.peers.LocalV4.Equal(net.IP{}) {
-				LocalV4 := net.UDPAddr{
-					IP:   device.peers.LocalV4,
-					Port: int(device.net.port),
-				}
-
-				LocalV4s[LocalV4.String()] = 100
-			}
-			if !device.peers.LocalV6.Equal(net.IP{}) {
-				LocalV6 := net.UDPAddr{
-					IP:   device.peers.LocalV6,
-					Port: int(device.net.port),
-				}
-				LocalV6s[LocalV6.String()] = 100
-			}
-		}
-		for _, AIP := range device.EdgeConfig.DynamicRoute.SuperNode.AdditionalLocalIP {
-			success := false
-			_, ipstr, err := conn.LookupIP(AIP, conn.EnabledAf4, 0)
-			if err == nil {
-				success = true
-				LocalV4s[ipstr] = 50
-			}
-			_, ipstr, err = conn.LookupIP(AIP, conn.EnabledAf6, 0)
-			if err == nil {
-				success = true
-				LocalV6s[ipstr] = 50
-			}
-			if !success {
-				device.log.Errorf("AdditionalLocalIP: Failed to LookupIP %v", AIP)
-			}
-		}
-
-		body, _ := mtypes.GetByte(mtypes.API_report_peerinfo{
-			Pongs:    pongs,
-			LocalV4s: LocalV4s,
-			LocalV6s: LocalV6s,
-		})
-		body = mtypes.Gzip(body)
-		bodyhash := base64.StdEncoding.EncodeToString(body)
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, mtypes.API_report_peerinfo_jwt_claims{
-			PostCount: device.HttpPostCount,
-			BodyHash:  bodyhash,
-		})
-		tokenString, _ := token.SignedString(device.JWTSecret[:])
-		// Construct post request
-		client := &http.Client{
-			Timeout: 8 * time.Second,
-		}
-		downloadurl := device.EdgeConfig.DynamicRoute.SuperNode.EndpointEdgeAPIUrl + "/edge/post/nodeinfo"
-		req, err := http.NewRequest("POST", downloadurl, bytes.NewReader(body))
-		if err != nil {
-			device.log.Errorf(err.Error())
-			continue
-		}
-		q := req.URL.Query()
-		q.Add("NodeID", device.ID.ToString())
-		q.Add("PubKey", device.staticIdentity.publicKey.ToString())
-		q.Add("JWTSig", tokenString)
-		req.URL.RawQuery = q.Encode()
-		req.Header.Set("Content-Type", "application/octet-stream")
-		req.Header.Set("Content-Encoding", "gzip")
-		device.HttpPostCount += 1
-		if device.LogLevel.LogControl {
-			fmt.Printf("Control: Post to %v\n", downloadurl)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			device.log.Errorf("RoutinePostPeerInfo: " + err.Error())
-		} else {
-			if device.LogLevel.LogControl {
-				res, err := ioutil.ReadAll(resp.Body)
-				if err == nil {
-					fmt.Printf("Control: Post result %v\n", string(res))
-				} else {
-					fmt.Printf("Control: Post error %v %v\n", err, string(res))
-				}
-			}
-			resp.Body.Close()
-		}
 	}
 }
 

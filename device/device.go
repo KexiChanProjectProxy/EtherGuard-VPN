@@ -7,6 +7,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -125,9 +126,12 @@ type Device struct {
 		mtu    int32
 	}
 
-	ipcMutex sync.RWMutex
-	closed   chan int
-	log      *Logger
+	ipcMutex      sync.RWMutex
+	closed        chan int
+	log           *Logger
+	superSTUN     *SuperSTUNManager
+	superHTTP     *SuperHTTPRuntime
+	controlCancel context.CancelFunc
 }
 
 type IdAndTime struct {
@@ -331,6 +335,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.closed = make(chan int)
 	device.log = logger
 	device.net.bind = bind
+	device.superSTUN = NewSuperSTUNManager(device)
 	device.tap.device = tapDevice
 	mtu, err := device.tap.device.MTU()
 	if err != nil {
@@ -391,13 +396,11 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 		} else {
 			go device.RoutineTryReceivedEndpoint()
 			go device.RoutineDetectOfflineAndTryNextEndpoint()
-			go device.RoutineRegister(device.Chan_SendRegisterStart)
 			go device.RoutineSendPing(device.Chan_SendPingStart)
 			go device.RoutineSpreadAllMyNeighbor()
 			go device.RoutineResetEndpoint()
 			go device.RoutineClearL2FIB()
 			go device.RoutineRecalculateNhTable()
-			go device.RoutinePostPeerInfo(device.Chan_HttpPostStart)
 		}
 	}()
 
@@ -565,12 +568,13 @@ func RandomPSK() (pk NoisePresharedKey) {
 }
 
 func (device *Device) GetConnurl(v mtypes.Vertex) string {
-	if peer, has := device.peers.IDMap[v]; has {
-		if peer.endpoint != nil {
-			return peer.endpoint.DstToString()
-		}
+	device.peers.RLock()
+	peer, has := device.peers.IDMap[v]
+	device.peers.RUnlock()
+	if !has {
+		return ""
 	}
-	return ""
+	return peer.GetEndpointDstStr()
 }
 
 func (device *Device) RemovePeerByID(id mtypes.Vertex) {
@@ -613,6 +617,9 @@ func (device *Device) Close() {
 	}
 	atomic.StoreUint32(&device.state.state, uint32(deviceStateClosed))
 	device.log.Verbosef("Device closing")
+	if device.controlCancel != nil {
+		device.controlCancel()
+	}
 
 	device.tap.device.Close()
 	device.downLocked()
