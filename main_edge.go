@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/google/shlex"
@@ -39,10 +38,21 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		return nil
 	}
 	var econfig mtypes.EdgeConfig
+	var econfigV2 mtypes.EdgeConfigV2
 	//printExampleConf()
 	//return
 
-	err = mtypes.ReadYaml(configPath, &econfig)
+	err = mtypes.ReadYaml(configPath, &econfigV2)
+	if err == nil && econfigV2.SuperNodeV2.APIUrl != "" {
+		econfig.Interface = econfigV2.Interface
+		econfig.NodeID = econfigV2.NodeID
+		econfig.NodeName = econfigV2.NodeName
+		econfig.DefaultTTL = econfigV2.DefaultTTL
+		econfig.LogLevel = econfigV2.LogLevel
+		econfig.Peers = econfigV2.Peers
+	} else {
+		err = mtypes.ReadYaml(configPath, &econfig)
+	}
 	if err != nil {
 		fmt.Printf("Error read config: %v\t%v\n", configPath, err)
 		return err
@@ -124,6 +134,9 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, false, configPath, &econfig, nil, nil, Version)
 	defer the_device.Close()
+	if econfigV2.SuperNodeV2.APIUrl != "" {
+		the_device.EnableSuperHTTP(econfigV2)
+	}
 	pk, err := device.Str2PriKey(econfig.PrivKey)
 	if err != nil {
 		fmt.Println("Error decode base64 ", err)
@@ -132,6 +145,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	the_device.SetPrivateKey(pk)
 	the_device.IpcSet("fwmark=" + fmt.Sprint(econfig.FwMark) + "\n")
 	the_device.IpcSet("listen_port=" + strconv.Itoa(econfig.ListenPort) + "\n")
+	the_device.SuperHTTPReady()
 	the_device.IpcSet("replace_peers=true\n")
 	for _, peerconf := range econfig.Peers {
 		pk, err := device.Str2PubKey(peerconf.PubKey)
@@ -150,75 +164,6 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 				}
 				peer.AddEndpointRetry(peerconf.EndPoint, peerconf.Static)
 				logger.Errorf("Initial peer endpoint unavailable; P2P will retry: endpoint=%v error=%v", peerconf.EndPoint, err)
-			}
-		}
-	}
-
-	if econfig.DynamicRoute.SuperNode.UseSuperNode {
-		S4 := true
-		S6 := true
-		if econfig.DynamicRoute.SuperNode.EndpointV4 != "" && EnabledAf.IPv4 {
-			pk, err := device.Str2PubKey(econfig.DynamicRoute.SuperNode.PubKeyV4)
-			if err != nil {
-				fmt.Println("Error decode base64 ", err)
-				return err
-			}
-			psk, err := device.Str2PSKey(econfig.DynamicRoute.SuperNode.PSKey)
-			if err != nil {
-				fmt.Println("Error decode base64 ", err)
-				return err
-			}
-			peer, err := the_device.NewPeer(pk, mtypes.NodeID_SuperNode, true, 0)
-			if err != nil {
-				return err
-			}
-			peer.SetPSK(psk)
-			StaticSuper := true
-			sc := econfig.DynamicRoute.SuperNode.EndpointV4
-			if strings.Contains(sc, ":") {
-				i := strings.LastIndex(sc, ":")
-				sch := sc[:i]
-				if sch == "127.0.0.1" {
-					StaticSuper = false
-				}
-			}
-			err = peer.SetEndpointFromConnURL(econfig.DynamicRoute.SuperNode.EndpointV4, EnabledAf.GetOnly4(), 0, StaticSuper)
-			if err != nil {
-				logger.Errorf("Failed to set endpoint for supernode v4 %v: %v", econfig.DynamicRoute.SuperNode.EndpointV4, err)
-				S4 = false
-			}
-		}
-		if econfig.DynamicRoute.SuperNode.EndpointV6 != "" && EnabledAf.IPv6 {
-			pk, err := device.Str2PubKey(econfig.DynamicRoute.SuperNode.PubKeyV6)
-			if err != nil {
-				fmt.Println("Error decode base64 ", err)
-			}
-			psk, err := device.Str2PSKey(econfig.DynamicRoute.SuperNode.PSKey)
-			if err != nil {
-				fmt.Println("Error decode base64 ", err)
-				return err
-			}
-			peer, err := the_device.NewPeer(pk, mtypes.NodeID_SuperNode, true, 0)
-			if err != nil {
-				return err
-			}
-			peer.SetPSK(psk)
-			StaticSuper := true
-			sc := econfig.DynamicRoute.SuperNode.EndpointV6
-			if strings.Contains(sc, ":") {
-				i := strings.LastIndex(sc, ":")
-				sch := sc[:i]
-				if sch == "[::1]" {
-					StaticSuper = false
-				}
-			}
-			err = peer.SetEndpointFromConnURL(econfig.DynamicRoute.SuperNode.EndpointV6, EnabledAf.GetOnly6(), 0, StaticSuper)
-			if err != nil {
-				logger.Errorf("Failed to set endpoint for supernode v6 %v: %v", econfig.DynamicRoute.SuperNode.EndpointV6, err)
-				S6 = false
-			}
-			if !(S4 || S6) {
-				return errors.New("failed to connect to supernode")
 			}
 		}
 	}

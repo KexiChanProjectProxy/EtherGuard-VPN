@@ -7,6 +7,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -125,10 +126,12 @@ type Device struct {
 		mtu    int32
 	}
 
-	ipcMutex  sync.RWMutex
-	closed    chan int
-	log       *Logger
-	superSTUN *SuperSTUNManager
+	ipcMutex      sync.RWMutex
+	closed        chan int
+	log           *Logger
+	superSTUN     *SuperSTUNManager
+	superHTTP     *SuperHTTPRuntime
+	controlCancel context.CancelFunc
 }
 
 type IdAndTime struct {
@@ -393,13 +396,11 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 		} else {
 			go device.RoutineTryReceivedEndpoint()
 			go device.RoutineDetectOfflineAndTryNextEndpoint()
-			go device.RoutineRegister(device.Chan_SendRegisterStart)
 			go device.RoutineSendPing(device.Chan_SendPingStart)
 			go device.RoutineSpreadAllMyNeighbor()
 			go device.RoutineResetEndpoint()
 			go device.RoutineClearL2FIB()
 			go device.RoutineRecalculateNhTable()
-			go device.RoutinePostPeerInfo(device.Chan_HttpPostStart)
 		}
 	}()
 
@@ -615,6 +616,9 @@ func (device *Device) Close() {
 	}
 	atomic.StoreUint32(&device.state.state, uint32(deviceStateClosed))
 	device.log.Verbosef("Device closing")
+	if device.controlCancel != nil {
+		device.controlCancel()
+	}
 
 	device.tap.device.Close()
 	device.downLocked()
