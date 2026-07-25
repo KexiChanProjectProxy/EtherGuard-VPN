@@ -60,7 +60,7 @@ P2P Mode | 此模式是受到[tinc](https://github.com/gsliepen/tinc)的啟發�
 
 編譯沒有VPP libmemif的版本。可以在一般linux電腦上使用
 
-安裝 Go 1.16
+安裝 Go 1.26.5
 
 ```bash
 add-apt-repository ppa:longsleep/golang-backports

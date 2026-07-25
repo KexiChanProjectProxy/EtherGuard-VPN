@@ -59,7 +59,7 @@ P2P Mode | Inspired by [tinc](https://github.com/gsliepen/tinc), There are no Su
 
 Build Etherguard.  
 
-Install Go 1.16
+Install Go 1.26.5
 
 ```bash
 add-apt-repository ppa:longsleep/golang-backports
