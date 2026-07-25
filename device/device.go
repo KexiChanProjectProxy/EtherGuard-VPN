@@ -78,6 +78,7 @@ type Device struct {
 
 	event_tryendpoint chan struct{}
 	chan_send_packet  chan *packet_send_params
+	sendQueueDrops    atomic.Uint64
 
 	EdgeConfigPath  string
 	EdgeConfig      *mtypes.EdgeConfig
@@ -355,7 +356,7 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.indexTable.Init()
 	device.PopulatePools()
 	device.Chan_Device_Initialized = make(chan struct{}, 1<<5)
-	device.chan_send_packet = make(chan *packet_send_params, 1<<15)
+	device.chan_send_packet = make(chan *packet_send_params, QueueOutboundSize)
 	if IsSuperNode {
 		device.SuperConfigPath = configpath
 		device.SuperConfig = sconfig

@@ -75,10 +75,10 @@ func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet
 	elem.Type = usage
 	elem.TTL = ttl
 	elem.packet = elem.buffer[offset : offset+len(packet)]
-	device.chan_send_packet <- &packet_send_params{
+	device.enqueuePacket(&packet_send_params{
 		peer: peer,
 		elem: elem,
-	}
+	})
 }
 
 func (device *Device) RoutineSendPacket() {
@@ -824,7 +824,8 @@ func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
 	}
 	timeout := mtypes.S2TD(device.EdgeConfig.DynamicRoute.TimeoutCheckInterval)
 	for {
-		device.event_tryendpoint <- struct{}{}
+		device.signalEndpointRetry()
+		device.logQueueState()
 		time.Sleep(timeout)
 	}
 }
