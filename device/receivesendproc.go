@@ -711,19 +711,13 @@ func (device *Device) process_RequestPeerMsg(content mtypes.QueryPeerMsg) error 
 				ConnURL:    peer.endpoint.DstToString(),
 			}
 			peer.handshake.mutex.RUnlock()
-			body, err := mtypes.GetByte(response)
-			if err != nil {
+			if err := device.spreadPeerAdvertisement(response); err != nil {
 				device.log.Errorf("Error at receivesendproc.go line221: ", err)
 				continue
 			}
-			buf := make([]byte, path.EgHeaderLen+len(body))
-			header, _ := path.NewEgHeader(buf[0:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
-			header.SetDst(mtypes.NodeID_Spread)
-			header.SetSrc(device.ID)
-			copy(buf[path.EgHeaderLen:], body)
-			device.SpreadPacket(make(map[mtypes.Vertex]bool), path.BroadcastPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 		}
 		device.peers.RUnlock()
+		device.spreadLocalEndpoints(content.Request_ID)
 	}
 	return nil
 }
