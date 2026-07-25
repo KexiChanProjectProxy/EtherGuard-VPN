@@ -186,6 +186,9 @@ func (c *ControlHTTPClient) Current() *mtypes.ControlV2Snapshot {
 
 // recordEventID tracks the most-recently delivered SSE event ID for replay on reconnect.
 func (c *ControlHTTPClient) recordEventID(id string) {
+	if id == "" {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.lastEventID = id
@@ -436,17 +439,3 @@ func (c *ControlHTTPClient) pollLoop(ctx context.Context, interval time.Duration
 		}
 	}
 }
-
-// atomicBool is a tiny helper to keep Sync's pause/resume state lock-free.
-type atomicBool struct {
-	mu sync.Mutex
-	v  bool
-}
-
-func (a *atomicBool) set(b bool) { a.mu.Lock(); a.v = b; a.mu.Unlock() }
-func (a *atomicBool) get() bool  { a.mu.Lock(); defer a.mu.Unlock(); return a.v }
-
-// keep imports tidy
-var _ = sync.Mutex{}
-var _ = http.MethodGet
-var _ = bytes.NewReader
