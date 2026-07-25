@@ -1065,19 +1065,20 @@ func (device *Device) RoutineResetEndpoint() {
 	}
 	timeout := mtypes.S2TD(ResetEndPointInterval)
 	for {
-		for _, peer := range device.peers.keyMap {
-			if !peer.StaticConn { //Do not reset connecton for dynamic peer
+		for _, peer := range device.allPeersSnapshot() {
+			static, connURL, connAF := peer.endpointRetryConfig()
+			if !static { //Do not reset connecton for dynamic peer
 				continue
 			}
-			if peer.ConnURL == "" {
+			if connURL == "" {
 				continue
 			}
 			if peer.IsPeerAlive() {
 				continue
 			}
-			err := peer.SetEndpointFromConnURL(peer.ConnURL, peer.ConnAF, device.EdgeConfig.AfPrefer, peer.StaticConn)
+			err := peer.SetEndpointFromConnURL(connURL, connAF, device.EdgeConfig.AfPrefer, static)
 			if err != nil {
-				device.log.Errorf("Failed to bind "+peer.ConnURL, err)
+				device.log.Errorf("Static endpoint reset failed: endpoint=%s error=%v", connURL, err)
 				continue
 			}
 		}
