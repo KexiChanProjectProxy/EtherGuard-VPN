@@ -146,6 +146,7 @@ type SSEParser struct{}
 
 func (SSEParser) Parse(ctx context.Context, r io.Reader, out chan<- mtypes.ControlV2Event) error {
 	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	var d []string
 	var id, typ string
 	flush := func() error {
