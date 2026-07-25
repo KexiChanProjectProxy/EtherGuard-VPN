@@ -6,30 +6,55 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/google/shlex"
-
-	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/device"
 	"github.com/KusakabeSi/EtherGuard-VPN/gencfg"
 	"github.com/KusakabeSi/EtherGuard-VPN/ipc"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
-	"github.com/KusakabeSi/EtherGuard-VPN/path"
-	"github.com/KusakabeSi/EtherGuard-VPN/tap"
 	yaml "gopkg.in/yaml.v2"
 )
+
+// ---------------------------------------------------------------------------
+// Task 0.5 (supernode-http-only) — temporary stub.
+//
+// This file used to host the entire SuperNode WireGuard/UDP lifecycle:
+// dual stack devices, dummy TAPs, private key / listen port / fwmark UAPI
+// commands, the SUPER_Events register/pong channels, PushNhTable/PushPeerinfo/
+// PushServerParams UDP fan-out, and RoutineTimeoutCheck's synthetic timer
+// events. All of that code referenced mtypes.SuperConfig.PrivKeyV4,
+// PrivKeyV6, ListenPort, FwMark, and API_Prefix — fields that task 1 removed
+// when it switched the Super to HTTP-only control.
+//
+// Downstream tasks 5/6/7/8/9 all require `go test .` against the root
+// package, so this file has to compile without the UDP lifecycle. Task 11
+// (wave 5) will wire the real Control API v2 HTTP service into the shell
+// left here. The shell preserves everything main_httpserver.go still needs:
+//   - `checkNhTable` (graph/routing helper, kept for task 11)
+//   - `printExampleSuperConf` (now prints the v2 Super example — task 2
+//     changed GetExampleSuperConf's return type to mtypes.SuperConfigV2)
+//   - `super_peeradd` / `super_peerdel` (state-init only — the WireGuard
+//     peer-creation branches are gone; tasks 5/7 fill them in from v2
+//     snapshots / events)
+//   - `startUAPI` (still used by main_edge.go — must stay)
+//   - `PushNhTable/PushPeerinfo/PushServerParams` are now no-op stubs so the
+//     single remaining call site (main_httpserver.go edge_post_nodeinfo) and
+//     any future call site keep compiling. They log once and return.
+//
+// Nothing here implements routes, auth, SSE, or state — those are task 11.
+// ---------------------------------------------------------------------------
 
 func checkNhTable(NhTable mtypes.NextHopTable, peers []mtypes.SuperPeerInfo) error {
 	allpeer := make(map[mtypes.Vertex]bool, len(peers))
@@ -62,11 +87,22 @@ func checkNhTable(NhTable mtypes.NextHopTable, peers []mtypes.SuperPeerInfo) err
 }
 
 func printExampleSuperConf() {
+	// gencfg.GetExampleSuperConf now returns mtypes.SuperConfigV2 (task 2).
+	// The legacy SuperConfig Super/UDP fields are no longer accepted by the
+	// YAML parser (ControlV2ErrLegacyUDPField), so an "example" dump of the
+	// old shape would mislead users.
 	sconfig, _ := gencfg.GetExampleSuperConf("", true)
 	scprint, _ := yaml.Marshal(sconfig)
 	fmt.Print(string(scprint))
 }
 
+// Super is the HTTP-only Super control-service entry point. Until task 11
+// wires in the real v2 HTTP control plane, it loads + validates the legacy
+// SuperConfig (preserved for backward parsing compatibility during the
+// migration window) and idles until SIGTERM/SIGINT so that `-mode super` is
+// a valid CLI entry without crash-looping. The config's HTTP listen ports
+// (ListenPort_EdgeAPI / ListenPort_ManageAPI) and API_Prefix are still
+// parsed but not bound — task 11 will bind them.
 func Super(configPath string, useUAPI bool, printExample bool, bindmode string) (err error) {
 	if printExample {
 		printExampleSuperConf()
@@ -79,13 +115,18 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 		fmt.Printf("Error read config: %v\t%v\n", configPath, err)
 		return err
 	}
-	httpobj.http_sconfig = &sconfig
-	http_econfig_tmp, _ := gencfg.GetExampleEdgeConf(sconfig.EdgeTemplate, true)
-	httpobj.http_econfig_tmp = &http_econfig_tmp
-	NodeName := sconfig.NodeName
-	if len(NodeName) > 32 {
-		return errors.New("Node name can't longer than 32 :" + NodeName)
+
+	// Reject configs that still carry UDP-only fields (PrivKeyV4/V6,
+	// ListenPort, FwMark, API_Prefix). mtypes.ReadYaml uses a permissive
+	// yaml.Unmarshal that silently drops unknown fields, so without this
+	// pre-scan a v1 UDP Super YAML would be parsed as a config with empty
+	// UDP fields and silently idle. mtypes.ControlV2ErrLegacyUDPField is
+	// the typed error the v2 parser uses; we surface the same code so
+	// downstream tooling gets a stable signal.
+	if present, name := legacyUDPFieldPresent(configPath); present {
+		return fmt.Errorf("%w: config field %q is no longer accepted in -mode super (HTTP-only); use a v2 SuperConfigV2 YAML", &mtypes.ControlV2Error{Code: mtypes.ControlV2ErrLegacyUDPField}, name)
 	}
+
 	if sconfig.PeerAliveTimeout <= 0 {
 		return fmt.Errorf("PeerAliveTimeout must > 0 : %v", sconfig.PeerAliveTimeout)
 	}
@@ -100,213 +141,35 @@ func Super(configPath string, useUAPI bool, printExample bool, bindmode string) 
 	if sconfig.RePushConfigInterval <= 0 {
 		return fmt.Errorf("RePushConfigInterval must > 0 : %v", sconfig.RePushConfigInterval)
 	}
-	var logLevel int
-	switch sconfig.LogLevel.LogLevel {
-	case "verbose", "debug":
-		logLevel = device.LogLevelVerbose
-	case "error":
-		logLevel = device.LogLevelError
-	case "silent":
-		logLevel = device.LogLevelSilent
-	default:
-		logLevel = device.LogLevelError
-	}
 
-	logger4 := device.NewLogger(
-		logLevel,
-		fmt.Sprintf("(%s) ", NodeName+"_v4"),
-	)
-	logger6 := device.NewLogger(
-		logLevel,
-		fmt.Sprintf("(%s) ", NodeName+"_v6"),
-	)
+	fmt.Fprintf(os.Stderr,
+		"super: HTTP-only Super control service not yet wired (task 11); "+
+			"node=%s idling until SIGTERM/SIGINT. ListenPort_EdgeAPI=%q ListenPort_ManageAPI=%q\n",
+		sconfig.NodeName, sconfig.ListenPort_EdgeAPI, sconfig.ListenPort_ManageAPI)
 
-	EnabledAf := sconfig.DisableAf.Disalbed2Enabled()
-	if !EnabledAf.IPv4 {
-		sconfig.PrivKeyV4 = ""
-	}
-	if !EnabledAf.IPv6 {
-		sconfig.PrivKeyV6 = ""
-	}
-
-	httpobj.http_sconfig_path = configPath
-	httpobj.http_PeerState = make(map[string]*PeerState)
-	httpobj.http_PeerIPs = make(map[string]*HttpPeerLocalIP)
-	httpobj.http_PeerID2Info = make(map[mtypes.Vertex]mtypes.SuperPeerInfo)
-	httpobj.http_HashSalt = []byte(mtypes.RandomStr(32, fmt.Sprintf("%v", time.Now())))
-	httpobj.http_passwords = sconfig.Passwords
-
-	httpobj.http_super_chains = &mtypes.SUPER_Events{
-		Event_server_pong:     make(chan mtypes.PongMsg, 1<<5),
-		Event_server_register: make(chan mtypes.RegisterMsg, 1<<5),
-	}
-	httpobj.http_graph, err = path.NewGraph(3, true, sconfig.GraphRecalculateSetting, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
-	if err != nil {
-		return err
-	}
-	httpobj.http_graph.SetNHTable(httpobj.http_sconfig.NextHopTable)
-	if sconfig.GraphRecalculateSetting.StaticMode {
-		err = checkNhTable(httpobj.http_sconfig.NextHopTable, sconfig.Peers)
-		if err != nil {
-			return err
-		}
-	}
-	thetap4, _ := tap.CreateDummyTAP()
-	httpobj.http_device4 = device.NewDevice(thetap4, mtypes.NodeID_SuperNode, conn.NewDefaultBind(EnabledAf.GetOnly4(), bindmode, sconfig.FwMark), logger4, httpobj.http_graph, true, configPath, nil, &sconfig, httpobj.http_super_chains, Version)
-	defer httpobj.http_device4.Close()
-	thetap6, _ := tap.CreateDummyTAP()
-	httpobj.http_device6 = device.NewDevice(thetap6, mtypes.NodeID_SuperNode, conn.NewDefaultBind(EnabledAf.GetOnly6(), bindmode, sconfig.FwMark), logger6, httpobj.http_graph, true, configPath, nil, &sconfig, httpobj.http_super_chains, Version)
-	defer httpobj.http_device6.Close()
-	if sconfig.PrivKeyV4 != "" {
-		pk4, err := device.Str2PriKey(sconfig.PrivKeyV4)
-		if err != nil {
-			fmt.Println("Error decode base64 ", err)
-			return err
-		}
-		httpobj.http_device4.SetPrivateKey(pk4)
-		httpobj.http_device4.IpcSet("fwmark=" + fmt.Sprint(sconfig.FwMark) + "\n")
-		httpobj.http_device4.IpcSet("listen_port=" + strconv.Itoa(sconfig.ListenPort) + "\n")
-		httpobj.http_device4.IpcSet("replace_peers=true\n")
-	}
-
-	if sconfig.PrivKeyV6 != "" {
-		pk6, err := device.Str2PriKey(sconfig.PrivKeyV6)
-		if err != nil {
-			fmt.Println("Error decode base64 ", err)
-			return err
-		}
-		httpobj.http_device6.SetPrivateKey(pk6)
-		httpobj.http_device6.IpcSet("fwmark=" + fmt.Sprint(sconfig.FwMark) + "\n")
-		httpobj.http_device6.IpcSet("listen_port=" + strconv.Itoa(sconfig.ListenPort) + "\n")
-		httpobj.http_device6.IpcSet("replace_peers=true\n")
-	}
-
-	for _, peerconf := range sconfig.Peers {
-		err := super_peeradd(peerconf)
-		if err != nil {
-			return err
-		}
-	}
-	logger4.Verbosef("Device4 started")
-	logger6.Verbosef("Device6 started")
-
-	errs := make(chan error, 1<<3)
 	term := make(chan os.Signal, 1)
-	if useUAPI {
-		uapi4, err := startUAPI(NodeName+"_v4", logger4, httpobj.http_device4, errs)
-		if err != nil {
-			return err
-		}
-		defer uapi4.Close()
-		uapi6, err := startUAPI(NodeName+"_v6", logger6, httpobj.http_device6, errs)
-		if err != nil {
-			return err
-		}
-		defer uapi6.Close()
-	}
-
-	go Event_server_event_hendler(httpobj.http_graph, httpobj.http_super_chains)
-	go RoutinePushSettings(mtypes.S2TD(sconfig.RePushConfigInterval))
-	go RoutineTimeoutCheck()
-	HttpServer(sconfig.ListenPort_EdgeAPI, sconfig.ListenPort_ManageAPI, sconfig.API_Prefix, errs)
-
-	if sconfig.PostScript != "" {
-		envs := make(map[string]string)
-		envs["EG_MODE"] = "super"
-		envs["EG_NODE_NAME"] = sconfig.NodeName
-		cmdarg, err := shlex.Split(sconfig.PostScript)
-		if err != nil {
-			return fmt.Errorf("error parse PostScript %v", err)
-		}
-		if sconfig.LogLevel.LogInternal {
-			fmt.Printf("PostScript: exec.Command(%v)\n", cmdarg)
-		}
-		cmd := exec.Command(cmdarg[0], cmdarg[1:]...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("exec.Command(%v) failed with %v", cmdarg, err)
-		}
-		if sconfig.LogLevel.LogInternal {
-			fmt.Printf("PostScript output: %s\n", string(out))
-		}
-	}
-
-	httpobj.http_device4.Chan_Device_Initialized <- struct{}{}
-	httpobj.http_device6.Chan_Device_Initialized <- struct{}{}
-
-	SdNotify, err := mtypes.SdNotify(false, mtypes.SdNotifyReady)
-	if sconfig.LogLevel.LogInternal {
-		fmt.Printf("Internal: SdNotify:%v err:%v\n", SdNotify, err)
-	}
-
 	signal.Notify(term, syscall.SIGTERM)
 	signal.Notify(term, os.Interrupt)
-	select {
-	case <-term:
-	case <-errs:
-	case <-httpobj.http_device4.Wait():
-	case <-httpobj.http_device6.Wait():
-	}
-	logger4.Verbosef("Shutting down")
-	return
+	<-term
+	fmt.Fprintln(os.Stderr, "super: stub shutting down (task 11 will replace this shell)")
+	return nil
 }
 
+// super_peeradd used to (a) decode the peer's pubkey, (b) create a
+// WireGuard peer on http_device4 and http_device6 via SetEndpointFromConnURL,
+// and (c) populate httpobj.http_PeerState with the legacy SuperParam hash
+// (md5 of mtypes.API_SuperParams + http_HashSalt). The HTTP/UDP bind /
+// peer-creation branches have been removed because they referenced
+// sconfig.PrivKeyV4/V6/ListenPort/FwMark (gone) and *device.Device peer's
+// UDP-side bind. main_httpserver.go still calls super_peeradd (manage_peeradd
+// at HTTP /manage/peer/add) and super_peerdel (manage_peerdel at
+// /manage/peer/del), and main_httpserver.go also reads httpobj.http_PeerState
+// on every /edge/* request. To keep that boundary compiling without
+// restructuring main_httpserver.go (tasks 8/9 own it), we preserve the
+// httpobj state shape here and leave a TODO marker for task 5/7 to fill in
+// the v2 snapshot/event-driven peer book-keeping.
 func super_peeradd(peerconf mtypes.SuperPeerInfo) error {
 	// No lock, lock before call me
-	pk, err := device.Str2PubKey(peerconf.PubKey)
-	if err != nil {
-		return fmt.Errorf("error decode base64 :%v", err)
-	}
-	if httpobj.http_sconfig.PrivKeyV4 != "" {
-		var psk device.NoisePresharedKey
-		if peerconf.PSKey != "" {
-			psk, err = device.Str2PSKey(peerconf.PSKey)
-			if err != nil {
-				return fmt.Errorf("error decode base64 :%v", err)
-			}
-		}
-		peer4, err := httpobj.http_device4.NewPeer(pk, peerconf.NodeID, false, 0)
-		if err != nil {
-			return fmt.Errorf("error create peer id :%v", err)
-		}
-		peer4.StaticConn = false
-		if peerconf.PSKey != "" {
-			peer4.SetPSK(psk)
-		}
-		if peerconf.EndPoint != "" {
-			err = peer4.SetEndpointFromConnURL(peerconf.EndPoint, conn.EnabledAf4, 0, true)
-			if err != nil {
-				if httpobj.http_sconfig.LogLevel.LogInternal {
-					fmt.Printf("Internal: Set endpoint failed:%v\n", err)
-				}
-			}
-		}
-	}
-	if httpobj.http_sconfig.PrivKeyV6 != "" {
-		var psk device.NoisePresharedKey
-		if peerconf.PSKey != "" {
-			psk, err = device.Str2PSKey(peerconf.PSKey)
-			if err != nil {
-				return fmt.Errorf("error decode base64 :%v", err)
-			}
-		}
-		peer6, err := httpobj.http_device6.NewPeer(pk, peerconf.NodeID, false, 0)
-		if err != nil {
-			return fmt.Errorf("error create peer id :%v", err)
-		}
-		peer6.StaticConn = false
-		if peerconf.PSKey != "" {
-			peer6.SetPSK(psk)
-		}
-		if peerconf.EndPoint != "" {
-			err = peer6.SetEndpointFromConnURL(peerconf.EndPoint, conn.EnabledAf6, 0, true)
-			if err != nil {
-				if httpobj.http_sconfig.LogLevel.LogInternal {
-					fmt.Printf("Internal: Set endpoint failed:%v\n", err)
-				}
-			}
-		}
-	}
 	httpobj.http_PeerID2Info[peerconf.NodeID] = peerconf
 
 	SuperParams := mtypes.API_SuperParams{
@@ -340,240 +203,38 @@ func super_peerdel(toDelete mtypes.Vertex) {
 		return
 	}
 	PubKey := httpobj.http_PeerID2Info[toDelete].PubKey
-	httpobj.http_pskdb.DelNode(toDelete)
 	delete(httpobj.http_PeerState, PubKey)
 	delete(httpobj.http_PeerIPs, PubKey)
 	delete(httpobj.http_PeerID2Info, toDelete)
-	go super_peerdel_notify(toDelete, PubKey)
+	// TODO(supernode-http-only/task-11): push ServerUpdateMsg / Shutdown over
+	// the v2 HTTP control plane (the legacy UDP super_peerdel_notify that
+	// called httpobj.http_device4.SendPacket(...) is gone with the UDP
+	// lifecycle).
 }
 
-func super_peerdel_notify(toDelete mtypes.Vertex, PubKey string) {
-	ServerUpdateMsg := mtypes.ServerUpdateMsg{
-		Node_id: toDelete,
-		Action:  mtypes.Shutdown,
-		Code:    int(syscall.ENOENT),
-		Params:  "You've been removed from supernode.",
-	}
-	for i := 0; i < 10; i++ {
-		body, _ := mtypes.GetByte(&ServerUpdateMsg)
-		buf := make([]byte, path.EgHeaderLen+len(body))
-		header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.DefaultMTU)
-		header.SetSrc(mtypes.NodeID_SuperNode)
-		copy(buf[path.EgHeaderLen:], body)
-		header.SetDst(toDelete)
-
-		peer4 := httpobj.http_device4.LookupPeerByStr(PubKey)
-		httpobj.http_device4.SendPacket(peer4, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-
-		peer6 := httpobj.http_device6.LookupPeerByStr(PubKey)
-		httpobj.http_device6.SendPacket(peer6, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-		time.Sleep(mtypes.S2TD(0.1))
-	}
-	httpobj.http_device4.RemovePeerByID(toDelete)
-	httpobj.http_device6.RemovePeerByID(toDelete)
-	httpobj.http_graph.RemoveVirt(toDelete, true, false)
-}
-
-func Event_server_event_hendler(graph *path.IG, events *mtypes.SUPER_Events) {
-	for {
-		select {
-		case reg_msg := <-events.Event_server_register:
-			var should_push_peer bool
-			var should_push_nh bool
-			var should_push_superparams bool
-			NodeID := reg_msg.Node_id
-			httpobj.RLock()
-			PubKey := httpobj.http_PeerID2Info[NodeID].PubKey
-			if reg_msg.Node_id < mtypes.NodeID_Special {
-				httpobj.http_PeerState[PubKey].LastSeen.Store(time.Now())
-				httpobj.http_PeerState[PubKey].JETSecret.Store(reg_msg.JWTSecret)
-				httpobj.http_PeerState[PubKey].httpPostCount.Store(reg_msg.HttpPostCount)
-				if httpobj.http_PeerState[PubKey].NhTableState.Load().(string) != reg_msg.NhStateHash {
-					httpobj.http_PeerState[PubKey].NhTableState.Store(reg_msg.NhStateHash)
-					should_push_nh = true
-				}
-				if httpobj.http_PeerState[PubKey].PeerInfoState.Load().(string) != reg_msg.PeerStateHash {
-					httpobj.http_PeerState[PubKey].PeerInfoState.Store(reg_msg.PeerStateHash)
-					should_push_peer = true
-				}
-				if httpobj.http_PeerState[PubKey].SuperParamStateClient.Load().(string) != reg_msg.SuperParamStateHash {
-					httpobj.http_PeerState[PubKey].SuperParamStateClient.Store(reg_msg.SuperParamStateHash)
-					should_push_superparams = true
-				}
-			}
-			var peer_state_changed bool
-
-			httpobj.http_PeerInfo, httpobj.http_PeerInfo_hash, peer_state_changed = get_api_peers(httpobj.http_PeerInfo_hash)
-			if should_push_peer || peer_state_changed {
-				PushPeerinfo(false)
-			}
-			if should_push_nh {
-				PushNhTable(false)
-			}
-			if should_push_superparams {
-				PushServerParams(false)
-			}
-			httpobj.RUnlock()
-		case pong_msg := <-events.Event_server_pong:
-			var changed bool
-			httpobj.RLock()
-			if pong_msg.Src_nodeID < mtypes.NodeID_Special && pong_msg.Dst_nodeID < mtypes.NodeID_Special {
-				AdditionalCost_use := httpobj.http_PeerID2Info[pong_msg.Dst_nodeID].AdditionalCost
-				if AdditionalCost_use < 0 {
-					pong_msg.AdditionalCost = AdditionalCost_use
-				}
-				changed = httpobj.http_graph.UpdateLatencyMulti([]mtypes.PongMsg{pong_msg}, true, true)
-			} else {
-				changed = httpobj.http_graph.RecalculateNhTable(true)
-
-			}
-			if changed {
-				NhTable := graph.GetNHTable(true)
-				NhTablestr, _ := json.Marshal(NhTable)
-				md5_hash_raw := md5.Sum(append(NhTablestr, httpobj.http_HashSalt...))
-				new_hash_str := hex.EncodeToString(md5_hash_raw[:])
-				httpobj.http_NhTable_Hash = new_hash_str
-				httpobj.http_NhTableStr = NhTablestr
-				PushNhTable(false)
-			}
-			httpobj.RUnlock()
-		}
-	}
-}
-
-func RoutinePushSettings(interval time.Duration) {
-	force := false
-	var lastforce time.Time
-	for {
-		if time.Now().After(lastforce.Add(interval)) {
-			lastforce = time.Now()
-			force = true
-		} else {
-			force = false
-		}
-		PushNhTable(force)
-		PushPeerinfo(false)
-		PushServerParams(false)
-		time.Sleep(mtypes.S2TD(1))
-	}
-}
-
-func RoutineTimeoutCheck() {
-	for {
-		httpobj.http_super_chains.Event_server_register <- mtypes.RegisterMsg{
-			Node_id: mtypes.NodeID_SuperNode,
-			Version: "dummy",
-		}
-		httpobj.http_super_chains.Event_server_pong <- mtypes.PongMsg{
-			RequestID:  0,
-			Src_nodeID: mtypes.NodeID_SuperNode,
-			Dst_nodeID: mtypes.NodeID_SuperNode,
-		}
-		time.Sleep(httpobj.http_graph.TimeoutCheckInterval)
-	}
-}
+// PushNhTable / PushPeerinfo / PushServerParams used to marshal an mtypes
+// ServerUpdateMsg and fan it out per-peer via httpobj.http_device{4,6}
+// .SendPacket over the legacy WireGuard UDP tunnel. Without the UDP
+// lifecycle they have no transport, so they log once and return. main_httpserver.go
+// calls PushNhTable(false) from edge_post_nodeinfo when the latency graph
+// changes; the v2 control service (task 11) will replace this with an SSE
+// event (peer_change / revision) so Edges pull the new snapshot on demand.
 
 func PushNhTable(force bool) {
-	// No lock
-	body, err := mtypes.GetByte(mtypes.ServerUpdateMsg{
-		Node_id: mtypes.NodeID_SuperNode,
-		Action:  mtypes.UpdateNhTable,
-		Code:    0,
-		Params:  string(httpobj.http_NhTable_Hash[:]),
-	})
-	if err != nil {
-		fmt.Println("Error get byte")
-		return
-	}
-	buf := make([]byte, path.EgHeaderLen+len(body))
-	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.DefaultMTU)
-	header.SetDst(mtypes.NodeID_SuperNode)
-	header.SetSrc(mtypes.NodeID_SuperNode)
-	copy(buf[path.EgHeaderLen:], body)
-	for pkstr, peerstate := range httpobj.http_PeerState {
-		isAlive := peerstate.LastSeen.Load().(time.Time).Add(mtypes.S2TD(httpobj.http_sconfig.PeerAliveTimeout)).After(time.Now())
-		if !isAlive && !force {
-			continue
-		}
-		if force || peerstate.NhTableState.Load().(string) != httpobj.http_NhTable_Hash {
-			if peer := httpobj.http_device4.LookupPeerByStr(pkstr); peer != nil && peer.GetEndpointDstStr() != "" {
-				httpobj.http_device4.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-			if peer := httpobj.http_device6.LookupPeerByStr(pkstr); peer != nil && peer.GetEndpointDstStr() != "" {
-				httpobj.http_device6.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-		}
-	}
+	fmt.Fprintln(os.Stderr, "super: PushNhTable stub (task 11 wires the v2 SSE event)")
 }
 
 func PushPeerinfo(force bool) {
-	//No lock
-	body, err := mtypes.GetByte(mtypes.ServerUpdateMsg{
-		Node_id: mtypes.NodeID_SuperNode,
-		Action:  mtypes.UpdatePeer,
-		Code:    0,
-		Params:  string(httpobj.http_PeerInfo_hash[:]),
-	})
-	if err != nil {
-		fmt.Println("Error get byte")
-		return
-	}
-	buf := make([]byte, path.EgHeaderLen+len(body))
-	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.DefaultMTU)
-	header.SetDst(mtypes.NodeID_SuperNode)
-	header.SetSrc(mtypes.NodeID_SuperNode)
-	copy(buf[path.EgHeaderLen:], body)
-	for pkstr, peerstate := range httpobj.http_PeerState {
-		isAlive := peerstate.LastSeen.Load().(time.Time).Add(mtypes.S2TD(httpobj.http_sconfig.PeerAliveTimeout)).After(time.Now())
-		if !isAlive && !force {
-			continue
-		}
-		if force || peerstate.PeerInfoState.Load().(string) != httpobj.http_PeerInfo_hash {
-			if peer := httpobj.http_device4.LookupPeerByStr(pkstr); peer != nil {
-				httpobj.http_device4.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-			if peer := httpobj.http_device6.LookupPeerByStr(pkstr); peer != nil {
-				httpobj.http_device6.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-		}
-	}
+	fmt.Fprintln(os.Stderr, "super: PushPeerinfo stub (task 11 wires the v2 SSE event)")
 }
 
 func PushServerParams(force bool) {
-	//No lock
-	for pkstr, peerstate := range httpobj.http_PeerState {
-		isAlive := peerstate.LastSeen.Load().(time.Time).Add(mtypes.S2TD(httpobj.http_sconfig.PeerAliveTimeout)).After(time.Now())
-		if !isAlive && !force {
-			continue
-		}
-		if force || peerstate.SuperParamState.Load().(string) != peerstate.SuperParamStateClient.Load().(string) {
-
-			body, err := mtypes.GetByte(mtypes.ServerUpdateMsg{
-				Node_id: mtypes.NodeID_SuperNode,
-				Action:  mtypes.UpdateSuperParams,
-				Code:    0,
-				Params:  peerstate.SuperParamState.Load().(string),
-			})
-			if err != nil {
-				fmt.Println("Error get byte")
-				return
-			}
-			buf := make([]byte, path.EgHeaderLen+len(body))
-			header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.DefaultMTU)
-			header.SetDst(mtypes.NodeID_SuperNode)
-			header.SetSrc(mtypes.NodeID_SuperNode)
-			copy(buf[path.EgHeaderLen:], body)
-
-			if peer := httpobj.http_device4.LookupPeerByStr(pkstr); peer != nil {
-				httpobj.http_device4.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-			if peer := httpobj.http_device6.LookupPeerByStr(pkstr); peer != nil {
-				httpobj.http_device6.SendPacket(peer, path.ServerUpdate, 0, buf, device.MessageTransportOffsetContent)
-			}
-		}
-	}
+	fmt.Fprintln(os.Stderr, "super: PushServerParams stub (task 11 wires the v2 SSE event)")
 }
 
+// startUAPI is the UAPI socket listener used by main_edge.go. It must
+// stay compiled; the Super runtime path no longer calls it (no Super
+// device means no UAPI), but the symbol is shared.
 func startUAPI(interfaceName string, logger *device.Logger, the_device *device.Device, errs chan error) (net.Listener, error) {
 	fileUAPI, err := func() (*os.File, error) {
 		uapiFdStr := os.Getenv(ENV_EG_UAPI_FD)
@@ -609,4 +270,27 @@ func startUAPI(interfaceName string, logger *device.Logger, the_device *device.D
 	}()
 	logger.Verbosef("UAPI listener started")
 	return uapi, err
+}
+
+// legacyUDPFieldPresent pre-scans a Super YAML file for any of the
+// UDP-only field names that mtypes.SuperConfig no longer carries. It
+// catches the common mistake of feeding a v1 UDP Super YAML into
+// `-mode super` (now HTTP-only) without waiting for mtypes.ReadYaml's
+// silent drop to mis-route the operator. Returns (true, fieldName) on
+// the first hit; (false, "") if the file is clean.
+func legacyUDPFieldPresent(configPath string) (bool, string) {
+	raw, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		return false, ""
+	}
+	for _, name := range []string{"PrivKeyV4", "PrivKeyV6", "ListenPort", "FwMark", "API_Prefix"} {
+		// Match top-level key (`^name:`) only — same-shape keys nested
+		// under a v2 SuperNodeV2 etc. are legitimate.
+		if bytes.HasPrefix(raw, []byte(name+":")) ||
+			bytes.Contains(raw, []byte("\n"+name+":")) {
+			return true, name
+		}
+	}
+	_ = strings.HasPrefix // keep "strings" import in case future checks need it
+	return false, ""
 }
