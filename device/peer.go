@@ -591,32 +591,50 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 }
 
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
-	if peer.disableRoaming {
+	endpointUpdated, localAddressChanged := func() (bool, bool) {
+		peer.Lock()
+		defer peer.Unlock()
+		if peer.disableRoaming {
+			return false, false
+		}
+		localAddressChanged := peer.ID == mtypes.NodeID_SuperNode &&
+			(peer.endpoint == nil || !peer.endpoint.DstIP().Equal(endpoint.DstIP()))
+		peer.device.SaveToConfig(peer, endpoint)
+		peer.endpoint = endpoint
+		return true, localAddressChanged
+	}()
+	if !endpointUpdated || !localAddressChanged {
 		return
 	}
-	peer.Lock()
-	defer peer.Unlock()
-	if peer.ID == mtypes.NodeID_SuperNode {
-		conn, err := net.Dial("udp", endpoint.DstToString())
+
+	localIP := append(net.IP(nil), endpoint.SrcIP()...)
+	if len(localIP) == 0 {
+		destination := endpoint.DstToString()
+		probe, err := net.DialTimeout("udp", destination, 2*time.Second)
 		if err != nil {
-			if peer.device.LogLevel.LogControl {
-				fmt.Printf("Control: Set endpoint to peer %v failed: %v", peer.ID, err)
-			}
+			peer.device.log.Errorf("local address probe for peer %v endpoint %v failed: %v", peer.ID, destination, err)
 			return
 		}
-		defer conn.Close()
-		if err == nil {
-			IP := conn.LocalAddr().(*net.UDPAddr).IP
-			if ip4 := IP.To4(); ip4 != nil {
-				peer.device.peers.LocalV4 = ip4
-			} else {
-				peer.device.peers.LocalV6 = IP
-			}
+		probeLocalAddr := probe.LocalAddr()
+		localAddr, ok := probeLocalAddr.(*net.UDPAddr)
+		closeErr := probe.Close()
+		if closeErr != nil {
+			peer.device.log.Errorf("local address probe for peer %v endpoint %v close failed: %v", peer.ID, destination, closeErr)
 		}
+		if !ok {
+			peer.device.log.Errorf("local address probe for peer %v endpoint %v returned address type %T", peer.ID, destination, probeLocalAddr)
+			return
+		}
+		localIP = append(localIP, localAddr.IP...)
 	}
-	peer.device.SaveToConfig(peer, endpoint)
-	peer.endpoint = endpoint
 
+	peer.device.peers.Lock()
+	if ip4 := localIP.To4(); ip4 != nil {
+		peer.device.peers.LocalV4 = ip4
+	} else {
+		peer.device.peers.LocalV6 = localIP
+	}
+	peer.device.peers.Unlock()
 }
 
 func (peer *Peer) GetEndpointSrcStr() string {
