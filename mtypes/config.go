@@ -19,6 +19,12 @@ const (
 	NodeID_Special   Vertex = NodeID_Invalid
 )
 
+// IsSpecial reports whether v is a reserved NodeID that cannot be assigned
+// to a real Edge. Used by every v2 validator.
+func (v Vertex) IsSpecial() bool {
+	return v == NodeID_Broadcast || v == NodeID_Spread || v == NodeID_SuperNode || v == NodeID_Invalid
+}
+
 type EdgeConfig struct {
 	Interface             InterfaceConf    `yaml:"Interface"`
 	NodeID                Vertex           `yaml:"NodeID"`
@@ -38,17 +44,19 @@ type EdgeConfig struct {
 	Peers                 []PeerInfo       `yaml:"Peers"`
 }
 
+// SuperConfig is retained for backward parsing compatibility during the
+// migration window. It only carries the HTTP/control-plane settings; the
+// UDP-only fields (PrivKeyV4/V6, ListenPort, FwMark, Endpoint, API_Prefix)
+// have been removed because the v2 control plane no longer needs them.
+// Each Edge's PSKey (kept as ControlPSKey for clarity in v2) is the HMAC
+// secret used by Control API v2 request signing. It MUST NEVER appear in
+// any JSON-serialized API model.
 type SuperConfig struct {
 	NodeName                string                  `yaml:"NodeName"`
 	PostScript              string                  `yaml:"PostScript"`
-	PrivKeyV4               string                  `yaml:"PrivKeyV4"`
-	PrivKeyV6               string                  `yaml:"PrivKeyV6"`
-	ListenPort              int                     `yaml:"ListenPort"`
 	ListenPort_EdgeAPI      string                  `yaml:"ListenPort_EdgeAPI"`
 	ListenPort_ManageAPI    string                  `yaml:"ListenPort_ManageAPI"`
-	FwMark                  uint32                  `yaml:"FwMark"`
 	DisableAf               conn.EnabledAf          `yaml:"DisabledAf"`
-	API_Prefix              string                  `yaml:"API_Prefix"`
 	RePushConfigInterval    float64                 `yaml:"RePushConfigInterval"`
 	HttpPostInterval        float64                 `yaml:"HttpPostInterval"`
 	PeerAliveTimeout        float64                 `yaml:"PeerAliveTimeout"`
@@ -96,6 +104,10 @@ type PeerInfo struct {
 	Static              bool   `yaml:"Static"`
 }
 
+// SuperPeerInfo is the Super-side view of an Edge. The legacy EndPoint /
+// ExternalIP fields were WireGuard UDP endpoints; in v2 they describe the
+// discovered/announced candidates of the Edge and are populated by the
+// control state service, not from the static config.
 type SuperPeerInfo struct {
 	NodeID         Vertex  `yaml:"NodeID"`
 	Name           string  `yaml:"Name"`
@@ -154,6 +166,9 @@ type NTPInfo struct {
 	Servers          []string `yaml:"Servers"`
 }
 
+// SuperInfo is the legacy Edge-side view of the Super. In v2 it is replaced
+// by SuperNodeV2 (see http_control.go). The fields are kept temporarily
+// for transition; new code should consume SuperNodeV2 instead.
 type SuperInfo struct {
 	UseSuperNode         bool     `yaml:"UseSuperNode"`
 	PSKey                string   `yaml:"PSKey"`
