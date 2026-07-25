@@ -274,6 +274,22 @@ func (s *ControlState) emit(kind mtypes.ControlV2EventType, id mtypes.Vertex, na
 		s.publish(mtypes.ControlV2Event{Type: kind, Revision: revision, Data: mtypes.ControlV2PeerChangePayload{NodeID: id, NodeName: name}})
 	}
 }
+
+// SetPublishForTest swaps the publish hook after construction. Production
+// code wires the hook exactly once at startup; tests need a runtime seam so
+// they can chain a countingPublish to a real hub without rebuilding the
+// state from scratch. The method is named "ForTest" so accidental
+// production use is obvious at the call site. Caller MUST serialise with
+// concurrent Register / Report / SweepTimeouts calls (the test harness
+// calls it before any traffic flows).
+func (s *ControlState) SetPublishForTest(fn func(mtypes.ControlV2Event)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.publish = fn
+	s.mu.Unlock()
+}
 func cloneLatency(in map[mtypes.Vertex]float64) map[mtypes.Vertex]float64 {
 	out := make(map[mtypes.Vertex]float64, len(in))
 	for k, v := range in {
