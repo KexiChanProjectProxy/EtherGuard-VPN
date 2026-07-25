@@ -125,8 +125,8 @@ func (et *endpoint_trylist) Delete(url string) {
 }
 
 func (et *endpoint_trylist) GetNextTry() (bool, string) {
-	et.RLock()
-	defer et.RUnlock()
+	et.Lock()
+	defer et.Unlock()
 	var smallest *endpoint_tryitem
 	FastTry := true
 	for _, v := range et.trymap_super {
@@ -389,7 +389,10 @@ func (device *Device) NewPeer(pk NoisePublicKey, id mtypes.Vertex, isSuper bool,
 
 func (peer *Peer) IsPeerAlive() bool {
 	PeerAliveTimeout := mtypes.S2TD(peer.device.EdgeConfig.DynamicRoute.PeerAliveTimeout)
-	if peer.endpoint == nil {
+	peer.RLock()
+	hasEndpoint := peer.endpoint != nil
+	peer.RUnlock()
+	if !hasEndpoint {
 		return false
 	}
 	if peer.LastPacketReceivedAdd1Sec.Load().(*time.Time).Add(PeerAliveTimeout).Before(time.Now()) {
@@ -568,6 +571,11 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	if err != nil {
 		return err
 	}
+	peer.Lock()
+	peer.StaticConn = static
+	peer.ConnURL = connurl
+	peer.ConnAF = af
+	peer.Unlock()
 	if peer.GetEndpointDstStr() == connIP {
 		//if peer.device.LogLevel.LogInternal {
 		//	fmt.Printf("Internal: Same as original endpoint:%v, skip for NodeID:%v\n", connurl, peer.ID.ToString())
@@ -578,9 +586,6 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	if err != nil {
 		return err
 	}
-	peer.StaticConn = static
-	peer.ConnURL = connurl
-	peer.ConnAF = af
 	peer.SetEndpointFromPacket(endpoint)
 	return nil
 }

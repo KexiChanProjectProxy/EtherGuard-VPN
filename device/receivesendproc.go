@@ -518,7 +518,7 @@ func (device *Device) process_UpdatePeerMsg(peer *Peer, State_hash string) error
 		}
 		device.state_hashes.Peer.Store(State_hash)
 		if send_signal {
-			device.event_tryendpoint <- struct{}{}
+			device.signalEndpointRetry()
 		}
 	}
 	return nil
@@ -754,10 +754,10 @@ func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.Boardc
 				return err
 			}
 		}
-		if !thepeer.IsPeerAlive() {
+		if !thepeer.IsPeerAlive() && thepeer.acceptsDiscoveredEndpoints() {
 			//Peer died, try to switch to this new endpoint
 			thepeer.endpoint_trylist.UpdateP2P(content.ConnURL) //another gorouting will process it
-			device.event_tryendpoint <- struct{}{}
+			device.signalEndpointRetry()
 		}
 
 	}
@@ -772,22 +772,19 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 	for {
 		NextRun := false
 		<-device.event_tryendpoint
-		for _, thepeer := range device.peers.IDMap {
+		for _, thepeer := range device.retryPeersSnapshot() {
 			if thepeer.LastPacketReceivedAdd1Sec.Load().(*time.Time).Add(mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)).After(time.Now()) {
 				//Peer alives
 				continue
 			} else {
+				static, _, _ := thepeer.endpointRetryConfig()
 				FastTry, connurl := thepeer.endpoint_trylist.GetNextTry()
 				if connurl == "" {
 					continue
 				}
-				if thepeer.StaticConn {
-					continue
-				}
-				err := thepeer.SetEndpointFromConnURL(connurl, device.enabledAf, device.EdgeConfig.AfPrefer, thepeer.StaticConn) //trying to bind first url in the list and wait ConnNextTry seconds
+				err := thepeer.SetEndpointFromConnURL(connurl, device.enabledAf, device.EdgeConfig.AfPrefer, static) //trying to bind first url in the list and wait ConnNextTry seconds
 				if err != nil {
-					device.log.Errorf("Bind " + connurl + " failed!")
-					thepeer.endpoint_trylist.Delete(connurl)
+					device.log.Errorf("Endpoint retry failed: endpoint=%s error=%v", connurl, err)
 					continue
 				}
 				if FastTry {
@@ -813,7 +810,7 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 			fmt.Printf("Internal: RoutineSetEndpoint: NextRun:%v\n", NextRun)
 		}
 		if NextRun {
-			device.event_tryendpoint <- struct{}{}
+			device.signalEndpointRetry()
 		}
 	}
 }
