@@ -50,6 +50,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		econfig.DefaultTTL = econfigV2.DefaultTTL
 		econfig.LogLevel = econfigV2.LogLevel
 		econfig.Peers = econfigV2.Peers
+		econfig.DynamicRoute.SuperNode.UseSuperNode = true
 	} else {
 		err = mtypes.ReadYaml(configPath, &econfig)
 	}

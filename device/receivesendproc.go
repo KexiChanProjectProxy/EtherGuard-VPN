@@ -27,9 +27,7 @@ type packet_send_params struct {
 }
 
 func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet []byte, offset int) {
-	if peer == nil {
-		return
-	} else if peer.endpoint == nil {
+	if peer == nil || peer.GetEndpointDstStr() == "" {
 		return
 	}
 	if usage == path.NormalPacket && len(packet)-path.EgHeaderLen <= 12 {
