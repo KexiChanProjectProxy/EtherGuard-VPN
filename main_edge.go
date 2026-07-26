@@ -32,6 +32,19 @@ func printExampleEdgeConf() {
 	fmt.Print(string(toprint))
 }
 
+func hydrateV2DirectConnectivity(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfigV2) {
+	resolved := econfigV2.ResolveDirectConnectivity()
+	// Retain the resolved V2 values for the Super runtime, which creates only
+	// dynamic snapshot peers; this does not alter static YAML peer policy.
+	econfigV2.DirectConnectivity = resolved
+	econfig.DynamicRoute.SendPingInterval = resolved.PingIntervalSeconds
+	// This is the Edge-local dynamic-peer liveness timeout, distinct from the
+	// Super-side PeerAliveTimeoutSeconds that expires controller state.
+	econfig.DynamicRoute.PeerAliveTimeout = resolved.PeerAliveTimeoutSeconds
+	econfig.DynamicRoute.TimeoutCheckInterval = resolved.OfflineCheckSeconds
+	econfig.DynamicRoute.ConnNextTry = resolved.NextEndpointTrySeconds
+}
+
 func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (err error) {
 	if printExample {
 		printExampleEdgeConf()
@@ -58,6 +71,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		econfig.LogLevel = econfigV2.LogLevel
 		econfig.Peers = econfigV2.Peers
 		econfig.SuperNodeV2Enabled = true
+		hydrateV2DirectConnectivity(&econfig, &econfigV2)
 	} else {
 		err = mtypes.ReadYaml(configPath, &econfig)
 	}

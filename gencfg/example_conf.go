@@ -181,6 +181,13 @@ func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {
 			NodeID:       1,
 			ControlPSKey: device.RandomPSK().ToString(),
 		},
+		DirectConnectivity: mtypes.ControlV2DirectConnectivity{
+			PersistentKeepaliveSeconds: 25,
+			PingIntervalSeconds:        16,
+			PeerAliveTimeoutSeconds:    70,
+			OfflineCheckSeconds:        10,
+			NextEndpointTrySeconds:     5,
+		},
 		Peers: []mtypes.PeerInfo{},
 	}, nil
 }
