@@ -29,12 +29,13 @@ type SuperHTTPRuntime struct {
 	once  sync.Once
 	apply sync.Mutex
 
-	mu               sync.RWMutex
-	candidates       []mtypes.ControlV2Candidate
-	parameters       mtypes.ControlV2Parameters
-	generation       uint64
-	recoveryRequests map[mtypes.Vertex]time.Time
-	parameterUpdates chan struct{}
+	mu                  sync.RWMutex
+	candidates          []mtypes.ControlV2Candidate
+	parameters          mtypes.ControlV2Parameters
+	generation          uint64
+	recoveryRequests    map[mtypes.Vertex]time.Time
+	lastRecoveryRequest time.Time
+	parameterUpdates    chan struct{}
 }
 
 func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
@@ -146,11 +147,15 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	defer runtime.apply.Unlock()
 	runtime.mu.Lock()
 	runtime.parameters = snapshot.Parameters
-	if runtime.generation != snapshot.Revision {
-		runtime.generation = snapshot.Revision
-		runtime.recoveryRequests = make(map[mtypes.Vertex]time.Time)
-	}
+	runtime.generation = snapshot.Revision
 	runtime.mu.Unlock()
+	wanted := make(map[mtypes.Vertex]struct{}, len(snapshot.Peers))
+	for _, peer := range snapshot.Peers {
+		if peer.NodeID != runtime.config.NodeID {
+			wanted[peer.NodeID] = struct{}{}
+		}
+	}
+	runtime.pruneRecoveryRequests(wanted)
 	select {
 	case runtime.parameterUpdates <- struct{}{}:
 	default:
@@ -288,9 +293,6 @@ func (runtime *SuperHTTPRuntime) recoverExhaustedPeers() {
 			continue
 		}
 		if peer.IsPeerAlive() {
-			runtime.mu.Lock()
-			delete(runtime.recoveryRequests, peer.ID)
-			runtime.mu.Unlock()
 			continue
 		}
 		if peer.endpoint_trylist.ConsumeSuperCycleComplete() && runtime.shouldRequestSnapshotRefresh(peer.ID, time.Now()) {
@@ -299,13 +301,27 @@ func (runtime *SuperHTTPRuntime) recoverExhaustedPeers() {
 	}
 }
 
+func (runtime *SuperHTTPRuntime) pruneRecoveryRequests(existing map[mtypes.Vertex]struct{}) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	for id := range runtime.recoveryRequests {
+		if _, ok := existing[id]; !ok {
+			delete(runtime.recoveryRequests, id)
+		}
+	}
+}
+
 func (runtime *SuperHTTPRuntime) shouldRequestSnapshotRefresh(id mtypes.Vertex, now time.Time) bool {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
+	if now.Sub(runtime.lastRecoveryRequest) < 30*time.Second {
+		return false
+	}
 	if previous, exists := runtime.recoveryRequests[id]; exists && now.Sub(previous) < 30*time.Second {
 		return false
 	}
 	runtime.recoveryRequests[id] = now
+	runtime.lastRecoveryRequest = now
 	return true
 }
 

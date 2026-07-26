@@ -175,6 +175,44 @@ func TestSuperHTTPRuntimeRecoveryCoalescesPeerRefreshes(t *testing.T) {
 	}
 }
 
+func TestSuperHTTPRuntimeRecoveryCapSurvivesNewSnapshotGeneration(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	now := time.Date(2026, time.July, 26, 0, 0, 0, 0, time.UTC)
+	if !runtime.shouldRequestSnapshotRefresh(7, now) {
+		t.Fatal("first refresh was not requested")
+	}
+
+	// When
+	snapshot := runtimeTestSnapshot(t, 2)
+	snapshot.Peers = []mtypes.ControlV2Peer{{NodeID: 7}}
+	runtime.applySnapshot(snapshot)
+	requested := runtime.shouldRequestSnapshotRefresh(7, now.Add(time.Second))
+
+	// Then
+	if requested {
+		t.Fatal("new snapshot generation reset the peer refresh cap")
+	}
+}
+
+func TestSuperHTTPRuntimeRecoveryStateDropsRemovedPeers(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	now := time.Date(2026, time.July, 26, 0, 0, 0, 0, time.UTC)
+	runtime.shouldRequestSnapshotRefresh(7, now)
+
+	// When
+	runtime.pruneRecoveryRequests(map[mtypes.Vertex]struct{}{})
+
+	// Then
+	runtime.mu.RLock()
+	_, exists := runtime.recoveryRequests[7]
+	runtime.mu.RUnlock()
+	if exists {
+		t.Fatal("removed peer retained recovery state")
+	}
+}
+
 func runtimeTestSnapshot(t *testing.T, revision uint64) *mtypes.ControlV2Snapshot {
 	t.Helper()
 	return &mtypes.ControlV2Snapshot{
