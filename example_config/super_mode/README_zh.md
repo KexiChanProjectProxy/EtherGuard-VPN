@@ -131,7 +131,25 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 **同socket限制：** STUN候選位址是從WireGuard bind socket量測的。如果STUN伺服器看到的source port與WireGuard socket不同，該候選位址無效，因為NAT mapping是基於port的。Edge不會為STUN建立第二個UDP socket。
 
-接受`stun:host:port`和`stun://host:port`兩種URI格式。主機可以是IP literal（例如`stun://192.168.1.10:3478`）或語法上合法的DNS主機名（例如`stun://local-stun.example:3478`）。驗證不執行DNS I/O，僅檢查URI格式。DNS解析在`SuperSTUNManager`內部於運行時進行，受設定的per-server超時限制，在IP-only bind parser之前完成。通用endpoint解析（`conn/conn.go`）僅接受IP literal；DNS主機名僅用於STUN，不適用於peer endpoint。STUN刷新在註冊時一次性執行（無週期性刷新）。
+接受`stun:host:port`和`stun://host:port`兩種URI格式。主機可以是IP literal（例如`stun://192.168.1.10:3478`）或語法上合法的DNS主機名（例如`stun://local-stun.example:3478`）。驗證不執行DNS I/O，僅檢查URI格式。DNS解析在`SuperSTUNManager`內部於運行時進行，受設定的per-server超時限制，在IP-only bind parser之前完成。通用endpoint解析（`conn/conn.go`）僅接受IP literal；DNS主機名僅用於STUN，不適用於peer endpoint。`STUNRefreshIntervalSeconds`會主動排程週期性探索：每次刷新保留local候選位址、移除過期的STUN-only候選位址，並去除重複結果。STUN探索不是keepalive。
+
+### 直接連線與觀察到的回退位址
+
+省略Edge的`DirectConnectivity`區塊時，Super peer的動態預設值如下：
+
+| Key | 預設秒數 | 用途 |
+|-----|---------:|------|
+| PersistentKeepaliveSeconds | 25 | 為Super下載的peer維持NAT mapping |
+| SendPingIntervalSeconds | 16 | 直接peer ping頻率 |
+| PeerAliveTimeoutSeconds | 70 | Edge本地動態peer存活超時 |
+| TimeoutCheckIntervalSeconds | 10 | 離線檢查頻率 |
+| ConnNextTrySeconds | 5 | 下一個候選位址嘗試前的延遲 |
+
+這些設定只套用到Super下載的peer；static peer策略不變，也不會讓STUN成為keepalive。
+
+每個Edge在每次report最多可回報256個觀察目標endpoint。Super只發布匿名聚合的回退位址：每個目標最多16個hint，其中IPv4與IPv6各最多14個。snapshot絕不包含reporter身分或時間戳記。投票依Super端的`PeerAliveTimeoutSeconds`到期。
+
+候選位址類別的順序固定為local < STUN < observed。reporter count只在observed候選位址內排序；它不會使observed候選位址超過local或STUN。
 
 ### 無relay/TURN
 
@@ -149,7 +167,7 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 | ManagementAuth | `{User, PasswordHash}`，用於`/manage/*`端點 |
 | STUNServers | STUN伺服器URI列表（`stun:host:port`或`stun://host:port`）；主機可以是IP literal或DNS主機名 |
 | STUNRequestTimeoutSeconds | 每次STUN請求的超時時間 |
-| STUNRefreshIntervalSeconds | 保留：存在於設定結構中但目前無效；STUN在註冊時一次性執行（無週期性刷新） |
+| STUNRefreshIntervalSeconds | 主動進行週期性STUN候選位址探索的間隔；這不是keepalive |
 | PollIntervalSeconds | Edge輪詢snapshot的間隔 |
 | ReportIntervalSeconds | Edge回報（pong/候選位址）的間隔 |
 | HeartbeatIntervalSeconds | Edge心跳間隔 |

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +35,7 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 	wrongIdentity := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 102, topology.keyA)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	t.Logf("cap counter after topology start: 304=%d snapshots=%d", topology.forcedCNotModified.Load(), topology.forcedCSnapshots.Load())
 	if _, _, err := wrongIdentity.Snapshot(ctx); err == nil {
 		t.Fatal("Edge A control key authenticated as Edge B")
 	}
@@ -141,6 +145,7 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 	}{
 		{name: "A", done: topology.edgeA.Wait()},
 		{name: "B", done: topology.edgeB.Wait()},
+		{name: "C", done: topology.edgeC.Wait()},
 	} {
 		edgeCloseCtx, stopEdgeClose := context.WithTimeout(context.Background(), 3*time.Second)
 		select {
@@ -152,8 +157,225 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 	}
 }
 
+func TestHTTPOnlySuperEndToEndObservedFallback(t *testing.T) {
+	// Given three registered Edges connected only through the in-process fabric.
+	topology := newE2ETopology(t)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := topology.shutdown(ctx); err != nil {
+			t.Errorf("topology shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	awaitE2E(t, 3*time.Second, func() bool {
+		return topology.edgeA.LookupPeer(topology.pubB) != nil &&
+			topology.edgeB.LookupPeer(topology.pubA) != nil &&
+			topology.edgeC.LookupPeer(topology.pubB) != nil
+	})
+
+	// When A receives authenticated traffic from B's alternate public source.
+	topology.bindB.dropInitiation.Store(false)
+	if err := topology.edgeB.LookupPeer(topology.pubA).SendHandshakeInitiation(false); err != nil {
+		t.Fatalf("start B-to-A handshake: %v", err)
+	}
+	select {
+	case <-topology.bindB.responses:
+	case <-ctx.Done():
+		t.Fatal("B-to-A handshake response did not arrive before deadline")
+	}
+	topology.edgeB.SendPacket(topology.edgeB.LookupPeer(topology.pubA), path.NormalPacket, 64, e2eNormalPacket(t, 102, 101), device.MessageTransportOffsetContent)
+	select {
+	case <-topology.bindA.transports:
+	case <-ctx.Done():
+		t.Fatal("B-to-A authenticated transport did not arrive before deadline")
+	}
+
+	// Then C receives B's anonymous, count-ranked observed fallback hint.
+	awaitE2E(t, 3*time.Second, func() bool {
+		snapshot, err := topology.snapshot(ctx, 103, topology.keyC)
+		if err != nil {
+			return false
+		}
+		peerB, found := e2ePeer(snapshot, 102)
+		return found && len(peerB.ObservedV4) == 1 && peerB.ObservedV4[0].Address == "203.0.113.102:102" && peerB.ObservedV4[0].ReporterCount == 1
+	})
+	snapshotC, err := topology.snapshot(ctx, 103, topology.keyC)
+	if err != nil {
+		t.Fatalf("C snapshot with observed hint: %v", err)
+	}
+	encoded, err := json.Marshal(snapshotC)
+	if err != nil {
+		t.Fatalf("marshal C snapshot: %v", err)
+	}
+	for _, forbidden := range []string{"observer", "received_at", topology.keyA} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("snapshot JSON leaked %q: %s", forbidden, encoded)
+		}
+	}
+
+	// When B withdraws its self candidates, C applies only the observed fallback.
+	topology.cancelB()
+	select {
+	case <-topology.runtimeB.Done():
+	case <-ctx.Done():
+		t.Fatal("B runtime did not stop before withdrawal")
+	}
+	reporterB := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 102, topology.keyB)
+	reporterB.Now = topology.clock.Now
+	if err := reporterB.Report(ctx, &mtypes.ControlV2ReportRequest{NodeID: 102, ReportedAt: topology.clock.Now()}); err != nil {
+		t.Fatalf("withdraw B self candidates: %v", err)
+	}
+	awaitE2E(t, 3*time.Second, func() bool {
+		snapshot, snapshotErr := topology.snapshot(ctx, 103, topology.keyC)
+		peerB, found := e2ePeer(snapshot, 102)
+		return snapshotErr == nil && found && len(peerB.LocalV4) == 0 && len(peerB.PublicV4) == 0 && len(peerB.ObservedV4) == 1
+	})
+
+	topology.cancelC()
+	select {
+	case <-topology.runtimeC.Done():
+	case <-ctx.Done():
+		t.Fatal("C runtime did not apply fallback before shutdown")
+	}
+	peerToB := topology.edgeC.LookupPeer(topology.pubB)
+	if err := peerToB.SendHandshakeInitiation(false); err != nil {
+		t.Fatalf("start C-to-B recovery handshake: %v", err)
+	}
+	select {
+	case <-topology.bindC.responses:
+	case <-ctx.Done():
+		t.Fatal("C did not rotate to B's observed fallback")
+	}
+
+	// When the only observer expires, the revision exposes stale-hint removal.
+	beforeExpiry, err := topology.snapshot(ctx, 103, topology.keyC)
+	if err != nil {
+		t.Fatalf("snapshot before observer expiry: %v", err)
+	}
+	topology.cancelA()
+	select {
+	case <-topology.runtimeA.Done():
+	case <-ctx.Done():
+		t.Fatal("A runtime did not stop before expiry")
+	}
+	topology.clock.Advance(30 * time.Minute)
+	if err := reporterB.Report(ctx, &mtypes.ControlV2ReportRequest{NodeID: 102, ReportedAt: topology.clock.Now()}); err != nil {
+		t.Fatalf("keep B live while expiring observer: %v", err)
+	}
+	reporterC := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 103, topology.keyC)
+	reporterC.Now = topology.clock.Now
+	if err := reporterC.Report(ctx, &mtypes.ControlV2ReportRequest{NodeID: 103, ReportedAt: topology.clock.Now()}); err != nil {
+		t.Fatalf("keep C live while expiring observer: %v", err)
+	}
+	topology.clock.Advance(31 * time.Minute)
+	awaitE2E(t, 3*time.Second, func() bool {
+		snapshot, snapshotErr := topology.snapshot(ctx, 103, topology.keyC)
+		peerB, found := e2ePeer(snapshot, 102)
+		return snapshotErr == nil && found && snapshot.Revision > beforeExpiry.Revision && len(peerB.ObservedV4) == 0
+	})
+}
+
+func TestHTTPOnlySuperEndToEndForcedRefreshCap(t *testing.T) {
+	// Given C receives normal SSE snapshots and retries dynamic peers rapidly.
+	topology := newE2ETopologyWithOptions(t, e2eTopologyOptions{
+		pollIntervalSeconds: 30,
+		reportInterval:      3 * time.Second,
+		edgeCRetry: e2eRetryConfig{
+			peerAliveTimeout:     0,
+			connNextTry:          0.01,
+			timeoutCheckInterval: 0.01,
+		},
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := topology.shutdown(ctx); err != nil {
+			t.Errorf("topology shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	reporterC := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 103, topology.keyC)
+	reporterC.Now = topology.clock.Now
+	if err := reporterC.Report(ctx, &mtypes.ControlV2ReportRequest{
+		NodeID: 103,
+		Candidates: []mtypes.ControlV2Candidate{
+			{Address: "127.0.0.1:103", Source: mtypes.ControlV2CandidateLocal},
+			{Address: "198.51.100.103:103", Source: mtypes.ControlV2CandidateSTUN},
+		},
+		ReportedAt: topology.clock.Now(),
+	}); err != nil {
+		t.Fatalf("publish C candidates before cap observation: %v", err)
+	}
+	awaitStableSnapshotCount(t, topology.forcedCSnapshots, time.Second, 500*time.Millisecond)
+	awaitE2E(t, 3*time.Second, func() bool {
+		return topology.edgeC.LookupPeer(topology.pubA) != nil && topology.edgeC.LookupPeer(topology.pubB) != nil
+	})
+
+	// Remove A to leave C with exactly B. Setup retries may already have
+	// exhausted B, but B's removal below prunes that stale coalesce entry.
+	if err := topology.runtime.Manage().DeletePeer(ctx, ManageDeletePeerRequest{NodeID: 101}); err != nil {
+		t.Fatalf("delete Edge A before cap observation: %v", err)
+	}
+	awaitE2E(t, 3*time.Second, func() bool {
+		return topology.edgeC.LookupPeer(topology.pubA) == nil
+	})
+
+	// Rebirth B: removal prunes C's setup-era recovery state, and Register
+	// creates a new, dead Super peer with a fresh trylist generation.
+	topology.bindB.dropOutbound.Store(true)
+	if err := topology.runtime.Manage().DeletePeer(ctx, ManageDeletePeerRequest{NodeID: 102}); err != nil {
+		t.Fatalf("delete Edge B for rebirth: %v", err)
+	}
+	awaitE2E(t, 3*time.Second, func() bool {
+		return topology.edgeC.LookupPeer(topology.pubB) == nil
+	})
+	addedB, err := topology.runtime.Manage().AddPeer(ctx, ManageAddPeerRequest{NodeID: 102, NodeName: "edge-b"})
+	if err != nil {
+		t.Fatalf("add B authorization for rebirth: %v", err)
+	}
+	rebornB := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 102, addedB.SuperPeer.ControlPSKey)
+	rebornB.Now = topology.clock.Now
+	if _, err := rebornB.Register(ctx, &mtypes.ControlV2RegisterRequest{
+		NodeID:         102,
+		NodeName:       "edge-b",
+		PubKey:         topology.pubB.ToString(),
+		Version:        mtypes.ControlV2ProtocolVersion,
+		ListenPort:     102,
+		PublicV4:       []string{"203.0.113.202:102"},
+		DesiredTTL:     64,
+		RequestedAt:    topology.clock.Now(),
+		Implementation: "etherguard",
+	}); err != nil {
+		t.Fatalf("re-register B with fresh candidates: %v", err)
+	}
+	awaitE2E(t, 3*time.Second, func() bool {
+		return topology.edgeC.LookupPeer(topology.pubB) != nil && topology.edgeC.GetConnurl(102) == "203.0.113.202:102"
+	})
+
+	// The SSE-driven delete/re-add fetches must settle before measuring the
+	// exhaustion-triggered Sync refresh.
+	topology.runtime.Hub().Close()
+	before := awaitStableSnapshotCount(t, topology.forcedCSnapshots, 3*time.Second, 100*time.Millisecond)
+
+	// When C exhausts its fresh, dead B generation, the ETag-aware recovery
+	// requests exactly one snapshot. B cannot reply to C's probes.
+	awaitE2E(t, 5*time.Second, func() bool {
+		return topology.forcedCSnapshots.Load() == before+1
+	})
+	awaitStableSnapshotCount(t, topology.forcedCSnapshots, time.Second, 400*time.Millisecond)
+	// Then the single peer causes one ETag-aware fetch, never a retry storm within 30 seconds.
+	if got := topology.forcedCSnapshots.Load() - before; got != 1 {
+		t.Fatalf("forced snapshot requests for C->B = %d, want 1 within 30 seconds", got)
+	}
+}
+
 func (topology *e2eTopology) snapshot(ctx context.Context, nodeID mtypes.Vertex, key string) (*mtypes.ControlV2Snapshot, error) {
 	client := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, nodeID, key)
+	client.Now = topology.clock.Now
 	snapshot, _, err := client.Snapshot(ctx)
 	return snapshot, err
 }
@@ -172,6 +394,30 @@ func awaitE2E(t *testing.T, timeout time.Duration, condition func() bool) {
 		case <-ticker.C:
 		case <-timeoutTimer.C:
 			t.Fatal("end-to-end condition did not converge")
+		}
+	}
+}
+
+func awaitStableSnapshotCount(t *testing.T, counter *atomic.Int64, timeout, quiet time.Duration) int64 {
+	t.Helper()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	last := counter.Load()
+	quietUntil := time.Now().Add(quiet)
+	for {
+		select {
+		case <-ticker.C:
+			if current := counter.Load(); current != last {
+				last = current
+				quietUntil = time.Now().Add(quiet)
+			}
+			if !time.Now().Before(quietUntil) {
+				return last
+			}
+		case <-deadline.C:
+			t.Fatal("C snapshot traffic did not settle before cap observation")
 		}
 	}
 }

@@ -131,7 +131,25 @@ The Super distributes STUN servers to all Edges via the `STUNServers` field in t
 
 **Same-socket limitation:** STUN candidates are measured from the WireGuard bind. If a STUN server sees a different source port than the WireGuard socket, the candidate is invalid because the NAT mapping is port-specific. Edges do not create a second UDP socket for STUN.
 
-Both `stun:host:port` and `stun://host:port` URI forms are accepted. Hosts may be IP literals (e.g. `stun:192.168.1.10:3478`) or syntactically valid DNS hostnames (e.g. `stun://local-stun.example:3478`). Validation performs no DNS I/O; it only checks the URI shape. DNS resolution happens at runtime inside `SuperSTUNManager`, under the configured per-server timeout, before the IP-only bind parser. Generic endpoint parsing (`conn/conn.go`) remains IP-literal-only; DNS hostnames are only resolved for STUN, not for peer endpoints. STUN refresh is one-shot at register time (no periodic refresh).
+Both `stun:host:port` and `stun://host:port` URI forms are accepted. Hosts may be IP literals (e.g. `stun:192.168.1.10:3478`) or syntactically valid DNS hostnames (e.g. `stun://local-stun.example:3478`). Validation performs no DNS I/O; it only checks the URI shape. DNS resolution happens at runtime inside `SuperSTUNManager`, under the configured per-server timeout, before the IP-only bind parser. Generic endpoint parsing (`conn/conn.go`) remains IP-literal-only; DNS hostnames are only resolved for STUN, not for peer endpoints. `STUNRefreshIntervalSeconds` actively schedules periodic discovery: each refresh preserves local candidates, replaces stale STUN-only candidates, and deduplicates the result. STUN discovery is not a keepalive.
+
+### Direct connectivity and observed fallbacks
+
+An omitted Edge `DirectConnectivity` block uses these dynamic Super-peer defaults:
+
+| Key | Default seconds | Purpose |
+|-----|----------------:|---------|
+| PersistentKeepaliveSeconds | 25 | Keep NAT mappings for Super-discovered peers |
+| SendPingIntervalSeconds | 16 | Direct-peer ping cadence |
+| PeerAliveTimeoutSeconds | 70 | Edge-local dynamic-peer liveness timeout |
+| TimeoutCheckIntervalSeconds | 10 | Offline check cadence |
+| ConnNextTrySeconds | 5 | Delay before the next candidate try |
+
+These settings apply only to Super-discovered peers; static peer policy is unchanged. They do not make STUN a keepalive.
+
+An Edge may report at most 256 observed target endpoints per report. The Super publishes anonymous aggregate fallbacks only: at most 16 hints per target, including at most 14 IPv4 and 14 IPv6 hints. Reporter identities and timestamps are never included. Votes expire using the Super-side `PeerAliveTimeoutSeconds`.
+
+Candidate classes always remain ordered local < STUN < observed. Reporter counts rank observed candidates only; they never let an observed candidate outrank local or STUN candidates.
 
 ### No relay / TURN
 
@@ -149,7 +167,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 | ManagementAuth | `{User, PasswordHash}` for `/manage/*` endpoints |
 | STUNServers | List of STUN server URIs (`stun:host:port` or `stun://host:port`); hosts may be IP literals or DNS hostnames |
 | STUNRequestTimeoutSeconds | Timeout per STUN request |
-| STUNRefreshIntervalSeconds | Reserved: present in config schema but currently inert; STUN is one-shot at register time (no periodic refresh) |
+| STUNRefreshIntervalSeconds | Active interval for periodic STUN candidate discovery; this is not a keepalive |
 | PollIntervalSeconds | Edge polling interval for snapshot |
 | ReportIntervalSeconds | Edge report (pong/candidate) interval |
 | HeartbeatIntervalSeconds | Edge heartbeat interval |

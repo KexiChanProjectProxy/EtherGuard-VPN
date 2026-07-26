@@ -367,11 +367,7 @@ func TestDocsEdgeLegacyRejection(t *testing.T) {
 	}
 }
 
-// TestDocsSTUNRefreshReserved verifies that STUNRefreshIntervalSeconds is
-// documented as reserved/inert. The field exists in SuperConfigV2 and is
-// validated (> 0) but no runtime code reads it — refreshSTUN is called
-// once at register time only (device/super_http_runtime.go:75).
-func TestDocsSTUNRefreshReserved(t *testing.T) {
+func TestDocsSTUNRefresh(t *testing.T) {
 	t.Parallel()
 	for _, doc := range superDocFiles {
 		content := readFile(t, doc)
@@ -379,10 +375,37 @@ func TestDocsSTUNRefreshReserved(t *testing.T) {
 			t.Errorf("%s: STUNRefreshIntervalSeconds not mentioned in config table", doc)
 		}
 		lower := strings.ToLower(content)
-		// The description must contain a reserved/inert qualifier.
-		if !strings.Contains(lower, "reserved") && !strings.Contains(lower, "保留") &&
-			!strings.Contains(lower, "inert") && !strings.Contains(lower, "無效") {
-			t.Errorf("%s: STUNRefreshIntervalSeconds description must note it is reserved/inert", doc)
+		if !strings.Contains(lower, "periodic") && !strings.Contains(content, "週期") {
+			t.Errorf("%s: STUNRefreshIntervalSeconds must document active periodic discovery", doc)
+		}
+		if strings.Contains(lower, "stun refresh is one-shot") || strings.Contains(lower, "stunrefreshintervalseconds | reserved") || strings.Contains(content, "STUN刷新在註冊時一次性") || strings.Contains(content, "STUNRefreshIntervalSeconds | 保留") {
+			t.Errorf("%s: STUNRefreshIntervalSeconds must not be documented as inert", doc)
+		}
+		if !strings.Contains(lower, "not a keepalive") && !strings.Contains(content, "不是keepalive") {
+			t.Errorf("%s: STUN discovery must be distinguished from keepalive", doc)
+		}
+	}
+}
+
+func TestDocsDirectConnectivity(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		for _, required := range []string{
+			"DirectConnectivity",
+			"PersistentKeepaliveSeconds | 25",
+			"SendPingIntervalSeconds | 16",
+			"PeerAliveTimeoutSeconds | 70",
+			"TimeoutCheckIntervalSeconds | 10",
+			"ConnNextTrySeconds | 5",
+			"256",
+			"16",
+			"14",
+			"PeerAliveTimeoutSeconds",
+		} {
+			if !strings.Contains(content, required) {
+				t.Errorf("%s: missing DirectConnectivity contract %q", doc, required)
+			}
 		}
 	}
 }
