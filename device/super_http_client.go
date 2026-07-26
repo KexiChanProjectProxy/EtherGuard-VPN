@@ -282,6 +282,10 @@ func sseParse(ctx context.Context, r io.Reader, out chan<- mtypes.ControlV2Event
 // closed when ctx is cancelled or when the underlying reader returns an error.
 // lastEventID is replayed on every connect via the Last-Event-ID header.
 func (c *ControlHTTPClient) Events(ctx context.Context, out chan<- mtypes.ControlV2Event) error {
+	return c.events(ctx, out, nil)
+}
+
+func (c *ControlHTTPClient) events(ctx context.Context, out chan<- mtypes.ControlV2Event, connected chan<- struct{}) error {
 	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint("events"), nil)
 	if e != nil {
 		return e
@@ -297,6 +301,13 @@ func (c *ControlHTTPClient) Events(ctx context.Context, out chan<- mtypes.Contro
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("events: %s", resp.Status)
+	}
+	if connected != nil {
+		select {
+		case connected <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	tracker := &eventTracker{client: c, out: out}
 	return sseParseTracked(ctx, resp.Body, tracker)
@@ -338,103 +349,117 @@ func sseParseTracked(ctx context.Context, r io.Reader, sink eventSink) error {
 	return <-parseErr
 }
 
-// Sync drives the SSE reconnect loop and the polling fallback until ctx is
-// cancelled. It MUST be called from a single goroutine; the apply callback is
-// invoked under the same serialized ordering as Snapshot: every accepted
-// snapshot is delivered in monotonically increasing revision order, and stale
-// snapshots are rejected before apply is called. SSE payloads are hints only;
-// apply is called with the freshly-fetched snapshot after every event.
+// Sync drives a serialized SSE-first state machine until ctx is cancelled. It
+// is the sole owner of Snapshot and apply: every accepted snapshot is delivered
+// in monotonically increasing revision order, and stale snapshots are rejected
+// before apply is called. SSE payloads are hints only; apply receives the
+// freshly-fetched snapshot after every event.
 //
-// Polling runs on a dedicated goroutine at snapshot's PollInterval regardless
-// of SSE state. SSE reconnects with bounded exponential backoff (jittered,
-// default 100ms..30s). The most-recently delivered SSE event ID is sent as
-// Last-Event-ID on every reconnect.
+// Polling is a fallback only: it starts after an SSE connection or parse failure
+// and stops as soon as a replacement stream becomes healthy. SSE reconnects
+// with bounded exponential backoff (jittered, default 100ms..30s). The
+// most-recently delivered SSE event ID is sent as Last-Event-ID on every reconnect.
 func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.ControlV2Snapshot)) error {
 	if apply == nil {
 		return fmt.Errorf("apply callback is required")
 	}
-	if _, ok, err := c.Snapshot(ctx); err != nil {
+	if snapshot, ok, err := c.Snapshot(ctx); err != nil {
 		return err
 	} else if ok {
-		apply(c.Current())
+		apply(snapshot)
 	}
 	backoff := c.MinBackoff
+	var pollTicker *time.Ticker
+	var pollTick <-chan time.Time
+	var reconnectTimer *time.Timer
+	var reconnect <-chan time.Time
+	var streamCancel context.CancelFunc
+	var streamDone <-chan error
+	var streamErr <-chan error
+	var streamConnected <-chan struct{}
+	var streamEvents <-chan mtypes.ControlV2Event
 
-	// Polling goroutine: always runs at snapshot's PollInterval (default 1s).
-	poll := time.Second
-	if cur := c.Current(); cur != nil && cur.Parameters.PollInterval > 0 {
-		poll = cur.Parameters.PollInterval
-	}
-	pollCtx, pollCancel := context.WithCancel(ctx)
-	defer pollCancel()
-	go c.pollLoop(pollCtx, poll, apply)
-
-	for {
-		// Open SSE stream; cancel via per-iteration context.
-		evCtx, cancelEv := context.WithCancel(ctx)
-		events := make(chan mtypes.ControlV2Event, 8)
-		sseErr := make(chan error, 1)
-		go func() { sseErr <- c.Events(evCtx, events) }()
-
-		streamUp := true
-	stream:
-		for {
-			select {
-			case <-ctx.Done():
-				cancelEv()
-				return ctx.Err()
-			case ev, ok := <-events:
-				if !ok {
-					streamUp = false
-					break stream
-				}
-				_ = ev
-				if _, ok, err := c.Snapshot(ctx); err == nil && ok {
-					apply(c.Current())
-				}
-			case err := <-sseErr:
-				if err != nil && ctx.Err() == nil {
-					streamUp = false
-					_ = err
-					break stream
-				}
-				streamUp = false
-				break stream
-			}
-		}
-		cancelEv()
-		_ = streamUp
-
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		// Wait before reconnecting SSE; polling continues independently.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(c.Jitter(backoff)):
-		}
-		if backoff < c.MaxBackoff {
-			backoff *= 2
-			if backoff > c.MaxBackoff {
-				backoff = c.MaxBackoff
-			}
-		}
-	}
-}
-
-// pollLoop runs apply-on-tick until ctx is done. It is used by Sync to provide
-// polling fallback independent of SSE state.
-func (c *ControlHTTPClient) pollLoop(ctx context.Context, interval time.Duration, apply func(*mtypes.ControlV2Snapshot)) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
+	stopPolling := func() {
+		if pollTicker == nil {
 			return
-		case <-ticker.C:
-			if _, ok, err := c.Snapshot(ctx); err == nil && ok {
-				apply(c.Current())
+		}
+		pollTicker.Stop()
+		pollTicker = nil
+		pollTick = nil
+	}
+	startPolling := func() {
+		if pollTicker != nil {
+			return
+		}
+		interval := time.Second
+		if current := c.Current(); current != nil && current.Parameters.PollInterval > 0 {
+			interval = current.Parameters.PollInterval
+		}
+		pollTicker = time.NewTicker(interval)
+		pollTick = pollTicker.C
+	}
+	startStream := func() {
+		streamCtx, cancel := context.WithCancel(ctx)
+		streamCancel = cancel
+		events := make(chan mtypes.ControlV2Event, 8)
+		connected := make(chan struct{}, 1)
+		done := make(chan error, 1)
+		streamDone = done
+		streamErr = done
+		go func() { done <- c.events(streamCtx, events, connected) }()
+		streamConnected = connected
+		streamEvents = events
+	}
+	startStream()
+	defer func() {
+		stopPolling()
+		if reconnectTimer != nil {
+			reconnectTimer.Stop()
+		}
+		if streamCancel != nil {
+			streamCancel()
+		}
+		if streamDone != nil {
+			<-streamDone
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-streamConnected:
+			stopPolling()
+			streamConnected = nil
+			backoff = c.MinBackoff
+		case <-streamEvents:
+			stopPolling()
+			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
+				apply(snapshot)
+			}
+		case <-pollTick:
+			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
+				apply(snapshot)
+			}
+		case <-reconnect:
+			reconnectTimer = nil
+			reconnect = nil
+			startStream()
+		case <-streamErr:
+			streamDone = nil
+			streamErr = nil
+			streamCancel = nil
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			startPolling()
+			reconnectTimer = time.NewTimer(c.Jitter(backoff))
+			reconnect = reconnectTimer.C
+			if backoff < c.MaxBackoff {
+				backoff *= 2
+				if backoff > c.MaxBackoff {
+					backoff = c.MaxBackoff
+				}
 			}
 		}
 	}

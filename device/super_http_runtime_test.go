@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -92,6 +93,40 @@ func TestSuperHTTPRuntimeSyncFallsBackToPollingAndStops(t *testing.T) {
 	case <-runtime.Done():
 	case <-time.After(time.Second):
 		t.Fatal("runtime goroutines did not stop")
+	}
+}
+
+func TestSuperHTTPRuntimeApplySnapshotSerializesConcurrentCalls(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	first := runtimeTestSnapshot(t, 1)
+	second := runtimeTestSnapshot(t, 2)
+	second.Parameters.PollInterval = 20 * time.Millisecond
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// When
+	for index := 0; index < 32; index++ {
+		wg.Add(1)
+		snapshot := first
+		if index%2 != 0 {
+			snapshot = second
+		}
+		go func() {
+			defer wg.Done()
+			<-start
+			runtime.applySnapshot(snapshot)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	// Then
+	runtime.mu.RLock()
+	interval := runtime.parameters.PollInterval
+	runtime.mu.RUnlock()
+	if interval != first.Parameters.PollInterval && interval != second.Parameters.PollInterval {
+		t.Fatalf("unexpected final poll interval %v", interval)
 	}
 }
 

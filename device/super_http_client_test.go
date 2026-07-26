@@ -630,6 +630,158 @@ func TestControlHTTPClientSyncMonotonic(t *testing.T) {
 	}
 }
 
+func TestControlHTTPClientSyncPollsOnlyWhileSSEUnavailable(t *testing.T) {
+	// Given
+	env := &serverEnv{psKey: []byte("k")}
+	firstStream := make(chan struct{})
+	releaseFirstStream := make(chan struct{})
+	secondStream := make(chan struct{})
+	var streams atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.snapshotCalls.Add(1)
+		snapshot := env.snapshot(env.storedRev.Add(1))
+		snapshot.Parameters.PollInterval = 15 * time.Millisecond
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		switch streams.Add(1) {
+		case 1:
+			_, _ = io.WriteString(w, "id: initial\nevent: revision\ndata: {\"revision\":1}\n\n")
+			flusher.Flush()
+			close(firstStream)
+			select {
+			case <-releaseFirstStream:
+			case <-r.Context().Done():
+			}
+		default:
+			flusher.Flush()
+			close(secondStream)
+			<-r.Context().Done()
+		}
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server.URL, "edge/v2", vertexFromInt(t, 444), "k")
+	client.MinBackoff = 100 * time.Millisecond
+	client.MaxBackoff = 100 * time.Millisecond
+	client.Jitter = func(delay time.Duration) time.Duration { return delay }
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	syncDone := make(chan error, 1)
+
+	// When
+	go func() { syncDone <- client.Sync(ctx, func(*mtypes.ControlV2Snapshot) {}) }()
+	select {
+	case <-firstStream:
+	case <-ctx.Done():
+		t.Fatalf("initial SSE stream was not established: %v", ctx.Err())
+	}
+	waitClientCondition(t, 100*time.Millisecond, func() bool { return env.snapshotCalls.Load() >= 2 })
+	healthyCalls := env.snapshotCalls.Load()
+	time.Sleep(50 * time.Millisecond)
+	if got := env.snapshotCalls.Load(); got != healthyCalls {
+		t.Fatalf("healthy SSE stream started timer polling: snapshots grew from %d to %d", healthyCalls, got)
+	}
+	close(releaseFirstStream)
+	waitClientCondition(t, 100*time.Millisecond, func() bool { return env.snapshotCalls.Load() > healthyCalls })
+	select {
+	case <-secondStream:
+	case <-ctx.Done():
+		t.Fatalf("SSE did not reconnect: %v", ctx.Err())
+	}
+	reconnectedCalls := env.snapshotCalls.Load()
+	time.Sleep(50 * time.Millisecond)
+
+	// Then
+	if got := env.snapshotCalls.Load(); got != reconnectedCalls {
+		t.Fatalf("polling continued after healthy SSE reconnection: snapshots grew from %d to %d", reconnectedCalls, got)
+	}
+	cancel()
+	if err := <-syncDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sync returned %v, want context cancellation", err)
+	}
+}
+
+func TestControlHTTPClientSyncSerializesApplyWhenEventAndPollOverlap(t *testing.T) {
+	// Given
+	env := &serverEnv{psKey: []byte("k")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := env.snapshot(env.storedRev.Add(1))
+		snapshot.Parameters.PollInterval = 5 * time.Millisecond
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: overlap\nevent: revision\ndata: {\"revision\":1}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server.URL, "edge/v2", vertexFromInt(t, 445), "k")
+	var active atomic.Int32
+	var maximum atomic.Int32
+	var applies atomic.Int32
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	// When
+	err := client.Sync(ctx, func(*mtypes.ControlV2Snapshot) {
+		current := active.Add(1)
+		for {
+			previous := maximum.Load()
+			if current <= previous || maximum.CompareAndSwap(previous, current) {
+				break
+			}
+		}
+		applies.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		active.Add(-1)
+	})
+
+	// Then
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Sync returned %v, want deadline exceeded", err)
+	}
+	if applies.Load() < 2 {
+		t.Fatalf("expected event and polling applications, got %d", applies.Load())
+	}
+	if got := maximum.Load(); got != 1 {
+		t.Fatalf("apply ran concurrently %d times", got)
+	}
+}
+
+func waitClientCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("client condition timed out")
+}
+
 // verifies that an expired timestamp is rejected and local state stays clean.
 func TestControlHTTPClientExpiredTimestampNoState(t *testing.T) {
 	env := &serverEnv{psKey: []byte("k")}
