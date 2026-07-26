@@ -163,6 +163,217 @@ func TestControlV2ReportRejectsSpecialNodeID(t *testing.T) {
 	}
 }
 
+// TestControlV2ObservedReportRoundTrip proves canonical IPv4 and IPv6
+// observations preserve their target binding across the v2 wire format.
+func TestControlV2ObservedReportRoundTrip(t *testing.T) {
+	// Given
+	in := ControlV2ReportRequest{
+		NodeID: Vertex(10),
+		Observed: []ControlV2ObservedEndpoint{
+			{TargetNodeID: Vertex(11), Address: "203.0.113.11:51820"},
+			{TargetNodeID: Vertex(12), Address: "[2001:db8::12]:51820"},
+		},
+	}
+
+	// When
+	raw, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal observed report: %v", err)
+	}
+	var out ControlV2ReportRequest
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal observed report: %v", err)
+	}
+
+	// Then
+	if err := out.Validate(); err != nil {
+		t.Fatalf("validate observed report: %v", err)
+	}
+	if len(out.Observed) != 2 || out.Observed[0] != in.Observed[0] || out.Observed[1] != in.Observed[1] {
+		t.Fatalf("observations lost in round trip: got %+v", out.Observed)
+	}
+}
+
+func TestControlV2ObservedBackwardCompatibleDecoding(t *testing.T) {
+	// Given
+	reportJSON := `{"node_id":10,"reported_at":"2023-11-14T22:13:20Z"}`
+	peerJSON := `{"node_id":11,"node_name":"edge-011","pub_key":"key","last_seen":"2023-11-14T22:13:20Z"}`
+
+	// When
+	var report ControlV2ReportRequest
+	if err := json.Unmarshal([]byte(reportJSON), &report); err != nil {
+		t.Fatalf("unmarshal legacy report: %v", err)
+	}
+	var peer ControlV2Peer
+	if err := json.Unmarshal([]byte(peerJSON), &peer); err != nil {
+		t.Fatalf("unmarshal legacy peer: %v", err)
+	}
+
+	// Then
+	if err := report.Validate(); err != nil {
+		t.Fatalf("validate legacy report: %v", err)
+	}
+	if err := peer.Validate(); err != nil {
+		t.Fatalf("validate legacy peer: %v", err)
+	}
+	if len(report.Observed) != 0 || len(peer.ObservedV4) != 0 || len(peer.ObservedV6) != 0 {
+		t.Fatalf("legacy payload gained observations: report=%+v peer=%+v", report.Observed, peer)
+	}
+}
+
+// TestControlV2ObservedReportValidation rejects unbounded, ambiguous, and
+// malformed observations with the v2 typed error contract.
+func TestControlV2ObservedReportValidation(t *testing.T) {
+	valid := make([]ControlV2ObservedEndpoint, 256)
+	for i := range valid {
+		valid[i] = ControlV2ObservedEndpoint{TargetNodeID: Vertex(i + 1), Address: fmt.Sprintf("203.0.113.%d:51820", i%254+1)}
+	}
+
+	cases := []struct {
+		name string
+		req  ControlV2ReportRequest
+		ok   bool
+	}{
+		{"exact target limit", ControlV2ReportRequest{NodeID: Vertex(500), Observed: valid}, true},
+		{"over target limit", ControlV2ReportRequest{NodeID: Vertex(500), Observed: append(valid, ControlV2ObservedEndpoint{TargetNodeID: Vertex(257), Address: "203.0.113.254:51820"})}, false},
+		{"self target", ControlV2ReportRequest{NodeID: Vertex(10), Observed: []ControlV2ObservedEndpoint{{TargetNodeID: Vertex(10), Address: "203.0.113.10:51820"}}}, false},
+		{"special target", ControlV2ReportRequest{NodeID: Vertex(10), Observed: []ControlV2ObservedEndpoint{{TargetNodeID: NodeID_Broadcast, Address: "203.0.113.10:51820"}}}, false},
+		{"duplicate target", ControlV2ReportRequest{NodeID: Vertex(10), Observed: []ControlV2ObservedEndpoint{{TargetNodeID: Vertex(11), Address: "203.0.113.11:51820"}, {TargetNodeID: Vertex(11), Address: "203.0.113.12:51820"}}}, false},
+		{"noncanonical IPv6", ControlV2ReportRequest{NodeID: Vertex(10), Observed: []ControlV2ObservedEndpoint{{TargetNodeID: Vertex(11), Address: "[2001:0db8::11]:51820"}}}, false},
+		{"malformed address", ControlV2ReportRequest{NodeID: Vertex(10), Observed: []ControlV2ObservedEndpoint{{TargetNodeID: Vertex(11), Address: "not-an-ip:51820"}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// When
+			err := tc.req.Validate()
+
+			// Then
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if !IsControlV2Error(err) {
+				t.Fatalf("expected typed ControlV2Error, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// TestControlV2ObservedSnapshotValidation enforces the anonymous published
+// hint caps without serializing observer identity or timestamps.
+func TestControlV2ObservedSnapshotValidation(t *testing.T) {
+	observedV4 := make([]ControlV2ObservedAddress, 14)
+	for i := range observedV4 {
+		observedV4[i] = ControlV2ObservedAddress{Address: fmt.Sprintf("203.0.113.%d:51820", i+1), ReporterCount: 1}
+	}
+	observedV6 := []ControlV2ObservedAddress{
+		{Address: "[2001:db8::1]:51820", ReporterCount: 2},
+		{Address: "[2001:db8::2]:51820", ReporterCount: 3},
+	}
+	cases := []struct {
+		name string
+		peer ControlV2Peer
+		ok   bool
+	}{
+		{"exact total and family limits", ControlV2Peer{ObservedV4: observedV4, ObservedV6: observedV6}, true},
+		{"exact IPv6 family limit", ControlV2Peer{ObservedV6: makeObservedV6(14)}, true},
+		{"over total limit", ControlV2Peer{ObservedV4: observedV4, ObservedV6: append(observedV6, ControlV2ObservedAddress{Address: "[2001:db8::3]:51820", ReporterCount: 1})}, false},
+		{"over IPv4 limit", ControlV2Peer{ObservedV4: append(observedV4, ControlV2ObservedAddress{Address: "203.0.113.15:51820", ReporterCount: 1})}, false},
+		{"over IPv6 limit", ControlV2Peer{ObservedV6: makeObservedV6(15)}, false},
+		{"noncanonical address", ControlV2Peer{ObservedV6: []ControlV2ObservedAddress{{Address: "[2001:0db8::1]:51820", ReporterCount: 1}}}, false},
+		{"missing reporter count", ControlV2Peer{ObservedV4: []ControlV2ObservedAddress{{Address: "203.0.113.1:51820"}}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// When
+			err := tc.peer.Validate()
+
+			// Then
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if !IsControlV2Error(err) {
+				t.Fatalf("expected typed ControlV2Error, got %T: %v", err, err)
+			}
+		})
+	}
+
+	// Given
+	peer := ControlV2Peer{ObservedV4: observedV4[:1]}
+
+	// When
+	raw, err := json.Marshal(peer.ObservedV4)
+	if err != nil {
+		t.Fatalf("marshal observed snapshot peer: %v", err)
+	}
+
+	// Then
+	if strings.Contains(string(raw), "node_id") || strings.Contains(string(raw), "timestamp") || strings.Contains(string(raw), "reported_at") {
+		t.Fatalf("observed snapshot leaked attribution: %s", raw)
+	}
+}
+
+// TestEdgeConfigV2DirectConnectivityDefaults proves omitted additive config
+// resolves to the documented Super-discovered peer timings.
+func TestEdgeConfigV2DirectConnectivityDefaults(t *testing.T) {
+	// Given
+	cfg := EdgeConfigV2{}
+
+	// When
+	resolved := cfg.ResolveDirectConnectivity()
+
+	// Then
+	want := ControlV2DirectConnectivity{PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5}
+	if resolved != want {
+		t.Fatalf("resolved defaults = %+v, want %+v", resolved, want)
+	}
+}
+
+// TestEdgeConfigV2DirectConnectivityValidation rejects values outside the
+// bounded seconds contract while accepting omitted and explicit values.
+func TestEdgeConfigV2DirectConnectivityValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  ControlV2DirectConnectivity
+		ok   bool
+	}{
+		{"omitted", ControlV2DirectConnectivity{}, true},
+		{"explicit", ControlV2DirectConnectivity{PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5}, true},
+		{"negative", ControlV2DirectConnectivity{PingIntervalSeconds: -1}, false},
+		{"absurd", ControlV2DirectConnectivity{OfflineCheckSeconds: 86401}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// When
+			err := tc.cfg.Validate()
+
+			// Then
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if !IsControlV2Error(err) {
+				t.Fatalf("expected typed ControlV2Error, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+func makeObservedV6(count int) []ControlV2ObservedAddress {
+	observed := make([]ControlV2ObservedAddress, count)
+	for i := range observed {
+		observed[i] = ControlV2ObservedAddress{Address: fmt.Sprintf("[2001:db8::%d]:51820", i+3), ReporterCount: 1}
+	}
+	return observed
+}
+
 // TestControlV2SnapshotExcludesPSKey proves the snapshot serializes with no
 // control PSKey under any field.
 func TestControlV2SnapshotExcludesPSKey(t *testing.T) {

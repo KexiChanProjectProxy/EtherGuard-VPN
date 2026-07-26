@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/url"
 	"strconv"
@@ -48,6 +49,14 @@ const (
 	ControlV2ErrInvalidManagement  = "invalid_management"
 	ControlV2ErrInvalidSTUNServer  = "invalid_stun_server"
 	ControlV2ErrInvalidAPIPrefix   = "invalid_api_prefix"
+	ControlV2ErrInvalidObservation = "invalid_observation"
+)
+
+const (
+	controlV2MaxObservedTargets        = 256
+	controlV2MaxObservedHints          = 16
+	controlV2MaxObservedHintsPerFamily = 14
+	controlV2MaxDirectConnectivitySecs = 24 * 60 * 60
 )
 
 // ControlV2Error is the typed error every v2 validator returns. It carries
@@ -114,6 +123,26 @@ type ControlV2Candidate struct {
 	Address string                   `json:"address"`
 	Source  ControlV2CandidateSource `json:"source"`
 	RTTMS   float64                  `json:"rtt_ms,omitempty"`
+}
+
+// ControlV2ObservedEndpoint is one Edge's canonical endpoint vote for a
+// different target Edge in a report. Its observer identity is implicit in the
+// authenticated report and is never copied into a snapshot.
+type ControlV2ObservedEndpoint struct {
+	TargetNodeID Vertex `json:"target_node_id"`
+	Address      string `json:"address"`
+}
+
+// Validate verifies an observed endpoint has a real target and canonical
+// IP:port address.
+func (o *ControlV2ObservedEndpoint) Validate() error {
+	if o.TargetNodeID.IsSpecial() {
+		return newControlV2Error(ControlV2ErrInvalidNodeID, "target_node_id", "target_node_id is special: %s", o.TargetNodeID.ToString())
+	}
+	if _, _, err := validateCanonicalIPPort(o.Address, "address"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Validate verifies the candidate has a parseable IP:port address and a
@@ -220,10 +249,11 @@ func (r *ControlV2RegisterRequest) Validate() error {
 // ControlV2ReportRequest is the body of POST /edge/v2/report. It is sent
 // periodically with pongs, candidate refreshes, and a heartbeat.
 type ControlV2ReportRequest struct {
-	NodeID     Vertex               `json:"node_id"`
-	Pongs      []ControlV2Pong      `json:"pongs,omitempty"`
-	Candidates []ControlV2Candidate `json:"candidates,omitempty"`
-	ReportedAt time.Time            `json:"reported_at"`
+	NodeID     Vertex                      `json:"node_id"`
+	Pongs      []ControlV2Pong             `json:"pongs,omitempty"`
+	Candidates []ControlV2Candidate        `json:"candidates,omitempty"`
+	Observed   []ControlV2ObservedEndpoint `json:"observed,omitempty"`
+	ReportedAt time.Time                   `json:"reported_at"`
 }
 
 // Validate ensures the NodeID is real and every nested entry is valid.
@@ -241,6 +271,23 @@ func (r *ControlV2ReportRequest) Validate() error {
 			return err
 		}
 	}
+	targets := make(map[Vertex]struct{}, len(r.Observed))
+	for i := range r.Observed {
+		observed := &r.Observed[i]
+		if observed.TargetNodeID == r.NodeID {
+			return newControlV2Error(ControlV2ErrInvalidObservation, fmt.Sprintf("observed[%d].target_node_id", i), "target_node_id must not equal node_id")
+		}
+		if _, ok := targets[observed.TargetNodeID]; ok {
+			return newControlV2Error(ControlV2ErrInvalidObservation, fmt.Sprintf("observed[%d].target_node_id", i), "duplicate target_node_id: %s", observed.TargetNodeID.ToString())
+		}
+		targets[observed.TargetNodeID] = struct{}{}
+		if len(targets) > controlV2MaxObservedTargets {
+			return newControlV2Error(ControlV2ErrInvalidObservation, "observed", "more than %d distinct targets", controlV2MaxObservedTargets)
+		}
+		if err := observed.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -251,16 +298,70 @@ func (r *ControlV2ReportRequest) Validate() error {
 // UsePSKForInterEdge), it is the pairwise inter-Edge WireGuard PSK and
 // is allowed in the snapshot.
 type ControlV2Peer struct {
-	NodeID    Vertex             `json:"node_id"`
-	NodeName  string             `json:"node_name"`
-	PubKey    string             `json:"pub_key"`
-	PSKey     string             `json:"-"`
-	LocalV4   []string           `json:"local_v4,omitempty"`
-	LocalV6   []string           `json:"local_v6,omitempty"`
-	PublicV4  []string           `json:"public_v4,omitempty"`
-	PublicV6  []string           `json:"public_v6,omitempty"`
-	LatencyMS map[Vertex]float64 `json:"latency_ms,omitempty"`
-	LastSeen  time.Time          `json:"last_seen"`
+	NodeID     Vertex                     `json:"node_id"`
+	NodeName   string                     `json:"node_name"`
+	PubKey     string                     `json:"pub_key"`
+	PSKey      string                     `json:"-"`
+	LocalV4    []string                   `json:"local_v4,omitempty"`
+	LocalV6    []string                   `json:"local_v6,omitempty"`
+	PublicV4   []string                   `json:"public_v4,omitempty"`
+	PublicV6   []string                   `json:"public_v6,omitempty"`
+	ObservedV4 []ControlV2ObservedAddress `json:"observed_v4,omitempty"`
+	ObservedV6 []ControlV2ObservedAddress `json:"observed_v6,omitempty"`
+	LatencyMS  map[Vertex]float64         `json:"latency_ms,omitempty"`
+	LastSeen   time.Time                  `json:"last_seen"`
+}
+
+// ControlV2ObservedAddress is an anonymous, aggregate observed endpoint in a
+// snapshot. It intentionally contains no observer identity or timestamp.
+type ControlV2ObservedAddress struct {
+	Address       string `json:"address"`
+	ReporterCount uint32 `json:"reporter_count"`
+}
+
+// Validate verifies an observed snapshot address is canonical and has at
+// least one distinct reporter. It returns whether the address is IPv6.
+func (o *ControlV2ObservedAddress) Validate() (bool, error) {
+	isIPv6, _, err := validateCanonicalIPPort(o.Address, "address")
+	if err != nil {
+		return false, err
+	}
+	if o.ReporterCount == 0 {
+		return false, newControlV2Error(ControlV2ErrInvalidObservation, "reporter_count", "reporter_count must be positive")
+	}
+	return isIPv6, nil
+}
+
+// Validate enforces the published observed-hint caps and family partitions.
+func (p *ControlV2Peer) Validate() error {
+	if len(p.ObservedV4)+len(p.ObservedV6) > controlV2MaxObservedHints {
+		return newControlV2Error(ControlV2ErrInvalidObservation, "observed", "more than %d observed hints", controlV2MaxObservedHints)
+	}
+	if len(p.ObservedV4) > controlV2MaxObservedHintsPerFamily {
+		return newControlV2Error(ControlV2ErrInvalidObservation, "observed_v4", "more than %d IPv4 observed hints", controlV2MaxObservedHintsPerFamily)
+	}
+	if len(p.ObservedV6) > controlV2MaxObservedHintsPerFamily {
+		return newControlV2Error(ControlV2ErrInvalidObservation, "observed_v6", "more than %d IPv6 observed hints", controlV2MaxObservedHintsPerFamily)
+	}
+	for i := range p.ObservedV4 {
+		isIPv6, err := p.ObservedV4[i].Validate()
+		if err != nil {
+			return err
+		}
+		if isIPv6 {
+			return newControlV2Error(ControlV2ErrInvalidObservation, fmt.Sprintf("observed_v4[%d].address", i), "address must be IPv4")
+		}
+	}
+	for i := range p.ObservedV6 {
+		isIPv6, err := p.ObservedV6[i].Validate()
+		if err != nil {
+			return err
+		}
+		if !isIPv6 {
+			return newControlV2Error(ControlV2ErrInvalidObservation, fmt.Sprintf("observed_v6[%d].address", i), "address must be IPv6")
+		}
+	}
+	return nil
 }
 
 // ControlV2EventType enumerates the bounded event types the Super emits
@@ -583,13 +684,65 @@ func (c *SuperConfigV2) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // EdgeConfigV2 is the Edge-side v2 YAML config.
 type EdgeConfigV2 struct {
-	Interface   InterfaceConf  `yaml:"Interface"`
-	NodeID      Vertex         `yaml:"NodeID"`
-	NodeName    string         `yaml:"NodeName"`
-	DefaultTTL  uint8          `yaml:"DefaultTTL"`
-	LogLevel    LoggerInfo     `yaml:"LogLevel"`
-	SuperNodeV2 SuperNodeV2Ref `yaml:"SuperNodeV2"`
-	Peers       []PeerInfo     `yaml:"Peers"`
+	Interface          InterfaceConf               `yaml:"Interface"`
+	NodeID             Vertex                      `yaml:"NodeID"`
+	NodeName           string                      `yaml:"NodeName"`
+	DefaultTTL         uint8                       `yaml:"DefaultTTL"`
+	LogLevel           LoggerInfo                  `yaml:"LogLevel"`
+	SuperNodeV2        SuperNodeV2Ref              `yaml:"SuperNodeV2"`
+	DirectConnectivity ControlV2DirectConnectivity `yaml:"DirectConnectivity,omitempty" json:"direct_connectivity,omitempty"`
+	Peers              []PeerInfo                  `yaml:"Peers"`
+}
+
+// ControlV2DirectConnectivity configures dynamic Super-discovered peer
+// maintenance in seconds. Zero values are resolved to documented defaults.
+type ControlV2DirectConnectivity struct {
+	PersistentKeepaliveSeconds float64 `yaml:"PersistentKeepaliveSeconds,omitempty" json:"persistent_keepalive_seconds,omitempty"`
+	PingIntervalSeconds        float64 `yaml:"PingIntervalSeconds,omitempty" json:"ping_interval_seconds,omitempty"`
+	PeerAliveTimeoutSeconds    float64 `yaml:"PeerAliveTimeoutSeconds,omitempty" json:"peer_alive_timeout_seconds,omitempty"`
+	OfflineCheckSeconds        float64 `yaml:"OfflineCheckSeconds,omitempty" json:"offline_check_seconds,omitempty"`
+	NextEndpointTrySeconds     float64 `yaml:"NextEndpointTrySeconds,omitempty" json:"next_endpoint_try_seconds,omitempty"`
+}
+
+// Validate rejects negative, non-finite, and impractically large intervals.
+func (c *ControlV2DirectConnectivity) Validate() error {
+	for _, field := range []struct {
+		name  string
+		value float64
+	}{
+		{"PersistentKeepaliveSeconds", c.PersistentKeepaliveSeconds},
+		{"PingIntervalSeconds", c.PingIntervalSeconds},
+		{"PeerAliveTimeoutSeconds", c.PeerAliveTimeoutSeconds},
+		{"OfflineCheckSeconds", c.OfflineCheckSeconds},
+		{"NextEndpointTrySeconds", c.NextEndpointTrySeconds},
+	} {
+		if math.IsNaN(field.value) || math.IsInf(field.value, 0) || field.value < 0 || field.value > controlV2MaxDirectConnectivitySecs {
+			return newControlV2Error(ControlV2ErrInvalidDuration, field.name, "must be between 0 and %d seconds", controlV2MaxDirectConnectivitySecs)
+		}
+	}
+	return nil
+}
+
+// ResolveDirectConnectivity returns explicit timings or safe defaults for
+// every omitted zero-valued timing.
+func (c *EdgeConfigV2) ResolveDirectConnectivity() ControlV2DirectConnectivity {
+	resolved := c.DirectConnectivity
+	if resolved.PersistentKeepaliveSeconds == 0 {
+		resolved.PersistentKeepaliveSeconds = 25
+	}
+	if resolved.PingIntervalSeconds == 0 {
+		resolved.PingIntervalSeconds = 16
+	}
+	if resolved.PeerAliveTimeoutSeconds == 0 {
+		resolved.PeerAliveTimeoutSeconds = 70
+	}
+	if resolved.OfflineCheckSeconds == 0 {
+		resolved.OfflineCheckSeconds = 10
+	}
+	if resolved.NextEndpointTrySeconds == 0 {
+		resolved.NextEndpointTrySeconds = 5
+	}
+	return resolved
 }
 
 // Validate ensures the Edge has a real NodeID + SuperNodeV2 reference.
@@ -601,6 +754,9 @@ func (c *EdgeConfigV2) Validate() error {
 		return newControlV2Error(ControlV2ErrMissingField, "NodeName", "NodeName is required")
 	}
 	if err := c.SuperNodeV2.Validate(); err != nil {
+		return err
+	}
+	if err := c.DirectConnectivity.Validate(); err != nil {
 		return err
 	}
 	return nil
@@ -708,6 +864,28 @@ func splitHostPort(s string) (string, int, error) {
 		return "", 0, err
 	}
 	return host, port, nil
+}
+
+func validateCanonicalIPPort(address, field string) (bool, int, error) {
+	if address == "" {
+		return false, 0, newControlV2Error(ControlV2ErrInvalidCandidate, field, "address is required")
+	}
+	host, port, err := splitHostPort(address)
+	if err != nil {
+		return false, 0, newControlV2Error(ControlV2ErrInvalidCandidate, field, "invalid host:port %q: %v", address, err)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false, 0, newControlV2Error(ControlV2ErrInvalidCandidate, field, "invalid IP %q", host)
+	}
+	if port <= 0 || port > 65535 {
+		return false, 0, newControlV2Error(ControlV2ErrInvalidCandidate, field, "port out of range: %d", port)
+	}
+	canonical := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+	if address != canonical {
+		return false, 0, newControlV2Error(ControlV2ErrInvalidCandidate, field, "address must be canonical: got %q, want %q", address, canonical)
+	}
+	return ip.To4() == nil, port, nil
 }
 
 // validateStringAddrList ensures every entry parses as either an IPv4
