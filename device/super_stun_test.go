@@ -318,6 +318,32 @@ func TestSuperSTUNAllServersFailPublishesNoMappedCandidates(t *testing.T) {
 	}
 }
 
+func TestSuperSTUNRefreshRetainsLocalCandidatesAndDeduplicatesMappings(t *testing.T) {
+	// Given
+	previous := []mtypes.ControlV2Candidate{
+		{Address: "10.0.0.2:51820", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "198.51.100.2:51820", Source: mtypes.ControlV2CandidateSTUN},
+	}
+	refreshed := []mtypes.ControlV2Candidate{
+		{Address: "198.51.100.3:51820", Source: mtypes.ControlV2CandidateSTUN},
+		{Address: "198.51.100.3:51820", Source: mtypes.ControlV2CandidateSTUN},
+	}
+
+	// When
+	candidates := mergeControlCandidates(previous, refreshed)
+
+	// Then
+	if len(candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2: %#v", len(candidates), candidates)
+	}
+	if candidates[0].Address != "10.0.0.2:51820" || candidates[0].Source != mtypes.ControlV2CandidateLocal {
+		t.Fatalf("local candidate lost: %#v", candidates)
+	}
+	if candidates[1].Address != "198.51.100.3:51820" || candidates[1].Source != mtypes.ControlV2CandidateSTUN {
+		t.Fatalf("refreshed STUN candidate = %#v", candidates)
+	}
+}
+
 func receiveSTUNTestPackets(ctx context.Context, manager *SuperSTUNManager, receive conn.ReceiveFunc) {
 	buffer := make([]byte, 2048)
 	for {

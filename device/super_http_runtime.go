@@ -29,18 +29,23 @@ type SuperHTTPRuntime struct {
 	once  sync.Once
 	apply sync.Mutex
 
-	mu         sync.RWMutex
-	candidates []mtypes.ControlV2Candidate
-	parameters mtypes.ControlV2Parameters
+	mu               sync.RWMutex
+	candidates       []mtypes.ControlV2Candidate
+	parameters       mtypes.ControlV2Parameters
+	generation       uint64
+	recoveryRequests map[mtypes.Vertex]time.Time
+	parameterUpdates chan struct{}
 }
 
 func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
 	return &SuperHTTPRuntime{
-		device: device,
-		config: config,
-		client: NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey),
-		ready:  make(chan superHTTPReady, 1),
-		done:   make(chan struct{}),
+		device:           device,
+		config:           config,
+		client:           NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey),
+		ready:            make(chan superHTTPReady, 1),
+		done:             make(chan struct{}),
+		recoveryRequests: make(map[mtypes.Vertex]time.Time),
+		parameterUpdates: make(chan struct{}, 1),
 	}
 }
 
@@ -78,7 +83,7 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		err := runtime.client.Sync(ctx, runtime.applySnapshot)
@@ -89,6 +94,10 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	go func() {
 		defer wg.Done()
 		runtime.reportLoop(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		runtime.stunLoop(ctx)
 	}()
 	wg.Wait()
 }
@@ -137,30 +146,80 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	defer runtime.apply.Unlock()
 	runtime.mu.Lock()
 	runtime.parameters = snapshot.Parameters
+	if runtime.generation != snapshot.Revision {
+		runtime.generation = snapshot.Revision
+		runtime.recoveryRequests = make(map[mtypes.Vertex]time.Time)
+	}
 	runtime.mu.Unlock()
+	select {
+	case runtime.parameterUpdates <- struct{}{}:
+	default:
+	}
 	if runtime.device != nil {
-		runtime.device.applySuperHTTPSnapshot(snapshot)
+		runtime.device.applySuperHTTPSnapshot(snapshot, uint32(runtime.config.DirectConnectivity.PersistentKeepaliveSeconds))
 	}
 }
 
 func (runtime *SuperHTTPRuntime) refreshSTUN(ctx context.Context, parameters mtypes.ControlV2Parameters) {
-	if runtime.device == nil || runtime.device.superSTUN == nil || len(parameters.STUNServers) == 0 {
-		return
-	}
-	public := runtime.device.superSTUN.Discover(ctx, parameters.STUNServers, parameters.STUNRequestTimeout)
-	if len(public) == 0 {
-		return
+	var public []mtypes.ControlV2Candidate
+	if runtime.device != nil && runtime.device.superSTUN != nil && len(parameters.STUNServers) > 0 {
+		public = runtime.device.superSTUN.Discover(ctx, parameters.STUNServers, parameters.STUNRequestTimeout)
 	}
 	runtime.mu.Lock()
-	local := append([]mtypes.ControlV2Candidate(nil), runtime.candidates...)
-	for _, candidate := range local {
+	runtime.candidates = mergeControlCandidates(runtime.candidates, public)
+	runtime.mu.Unlock()
+}
+
+func mergeControlCandidates(previous, refreshed []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate {
+	merged := make([]mtypes.ControlV2Candidate, 0, len(previous)+len(refreshed))
+	seen := make(map[string]struct{}, len(previous)+len(refreshed))
+	for _, candidate := range previous {
 		if candidate.Source == mtypes.ControlV2CandidateSTUN {
-			local = local[:0]
-			break
+			continue
+		}
+		if _, exists := seen[candidate.Address]; exists {
+			continue
+		}
+		seen[candidate.Address] = struct{}{}
+		merged = append(merged, candidate)
+	}
+	for _, candidate := range refreshed {
+		if candidate.Source != mtypes.ControlV2CandidateSTUN {
+			continue
+		}
+		if _, exists := seen[candidate.Address]; exists {
+			continue
+		}
+		seen[candidate.Address] = struct{}{}
+		merged = append(merged, candidate)
+	}
+	return merged
+}
+
+func (runtime *SuperHTTPRuntime) stunLoop(ctx context.Context) {
+	for {
+		runtime.mu.RLock()
+		parameters := runtime.parameters
+		runtime.mu.RUnlock()
+		interval := parameters.STUNRefreshInterval
+		if interval <= 0 {
+			interval = time.Second
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-runtime.parameterUpdates:
+			if !timer.Stop() {
+				<-timer.C
+			}
+		case <-timer.C:
+			runtime.refreshSTUN(ctx, parameters)
 		}
 	}
-	runtime.candidates = append(local, public...)
-	runtime.mu.Unlock()
 }
 
 func (runtime *SuperHTTPRuntime) setCandidates(candidates []mtypes.ControlV2Candidate) {
@@ -190,6 +249,8 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context) {
 		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, Candidates: candidates, ReportedAt: time.Now()}
 		if runtime.device != nil {
 			report.Pongs = runtime.device.superHTTPPongs()
+			report.Observed = runtime.observedEndpoints()
+			runtime.recoverExhaustedPeers()
 		}
 		if err := runtime.client.Report(ctx, &report); err != nil && ctx.Err() == nil && runtime.device != nil {
 			runtime.device.log.Errorf("HTTP control report failed: %v", err)
@@ -197,7 +258,58 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context) {
 	}
 }
 
-func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot) {
+func (runtime *SuperHTTPRuntime) observedEndpoints() []mtypes.ControlV2ObservedEndpoint {
+	if runtime.device == nil {
+		return nil
+	}
+	peers := runtime.device.allPeersByIDSnapshot()
+	observed := make([]mtypes.ControlV2ObservedEndpoint, 0, len(peers))
+	for id, peer := range peers {
+		static, _, _ := peer.endpointRetryConfig()
+		if id == runtime.config.NodeID || static || !peer.IsPeerAlive() || peer.GetEndpointSrcStr() == "" {
+			continue
+		}
+		address := peer.GetEndpointDstStr()
+		if address == "" {
+			continue
+		}
+		observed = append(observed, mtypes.ControlV2ObservedEndpoint{TargetNodeID: id, Address: address})
+	}
+	return observed
+}
+
+func (runtime *SuperHTTPRuntime) recoverExhaustedPeers() {
+	if runtime.device == nil {
+		return
+	}
+	for _, peer := range runtime.device.allPeersByIDSnapshot() {
+		static, _, _ := peer.endpointRetryConfig()
+		if static {
+			continue
+		}
+		if peer.IsPeerAlive() {
+			runtime.mu.Lock()
+			delete(runtime.recoveryRequests, peer.ID)
+			runtime.mu.Unlock()
+			continue
+		}
+		if peer.endpoint_trylist.ConsumeSuperCycleComplete() && runtime.shouldRequestSnapshotRefresh(peer.ID, time.Now()) {
+			runtime.client.RequestSnapshotRefresh()
+		}
+	}
+}
+
+func (runtime *SuperHTTPRuntime) shouldRequestSnapshotRefresh(id mtypes.Vertex, now time.Time) bool {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if previous, exists := runtime.recoveryRequests[id]; exists && now.Sub(previous) < 30*time.Second {
+		return false
+	}
+	runtime.recoveryRequests[id] = now
+	return true
+}
+
+func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot, persistentKeepalive uint32) {
 	wanted := make(map[mtypes.Vertex]mtypes.ControlV2Peer, len(snapshot.Peers))
 	for _, info := range snapshot.Peers {
 		if info.NodeID == device.ID {
@@ -211,30 +323,52 @@ func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot)
 		}
 		peer := device.LookupPeer(publicKey)
 		if peer == nil {
-			peer, err = device.NewPeer(publicKey, info.NodeID, false, 0)
+			peer, err = device.NewPeer(publicKey, info.NodeID, false, persistentKeepalive)
 			if err != nil {
 				device.log.Errorf("HTTP control peer %v create failed: %v", info.NodeID, err)
 				continue
 			}
+		}
+		static, _, _ := peer.endpointRetryConfig()
+		if static {
+			continue
 		}
 		if info.PSKey != "" {
 			if psk, keyErr := Str2PSKey(info.PSKey); keyErr == nil {
 				peer.SetPSK(psk)
 			}
 		}
-		urls := mtypes.API_connurl{LocalV4: candidateCosts(info.LocalV4), LocalV6: candidateCosts(info.LocalV6), ExternalV4: candidateCosts(info.PublicV4), ExternalV6: candidateCosts(info.PublicV6)}
+		urls := snapshotURLs(info)
 		peer.endpoint_trylist.UpdateSuper(urls, true, device.EdgeConfig.AfPrefer)
 		for destination, latencyMS := range info.LatencyMS {
 			device.graph.UpdateLatency(info.NodeID, destination, latencyMS/1000, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, 0, false, false)
 		}
 	}
 	for id, peer := range device.allPeersByIDSnapshot() {
-		if _, ok := wanted[id]; !ok {
+		static, _, _ := peer.endpointRetryConfig()
+		if _, ok := wanted[id]; !ok && !static {
 			device.RemovePeer(peer.handshake.remoteStatic)
 		}
 	}
 	device.graph.RecalculateNhTable(false)
 	device.signalEndpointRetry()
+}
+
+func snapshotURLs(info mtypes.ControlV2Peer) mtypes.API_connurl {
+	urls := mtypes.API_connurl{
+		LocalV4:    candidateCosts(info.LocalV4),
+		LocalV6:    candidateCosts(info.LocalV6),
+		ExternalV4: candidateCosts(info.PublicV4),
+		ExternalV6: candidateCosts(info.PublicV6),
+	}
+	urls.Candidates = make([]mtypes.APIConnURLCandidate, 0, len(info.ObservedV4)+len(info.ObservedV6))
+	for _, observed := range info.ObservedV4 {
+		urls.Candidates = append(urls.Candidates, mtypes.APIConnURLCandidate{URL: observed.Address, Source: mtypes.APIConnURLSourceObserved, ReporterCount: observed.ReporterCount})
+	}
+	for _, observed := range info.ObservedV6 {
+		urls.Candidates = append(urls.Candidates, mtypes.APIConnURLCandidate{URL: observed.Address, Source: mtypes.APIConnURLSourceObserved, ReporterCount: observed.ReporterCount})
+	}
+	return urls
 }
 
 func candidateCosts(addresses []string) map[string]float64 {

@@ -130,6 +130,51 @@ func TestSuperHTTPRuntimeApplySnapshotSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestSuperHTTPRuntimeSnapshotURLsWeightsObservedCandidates(t *testing.T) {
+	// Given
+	info := mtypes.ControlV2Peer{
+		LocalV4:  []string{"10.0.0.2:51820"},
+		PublicV4: []string{"198.51.100.2:51820"},
+		ObservedV4: []mtypes.ControlV2ObservedAddress{
+			{Address: "203.0.113.2:51820", ReporterCount: 7},
+		},
+		ObservedV6: []mtypes.ControlV2ObservedAddress{
+			{Address: "[2001:db8::2]:51820", ReporterCount: 12},
+		},
+	}
+
+	// When
+	urls := snapshotURLs(info)
+
+	// Then
+	candidates := urls.GetList(true)
+	counts := make(map[string]uint32, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Source == mtypes.APIConnURLSourceObserved {
+			counts[candidate.URL] = candidate.ReporterCount
+		}
+	}
+	if counts["203.0.113.2:51820"] != 7 || counts["[2001:db8::2]:51820"] != 12 {
+		t.Fatalf("observed reporter counts = %#v", counts)
+	}
+}
+
+func TestSuperHTTPRuntimeRecoveryCoalescesPeerRefreshes(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	now := time.Date(2026, time.July, 26, 0, 0, 0, 0, time.UTC)
+
+	// When
+	first := runtime.shouldRequestSnapshotRefresh(7, now)
+	second := runtime.shouldRequestSnapshotRefresh(7, now.Add(time.Second))
+	afterWindow := runtime.shouldRequestSnapshotRefresh(7, now.Add(30*time.Second))
+
+	// Then
+	if !first || second || !afterWindow {
+		t.Fatalf("refresh decisions = %v, %v, %v", first, second, afterWindow)
+	}
+}
+
 func runtimeTestSnapshot(t *testing.T, revision uint64) *mtypes.ControlV2Snapshot {
 	t.Helper()
 	return &mtypes.ControlV2Snapshot{
