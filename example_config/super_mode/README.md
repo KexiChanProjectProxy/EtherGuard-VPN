@@ -6,7 +6,7 @@
 This mode is inspired by [n2n](https://github.com/ntop/n2n). There are 2 types of node: SuperNode and EdgeNode.
 The SuperNode runs an HTTP-only control service. EdgeNodes register over HTTP, receive a peer snapshot, and exchange latency measurements. The SuperNode runs the [Floyd-Warshall Algorithm](https://en.wikipedia.org/wiki/Floyd%E2%80%93Warshall_algorithm) and distributes the routing result back to all EdgeNodes.
 
-**Breaking change:** Super mode no longer uses a UDP listener, WireGuard private keys, UAPI, or the `wg` command on the Super side. If you have an existing v1 config with `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`, or `API_Prefix`, it will be rejected with a `legacy_udp_field` error. You must migrate to a v2 `SuperConfigV2` YAML before upgrading.
+**Breaking change:** Super mode no longer uses a UDP listener, WireGuard private keys, UAPI, or the `wg` command on the Super side. If you have an existing v1 config with `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`, `API_Prefix`, `ListenPort_EdgeAPI`, or `ListenPort_ManageAPI`, it will be rejected with a `legacy_udp_field` error. You must migrate to a v2 `SuperConfigV2` YAML before upgrading.
 
 ## Quick start
 
@@ -123,7 +123,7 @@ Edges connect to `GET /edge/v2/events` for real-time state-change notifications.
 
 On reconnect, the Edge sends `Last-Event-ID` to resume from the retained buffer. If the server cannot replay (ID older than retention), the Edge must re-fetch the full snapshot.
 
-A dedicated polling goroutine runs alongside SSE, fetching `/edge/v2/snapshot` at `PollIntervalSeconds`. This ensures progress even when SSE is down. The Edge uses ETag/304 conditional requests to avoid transferring unchanged snapshots.
+Polling is fallback-only: `ControlHTTPClient.Sync` establishes SSE first, starts timed snapshot polling only after a stream connection or parse failure, and cancels polling as soon as a stream is healthy again. When the Super's event hub closes, in-flight SSE streams terminate so Edges detect the failure and fall back to polling. The Edge uses ETag/304 conditional requests to avoid transferring unchanged snapshots.
 
 ### STUN candidate discovery
 
@@ -131,7 +131,7 @@ The Super distributes STUN servers to all Edges via the `STUNServers` field in t
 
 **Same-socket limitation:** STUN candidates are measured from the WireGuard bind. If a STUN server sees a different source port than the WireGuard socket, the candidate is invalid because the NAT mapping is port-specific. Edges do not create a second UDP socket for STUN.
 
-STUN URIs use IP literals only: `stun:203.0.113.10:3478` or `stuns:[2001:db8::10]:5349`. DNS resolution must happen before configuration.
+Both `stun:host:port` and `stun://host:port` URI forms are accepted. Hosts may be IP literals (e.g. `stun:192.168.1.10:3478`) or syntactically valid DNS hostnames (e.g. `stun://local-stun.example:3478`). Validation performs no DNS I/O; it only checks the URI shape. DNS resolution happens at runtime inside `SuperSTUNManager`, under the configured per-server timeout, before the IP-only bind parser. Generic endpoint parsing (`conn/conn.go`) remains IP-literal-only; DNS hostnames are only resolved for STUN, not for peer endpoints. STUN refresh is one-shot at register time (no periodic refresh).
 
 ### No relay / TURN
 
@@ -147,7 +147,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 | APIUrl | URL of the Edge API listener (e.g. `http://host:3456`) |
 | APIPrefix | API path prefix (e.g. `/edge/v2`) |
 | ManagementAuth | `{User, PasswordHash}` for `/manage/*` endpoints |
-| STUNServers | List of STUN server URIs (`stun:host:port`) |
+| STUNServers | List of STUN server URIs (`stun:host:port` or `stun://host:port`); hosts may be IP literals or DNS hostnames |
 | STUNRequestTimeoutSeconds | Timeout per STUN request |
 | STUNRefreshIntervalSeconds | How often to refresh STUN candidates |
 | PollIntervalSeconds | Edge polling interval for snapshot |
@@ -172,7 +172,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 
 ### EdgeConfig Root
 
-The Edge v2 config replaces the old `DynamicRoute.SuperNode` block with a `SuperNodeV2` reference.
+The Edge v2 config replaces the old `DynamicRoute.SuperNode` block with a `SuperNodeV2` reference. A v1 Edge config containing a `LegacySuper` key or a `DynamicRoute.SuperNode` key (including `UseSuperNode: false`) is rejected with a typed `legacy_udp_field` error; it never silently becomes static mode.
 
 ### SuperNodeV2
 
@@ -201,6 +201,10 @@ To migrate:
 1. Generate a fresh v2 config: `./etherguard-go -mode gencfg -cfgmode super -config gensuper.yaml`
 2. Review the generated `EgNet_super.yaml` and edge YAMLs.
 3. Start with `-mode super -config EgNet_super.yaml`.
+
+## VPP status
+
+VPP integration is excluded and unvalidated in this release. No libmemif-equipped host ran `make vpp`. The migration touched `device/`, `main_edge.go`, and `main_super.go`, so VPP build or runtime regressions are possible. Validate `make vpp` on a host with libmemif before any release.
 
 ## HTTP Manage API
 

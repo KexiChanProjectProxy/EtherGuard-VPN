@@ -6,7 +6,7 @@
 此模式是受到[n2n](https://github.com/ntop/n2n)的啟發，分為SuperNode和EdgeNode兩種節點。
 SuperNode運行一個純HTTP控制服務。EdgeNode透過HTTP註冊，取得peer快照，並交換延遲量測資料。SuperNode執行[Floyd-Warshall演算法](https://zh.wikipedia.org/wiki/zh-tw/Floyd-Warshall算法)，並把計算結果分發給所有EdgeNode。
 
-**重大變更：** Super模式不再使用UDP listener、WireGuard私鑰、UAPI或`wg`命令。如果你有舊版v1設定檔包含`PrivKeyV4`、`PrivKeyV6`、`ListenPort`、`FwMark`或`API_Prefix`，會收到`legacy_udp_field`錯誤。升級前必須遷移到v2 `SuperConfigV2` YAML。
+**重大變更：** Super模式不再使用UDP listener、WireGuard私鑰、UAPI或`wg`命令。如果你有舊版v1設定檔包含`PrivKeyV4`、`PrivKeyV6`、`ListenPort`、`FwMark`、`API_Prefix`、`ListenPort_EdgeAPI`或`ListenPort_ManageAPI`，會收到`legacy_udp_field`錯誤。升級前必須遷移到v2 `SuperConfigV2` YAML。
 
 ## 快速上手
 
@@ -123,7 +123,7 @@ Edge連接`GET /edge/v2/events`取得即時狀態變更通知。串流使用標�
 
 重新連線時，Edge發送`Last-Event-ID`從保留的buffer繼續接收。如果伺服器無法回放（ID早於保留範圍），Edge必須重新取得完整的snapshot。
 
-專門的輪詢goroutine與SSE並行運行，以`PollIntervalSeconds`的間隔取得`/edge/v2/snapshot`。這確保即使SSE中斷時仍有進展。Edge使用ETag/304條件請求來避免傳輸未變更的snapshot。
+輪詢僅作為回退機制：`ControlHTTPClient.Sync`首先建立SSE串流，僅在串流連線或解析失敗後才啟動定時snapshot輪詢，並在串流恢復健康時立即取消輪詢。當Super的event hub關閉時，進行中的SSE串流會終止，使Edge偵測到失敗並回退到輪詢。Edge使用ETag/304條件請求來避免傳輸未變更的snapshot。
 
 ### STUN候選位址探索
 
@@ -131,7 +131,7 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 **同socket限制：** STUN候選位址是從WireGuard bind socket量測的。如果STUN伺服器看到的source port與WireGuard socket不同，該候選位址無效，因為NAT mapping是基於port的。Edge不會為STUN建立第二個UDP socket。
 
-STUN URI僅接受IP literal：`stun:203.0.113.10:3478`或`stuns:[2001:db8::10]:5349`。DNS解析必須在配置前完成。
+接受`stun:host:port`和`stun://host:port`兩種URI格式。主機可以是IP literal（例如`stun://192.168.1.10:3478`）或語法上合法的DNS主機名（例如`stun://local-stun.example:3478`）。驗證不執行DNS I/O，僅檢查URI格式。DNS解析在`SuperSTUNManager`內部於運行時進行，受設定的per-server超時限制，在IP-only bind parser之前完成。通用endpoint解析（`conn/conn.go`）僅接受IP literal；DNS主機名僅用於STUN，不適用於peer endpoint。STUN刷新在註冊時一次性執行（無週期性刷新）。
 
 ### 無relay/TURN
 
@@ -147,7 +147,7 @@ STUN URI僅接受IP literal：`stun:203.0.113.10:3478`或`stuns:[2001:db8::10]:5
 | APIUrl | Edge API listener的URL（例如`http://host:3456`） |
 | APIPrefix | API路徑前綴（例如`/edge/v2`） |
 | ManagementAuth | `{User, PasswordHash}`，用於`/manage/*`端點 |
-| STUNServers | STUN伺服器URI列表（`stun:host:port`） |
+| STUNServers | STUN伺服器URI列表（`stun:host:port`或`stun://host:port`）；主機可以是IP literal或DNS主機名 |
 | STUNRequestTimeoutSeconds | 每次STUN請求的超時時間 |
 | STUNRefreshIntervalSeconds | STUN候選位址刷新間隔 |
 | PollIntervalSeconds | Edge輪詢snapshot的間隔 |
@@ -172,7 +172,7 @@ STUN URI僅接受IP literal：`stun:203.0.113.10:3478`或`stuns:[2001:db8::10]:5
 
 ### EdgeConfig Root
 
-Edge v2設定用`SuperNodeV2`參照取代舊版`DynamicRoute.SuperNode`區塊。
+Edge v2設定用`SuperNodeV2`參照取代舊版`DynamicRoute.SuperNode`區塊。包含`LegacySuper`金鑰或`DynamicRoute.SuperNode`金鑰（包括`UseSuperNode: false`）的v1 Edge設定會收到類型化的`legacy_udp_field`錯誤；它不會靜默地變為static模式。
 
 ### SuperNodeV2
 
@@ -201,6 +201,10 @@ Error: control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode 
 1. 產生新的v2設定：`./etherguard-go -mode gencfg -cfgmode super -config gensuper.yaml`
 2. 檢查產生的`EgNet_super.yaml`和edge YAML。
 3. 使用`-mode super -config EgNet_super.yaml`啟動。
+
+## VPP狀態
+
+VPP整合在此版本中被排除且未驗證。沒有配備libmemif的主機執行過`make vpp`。遷移涉及`device/`、`main_edge.go`和`main_super.go`，因此VPP建構或運行時回歸是可能的。在任何發布前，請在有libmemif的主機上驗證`make vpp`。
 
 ## HTTP Manage API
 

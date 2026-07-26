@@ -272,3 +272,97 @@ func mergeMaps(maps ...map[string]bool) map[string]bool {
 	}
 	return result
 }
+
+// --- non-vpp-exit-issues Task 6 contract tests ---
+
+// TestDocsSTUNURIAcceptsHostnames verifies that the STUN documentation
+// describes both stun:host:port and stun://host:port URI forms and
+// mentions DNS hostname support. Source: mtypes/http_control.go
+// ValidateSTUNURI (line 637) accepts both forms and validates hosts via
+// validSTUNHostname; device/super_stun.go resolveAddresses (line 120)
+// resolves DNS at runtime.
+func TestDocsSTUNURIAcceptsHostnames(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		if !strings.Contains(content, "stun://") {
+			t.Errorf("%s: STUN section should mention stun://host:port URI form", doc)
+		}
+		// Must not claim STUN URIs are IP-literal-only. The phrase may
+		// legitimately appear in the generic endpoint (conn/conn.go) context,
+		// so we do a doc-wide check that it is absent.
+		if strings.Contains(content, "IP literals only") {
+			t.Errorf("%s: must not claim 'IP literals only' (STUN now accepts DNS hostnames)", doc)
+		}
+	}
+}
+
+// TestDocsSSEPollingIsFallbackOnly verifies that the SSE documentation
+// describes polling as fallback-only, not as an always-on dedicated
+// goroutine. Source: device/super_http_client.go Sync (line 362)
+// starts polling only after stream failure and cancels it on reconnect.
+func TestDocsSSEPollingIsFallbackOnly(t *testing.T) {
+	t.Parallel()
+	stalePhrases := []string{
+		"dedicated polling goroutine runs alongside",
+		"always-on",
+		"polling goroutine runs alongside SSE",
+	}
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		lower := strings.ToLower(content)
+		for _, phrase := range stalePhrases {
+			if strings.Contains(lower, strings.ToLower(phrase)) {
+				t.Errorf("%s: stale polling wording found: %q (polling is fallback-only)", doc, phrase)
+			}
+		}
+	}
+}
+
+// TestDocsRejectedLegacyFieldsEnumerated verifies that both
+// ListenPort_EdgeAPI and ListenPort_ManageAPI are mentioned in the
+// documentation as rejected legacy fields. Source: main_super.go
+// legacyUDPFieldPresent (line 612) rejects all seven v1 field names.
+func TestDocsRejectedLegacyFieldsEnumerated(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		if !strings.Contains(content, "ListenPort_EdgeAPI") {
+			t.Errorf("%s: ListenPort_EdgeAPI not mentioned as rejected field", doc)
+		}
+		if !strings.Contains(content, "ListenPort_ManageAPI") {
+			t.Errorf("%s: ListenPort_ManageAPI not mentioned as rejected field", doc)
+		}
+	}
+}
+
+// TestDocsVPPExcluded verifies that VPP exclusion is documented.
+// Source: HANDOVER.md lines 12-17 — make vpp was never validated on
+// any libmemif-equipped host.
+func TestDocsVPPExcluded(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		lower := strings.ToLower(content)
+		if !strings.Contains(lower, "vpp") {
+			t.Errorf("%s: VPP exclusion statement not found", doc)
+		}
+	}
+}
+
+// TestDocsEdgeLegacyRejection verifies that Edge config legacy rejection
+// (LegacySuper key, DynamicRoute.SuperNode key) is documented.
+// Source: mtypes/http_control.go EdgeConfigV2.UnmarshalYAML (line 609)
+// rejects LegacySuper and DynamicRoute.SuperNode by key presence.
+func TestDocsEdgeLegacyRejection(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		if !strings.Contains(content, "LegacySuper") {
+			t.Errorf("%s: LegacySuper rejection not documented for Edge config", doc)
+		}
+		if !strings.Contains(content, "DynamicRoute.SuperNode") {
+			t.Errorf("%s: DynamicRoute.SuperNode rejection not documented for Edge config", doc)
+		}
+	}
+}
