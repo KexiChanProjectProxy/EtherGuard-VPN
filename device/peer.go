@@ -167,7 +167,7 @@ type filterwindow struct {
 }
 
 func (f *filterwindow) Push(e float64) float64 {
-	f.Resize(f.device.SuperConfig.DampingFilterRadius*2 + 1)
+	f.Resize(f.device.dampingFilterRadius*2 + 1)
 	f.Lock()
 	defer f.Unlock()
 	if f.size < 3 || e >= mtypes.Infinity {
@@ -553,7 +553,7 @@ func (peer *Peer) Stop() {
 }
 
 func (peer *Peer) SetPSK(psk NoisePresharedKey) {
-	if !peer.device.IsSuperNode && peer.ID < mtypes.NodeID_Special && peer.device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+	if peer.ID < mtypes.NodeID_Special && peer.device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		peer.device.log.Verbosef("Preshared keys disabled in P2P mode.")
 		return
 	}
@@ -656,9 +656,6 @@ func (peer *Peer) GetEndpointDstStr() string {
 }
 
 func (device *Device) SaveToConfig(peer *Peer, endpoint conn.Endpoint) {
-	if device.IsSuperNode { //Can't use in super mode
-		return
-	}
 	if peer.StaticConn { //static conn do not write new endpoint to config
 		return
 	}

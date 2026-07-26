@@ -45,34 +45,6 @@ type EdgeConfig struct {
 	Peers                 []PeerInfo       `yaml:"Peers"`
 }
 
-// SuperConfig is retained for backward parsing compatibility during the
-// migration window. It only carries the HTTP/control-plane settings; the
-// UDP-only fields (PrivKeyV4/V6, ListenPort, FwMark, Endpoint, API_Prefix)
-// have been removed because the v2 control plane no longer needs them.
-// Each Edge's PSKey (kept as ControlPSKey for clarity in v2) is the HMAC
-// secret used by Control API v2 request signing. It MUST NEVER appear in
-// any JSON-serialized API model.
-type SuperConfig struct {
-	NodeName                string                  `yaml:"NodeName"`
-	PostScript              string                  `yaml:"PostScript"`
-	ListenPort_EdgeAPI      string                  `yaml:"ListenPort_EdgeAPI"`
-	ListenPort_ManageAPI    string                  `yaml:"ListenPort_ManageAPI"`
-	DisableAf               conn.EnabledAf          `yaml:"DisabledAf"`
-	RePushConfigInterval    float64                 `yaml:"RePushConfigInterval"`
-	HttpPostInterval        float64                 `yaml:"HttpPostInterval"`
-	PeerAliveTimeout        float64                 `yaml:"PeerAliveTimeout"`
-	SendPingInterval        float64                 `yaml:"SendPingInterval"`
-	DampingFilterRadius     uint64                  `yaml:"DampingFilterRadius"`
-	LogLevel                LoggerInfo              `yaml:"LogLevel"`
-	Passwords               Passwords               `yaml:"Passwords"`
-	GraphRecalculateSetting GraphRecalculateSetting `yaml:"GraphRecalculateSetting"`
-	NextHopTable            NextHopTable            `yaml:"NextHopTable"`
-	EdgeTemplate            string                  `yaml:"EdgeTemplate"`
-	UsePSKForInterEdge      bool                    `yaml:"UsePSKForInterEdge"`
-	ResetEndPointInterval   float64                 `yaml:"ResetEndPointInterval"`
-	Peers                   []SuperPeerInfo         `yaml:"Peers"`
-}
-
 type Passwords struct {
 	ShowState   string `yaml:"ShowState"`
 	AddPeer     string `yaml:"AddPeer"`

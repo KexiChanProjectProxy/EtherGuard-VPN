@@ -480,83 +480,67 @@ func (peer *Peer) RoutineSequentialReceiver() {
 			}
 			goto skip
 		}
-		if device.IsSuperNode {
-			if packet_type.IsControl_Edge2Super() {
-				should_process = true
-			} else {
-				device.log.Errorf("received unsupported packet_type %v S:%v From:%v IP:%v", packet_type, src_nodeID, peer.ID.ToString(), peer.endpoint.DstToString())
-				goto skip
-			}
+		// Set should_receive and should_process
+		if packet_type.IsNormal() {
 			switch dst_nodeID {
-			case mtypes.NodeID_SuperNode:
-				should_process = true
-			default:
-				device.log.Errorf("received invalid dst_nodeID: %v S:%v From:%v IP:%v", dst_nodeID, src_nodeID, peer.ID.ToString(), peer.endpoint.DstToString())
-				goto skip
-			}
-		} else {
-			// Set should_receive and should_process
-			if packet_type.IsNormal() {
-				switch dst_nodeID {
-				case device.ID:
-					should_receive = true
-				case mtypes.NodeID_Broadcast:
-					should_receive = true
-				case mtypes.NodeID_Spread:
-					should_receive = true
-				}
-			}
-			if packet_type.IsControl_Edge2Edge() {
-				switch dst_nodeID {
-				case device.ID:
-					should_process = true
-				case mtypes.NodeID_Broadcast:
-					should_process = true
-				case mtypes.NodeID_Spread:
-					should_process = true
-				}
-			}
-			if packet_type.IsControl_Super2Edge() {
-				if peer.ID == mtypes.NodeID_SuperNode {
-					switch dst_nodeID {
-					case device.ID:
-						should_process = true
-					case mtypes.NodeID_SuperNode:
-						should_process = true
-					}
-
-				} else {
-					device.log.Errorf("received ServerUpdate packet from non supernode S:%v From:%v IP:%v", src_nodeID, peer.ID.ToString(), peer.endpoint.DstToString())
-					goto skip
-				}
-			}
-
-			// Set should_transfer
-			switch dst_nodeID {
-			case mtypes.NodeID_Broadcast:
-				should_transfer = true
-			case mtypes.NodeID_Spread:
-				packet := elem.packet[path.EgHeaderLen:] //packet body
-				if device.CheckNoDup(packet) {
-					should_transfer = true
-				} else {
-					if device.LogLevel.LogTransit {
-						fmt.Printf("Transit: Duplicate packet dropped. S:%v D:%v From:%v \n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID)
-					}
-					goto skip
-				}
 			case device.ID:
-				should_transfer = false
-			case mtypes.NodeID_SuperNode:
-				should_transfer = false
-			case mtypes.NodeID_Invalid:
-				should_transfer = false
-			default:
-				if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
-					should_transfer = true
-				} else {
-					device.log.Verbosef("No route to peer ID %v", dst_nodeID)
+				should_receive = true
+			case mtypes.NodeID_Broadcast:
+				should_receive = true
+			case mtypes.NodeID_Spread:
+				should_receive = true
+			}
+		}
+		if packet_type.IsControl_Edge2Edge() {
+			switch dst_nodeID {
+			case device.ID:
+				should_process = true
+			case mtypes.NodeID_Broadcast:
+				should_process = true
+			case mtypes.NodeID_Spread:
+				should_process = true
+			}
+		}
+		if packet_type.IsControl_Super2Edge() {
+			if peer.ID == mtypes.NodeID_SuperNode {
+				switch dst_nodeID {
+				case device.ID:
+					should_process = true
+				case mtypes.NodeID_SuperNode:
+					should_process = true
 				}
+
+			} else {
+				device.log.Errorf("received ServerUpdate packet from non supernode S:%v From:%v IP:%v", src_nodeID, peer.ID.ToString(), peer.endpoint.DstToString())
+				goto skip
+			}
+		}
+
+		// Set should_transfer
+		switch dst_nodeID {
+		case mtypes.NodeID_Broadcast:
+			should_transfer = true
+		case mtypes.NodeID_Spread:
+			packet := elem.packet[path.EgHeaderLen:] //packet body
+			if device.CheckNoDup(packet) {
+				should_transfer = true
+			} else {
+				if device.LogLevel.LogTransit {
+					fmt.Printf("Transit: Duplicate packet dropped. S:%v D:%v From:%v \n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID)
+				}
+				goto skip
+			}
+		case device.ID:
+			should_transfer = false
+		case mtypes.NodeID_SuperNode:
+			should_transfer = false
+		case mtypes.NodeID_Invalid:
+			should_transfer = false
+		default:
+			if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
+				should_transfer = true
+			} else {
+				device.log.Verbosef("No route to peer ID %v", dst_nodeID)
 			}
 		}
 		if should_transfer {

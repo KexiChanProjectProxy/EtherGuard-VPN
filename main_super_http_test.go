@@ -356,28 +356,15 @@ func TestSuperGracefulShutdown(t *testing.T) {
 }
 
 // TestSuperRejectsLegacyV1Config proves a YAML with any of the v1 UDP-only
-// top-level fields (PrivKeyV4, PrivKeyV6, ListenPort, FwMark, API_Prefix)
+// top-level fields (PrivKeyV4, PrivKeyV6, ListenPort, FwMark, API_Prefix,
+// ListenPort_EdgeAPI, ListenPort_ManageAPI)
 // is rejected with a typed mtypes.ControlV2ErrLegacyUDPField error before
 // any state is built. The error message must point at v2 migration so
 // operators have an actionable signal.
 func TestSuperRejectsLegacyV1Config(t *testing.T) {
-	for _, field := range []string{"PrivKeyV4", "PrivKeyV6", "ListenPort", "FwMark", "API_Prefix"} {
+	for _, field := range []string{"PrivKeyV4", "PrivKeyV6", "ListenPort", "FwMark", "API_Prefix", "ListenPort_EdgeAPI", "ListenPort_ManageAPI"} {
 		t.Run(field, func(t *testing.T) {
-			legacy := fmt.Sprintf(`NodeName: legacy-super
-%s: dummy-value
-ListenPort_EdgeAPI: ":0"
-ListenPort_ManageAPI: ":0"
-RePushConfigInterval: 10
-HttpPostInterval: 0
-PeerAliveTimeout: 70
-SendPingInterval: 10
-Passwords:
-  ShowState: ""
-  AddPeer: ""
-  DelPeer: ""
-  UpdatePeer: ""
-  UpdateSuper: ""
-`, field)
+			legacy := fmt.Sprintf("NodeName: legacy-super\n%s: dummy-value\n", field)
 			path := writeRawYAML(t, legacy)
 			err := Super(path, false, false, "linux")
 			if err == nil {
@@ -391,6 +378,20 @@ Passwords:
 			}
 			if !strings.Contains(err.Error(), "v2") {
 				t.Fatalf("error message must mention v2 migration; got %q", err.Error())
+			}
+		})
+	}
+}
+
+func TestLegacyUDPFieldPresentDetectsRetiredListenerNames(t *testing.T) {
+	for _, field := range []string{"ListenPort_EdgeAPI", "ListenPort_ManageAPI"} {
+		t.Run(field, func(t *testing.T) {
+			path := writeRawYAML(t, fmt.Sprintf("NodeName: legacy-super\n%s: :0\n", field))
+
+			present, actual := legacyUDPFieldPresent(path)
+
+			if !present || actual != field {
+				t.Fatalf("legacyUDPFieldPresent() = (%t, %q), want (true, %q)", present, actual, field)
 			}
 		})
 	}

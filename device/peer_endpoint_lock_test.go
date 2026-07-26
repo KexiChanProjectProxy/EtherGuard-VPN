@@ -41,7 +41,7 @@ func TestSetEndpointFromPacket_doesNotHoldPeerLockDuringLocalAddressProbe(t *tes
 	}
 	peer := &Peer{
 		ID:     mtypes.NodeID_SuperNode,
-		device: &Device{IsSuperNode: true},
+		device: &Device{EdgeConfig: &mtypes.EdgeConfig{}},
 	}
 	setDone := make(chan struct{})
 	go func() {

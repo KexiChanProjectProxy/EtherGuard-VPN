@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -146,55 +144,35 @@ func (device *Device) CheckNoDup(packet []byte) bool {
 	return !ok
 }
 
-func (device *Device) process_received(msg_type path.Usage, peer *Peer, body []byte) (err error) {
-	if device.IsSuperNode {
-		switch msg_type {
-		case path.Register:
-			if content, err := mtypes.ParseRegisterMsg(body); err == nil {
-				return device.server_process_RegisterMsg(peer, content)
-			} else {
-				return err
-			}
-		case path.PongPacket:
-			if content, err := mtypes.ParsePongMsg(body); err == nil {
-				return device.server_process_Pong(peer, content)
-			} else {
-				return err
-			}
-		default:
-			err = errors.New("not a valid msg_type")
+func (device *Device) process_received(msgType path.Usage, peer *Peer, body []byte) error {
+	switch msgType {
+	case path.PingPacket:
+		content, err := mtypes.ParsePingMsg(body)
+		if err != nil {
+			return err
 		}
-	} else {
-		switch msg_type {
-		case path.PingPacket:
-			if content, err := mtypes.ParsePingMsg(body); err == nil {
-				return device.process_ping(peer, content)
-			} else {
-				return err
-			}
-		case path.PongPacket:
-			if content, err := mtypes.ParsePongMsg(body); err == nil {
-				return device.process_pong(peer, content)
-			} else {
-				return err
-			}
-		case path.QueryPeer:
-			if content, err := mtypes.ParseQueryPeerMsg(body); err == nil {
-				return device.process_RequestPeerMsg(content)
-			} else {
-				return err
-			}
-		case path.BroadcastPeer:
-			if content, err := mtypes.ParseBoardcastPeerMsg(body); err == nil {
-				return device.process_BoardcastPeerMsg(peer, content)
-			} else {
-				return err
-			}
-		default:
-			err = errors.New("not a valid msg_type")
+		return device.process_ping(peer, content)
+	case path.PongPacket:
+		content, err := mtypes.ParsePongMsg(body)
+		if err != nil {
+			return err
 		}
+		return device.process_pong(peer, content)
+	case path.QueryPeer:
+		content, err := mtypes.ParseQueryPeerMsg(body)
+		if err != nil {
+			return err
+		}
+		return device.process_RequestPeerMsg(content)
+	case path.BroadcastPeer:
+		content, err := mtypes.ParseBoardcastPeerMsg(body)
+		if err != nil {
+			return err
+		}
+		return device.process_BoardcastPeerMsg(peer, content)
+	default:
+		return errors.New("not a valid msg_type")
 	}
-	return
 }
 
 func (device *Device) sprint_received(msg_type path.Usage, body []byte) string {
@@ -260,61 +238,6 @@ func (device *Device) SendPing(peer *Peer, times int, replies int, interval floa
 		device.SendPacket(peer, usage, ttl, packet, MessageTransportOffsetContent)
 		time.Sleep(mtypes.S2TD(interval))
 	}
-}
-
-func compareVersion(v1 string, v2 string) bool {
-	if strings.Contains(v1, "-") {
-		v1 = strings.Split(v1, "-")[0]
-	}
-	if strings.Contains(v2, "-") {
-		v2 = strings.Split(v2, "-")[0]
-	}
-	return v1 == v2
-}
-
-func (device *Device) server_process_RegisterMsg(peer *Peer, content mtypes.RegisterMsg) error {
-	ServerUpdateMsg := mtypes.ServerUpdateMsg{
-		Node_id: peer.ID,
-		Action:  mtypes.NoAction,
-		Code:    0,
-		Params:  "",
-	}
-	if peer.ID != content.Node_id {
-		ServerUpdateMsg = mtypes.ServerUpdateMsg{
-			Node_id: peer.ID,
-			Action:  mtypes.ThrowError,
-			Code:    int(syscall.EPERM),
-			Params:  fmt.Sprintf("Your nodeID: %v is not match with registered nodeID: %v", content.Node_id, peer.ID),
-		}
-	}
-	if !compareVersion(content.Version, device.Version) {
-		ServerUpdateMsg = mtypes.ServerUpdateMsg{
-			Node_id: peer.ID,
-			Action:  mtypes.ThrowError,
-			Code:    int(syscall.ENOSYS),
-			Params:  fmt.Sprintf("Your version: \"%v\" is not compatible with our version: \"%v\"", content.Version, device.Version),
-		}
-	}
-	if ServerUpdateMsg.Action != mtypes.NoAction {
-		body, err := mtypes.GetByte(&ServerUpdateMsg)
-		if err != nil {
-			return err
-		}
-		buf := make([]byte, path.EgHeaderLen+len(body))
-		header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
-		header.SetSrc(device.ID)
-		copy(buf[path.EgHeaderLen:], body)
-		header.SetDst(mtypes.NodeID_SuperNode)
-		device.SendPacket(peer, path.ServerUpdate, 0, buf, MessageTransportOffsetContent)
-		return nil
-	}
-	device.Chan_server_register <- content
-	return nil
-}
-
-func (device *Device) server_process_Pong(peer *Peer, content mtypes.PongMsg) error {
-	device.Chan_server_pong <- content
-	return nil
 }
 
 func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
@@ -566,16 +489,10 @@ func (device *Device) RoutineSpreadAllMyNeighbor() {
 }
 
 func (device *Device) RoutineResetEndpoint() {
-	var ResetEndPointInterval float64
-	if device.IsSuperNode {
-		ResetEndPointInterval = device.SuperConfig.ResetEndPointInterval
-	} else {
-		ResetEndPointInterval = device.EdgeConfig.ResetEndPointInterval
-	}
-	if ResetEndPointInterval <= 0.01 {
+	if device.EdgeConfig.ResetEndPointInterval <= 0.01 {
 		return
 	}
-	timeout := mtypes.S2TD(ResetEndPointInterval)
+	timeout := mtypes.S2TD(device.EdgeConfig.ResetEndPointInterval)
 	for {
 		for _, peer := range device.allPeersSnapshot() {
 			static, connURL, connAF := peer.endpointRetryConfig()

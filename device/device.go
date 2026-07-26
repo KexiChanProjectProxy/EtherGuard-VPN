@@ -81,14 +81,11 @@ type Device struct {
 	chan_send_packet  chan *packet_send_params
 	sendQueueDrops    atomic.Uint64
 
-	EdgeConfigPath  string
-	EdgeConfig      *mtypes.EdgeConfig
-	SuperConfigPath string
-	SuperConfig     *mtypes.SuperConfig
-	enabledAf       conn.EnabledAf
+	EdgeConfigPath      string
+	EdgeConfig          *mtypes.EdgeConfig
+	dampingFilterRadius uint64
+	enabledAf           conn.EnabledAf
 
-	Chan_server_register    chan mtypes.RegisterMsg
-	Chan_server_pong        chan mtypes.PongMsg
 	Chan_save_config        chan struct{}
 	Chan_Device_Initialized chan struct{}
 	Chan_SendPingStart      chan struct{}
@@ -98,13 +95,12 @@ type Device struct {
 	indexTable    IndexTable
 	cookieChecker CookieChecker
 
-	IsSuperNode bool
-	ID          mtypes.Vertex
-	graph       *path.IG
-	l2fib       sync.Map
-	LogLevel    mtypes.LoggerInfo
-	DupData     fixed_time_cache.Cache
-	Version     string
+	ID       mtypes.Vertex
+	graph    *path.IG
+	l2fib    sync.Map
+	LogLevel mtypes.LoggerInfo
+	DupData  fixed_time_cache.Cache
+	Version  string
 
 	HttpPostCount uint64
 	JWTSecret     mtypes.JWTSecret
@@ -329,7 +325,7 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	return nil
 }
 
-func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *Logger, graph *path.IG, IsSuperNode bool, configpath string, econfig *mtypes.EdgeConfig, sconfig *mtypes.SuperConfig, superevents *mtypes.SUPER_Events, version string) *Device {
+func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *Logger, graph *path.IG, configpath string, econfig *mtypes.EdgeConfig, version string) *Device {
 	device := new(Device)
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan int)
@@ -346,7 +342,6 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.peers.IDMap = make(map[mtypes.Vertex]*Peer)
 	device.peers.SuperPeer = make(map[NoisePublicKey]*Peer)
-	device.IsSuperNode = IsSuperNode
 	device.ID = id
 	device.graph = graph
 	device.Version = version
@@ -362,46 +357,29 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 	device.PopulatePools()
 	device.Chan_Device_Initialized = make(chan struct{}, 1<<5)
 	device.chan_send_packet = make(chan *packet_send_params, QueueOutboundSize)
-	if IsSuperNode {
-		device.SuperConfigPath = configpath
-		device.SuperConfig = sconfig
-		device.EdgeConfig = &mtypes.EdgeConfig{}
-		device.EdgeConfig.Interface.MTU = DefaultMTU
-		device.EdgeConfig.DynamicRoute.PeerAliveTimeout = device.SuperConfig.PeerAliveTimeout
-		device.Chan_server_pong = superevents.Event_server_pong
-		device.Chan_server_register = superevents.Event_server_register
-		device.LogLevel = sconfig.LogLevel
-	} else {
-		device.EdgeConfigPath = configpath
-		device.EdgeConfig = econfig
-		device.SuperConfig = &mtypes.SuperConfig{}
-		device.DupData = *fixed_time_cache.NewCache(mtypes.S2TD(econfig.DynamicRoute.DupCheckTimeout), false, mtypes.S2TD(1))
-		device.event_tryendpoint = make(chan struct{}, 1<<6)
-		device.Chan_save_config = make(chan struct{}, 1<<5)
-		device.Chan_SendPingStart = make(chan struct{}, 1<<5)
-		device.Chan_SendRegisterStart = make(chan struct{}, 1<<5)
-		device.Chan_HttpPostStart = make(chan struct{}, 1<<5)
-		device.LogLevel = econfig.LogLevel
-		device.SuperConfig.DampingFilterRadius = device.EdgeConfig.DynamicRoute.DampingFilterRadius
-
-	}
+	device.EdgeConfigPath = configpath
+	device.EdgeConfig = econfig
+	device.dampingFilterRadius = econfig.DynamicRoute.DampingFilterRadius
+	device.DupData = *fixed_time_cache.NewCache(mtypes.S2TD(econfig.DynamicRoute.DupCheckTimeout), false, mtypes.S2TD(1))
+	device.event_tryendpoint = make(chan struct{}, 1<<6)
+	device.Chan_save_config = make(chan struct{}, 1<<5)
+	device.Chan_SendPingStart = make(chan struct{}, 1<<5)
+	device.Chan_SendRegisterStart = make(chan struct{}, 1<<5)
+	device.Chan_HttpPostStart = make(chan struct{}, 1<<5)
+	device.LogLevel = econfig.LogLevel
 	go device.RoutineSendPacket()
 	go func() {
 		<-device.Chan_Device_Initialized
 		if device.LogLevel.LogInternal {
 			fmt.Printf("Internal: initialized, start background loops\n")
 		}
-		if IsSuperNode {
-			go device.RoutineResetEndpoint()
-		} else {
-			go device.RoutineTryReceivedEndpoint()
-			go device.RoutineDetectOfflineAndTryNextEndpoint()
-			go device.RoutineSendPing(device.Chan_SendPingStart)
-			go device.RoutineSpreadAllMyNeighbor()
-			go device.RoutineResetEndpoint()
-			go device.RoutineClearL2FIB()
-			go device.RoutineRecalculateNhTable()
-		}
+		go device.RoutineTryReceivedEndpoint()
+		go device.RoutineDetectOfflineAndTryNextEndpoint()
+		go device.RoutineSendPing(device.Chan_SendPingStart)
+		go device.RoutineSpreadAllMyNeighbor()
+		go device.RoutineResetEndpoint()
+		go device.RoutineClearL2FIB()
+		go device.RoutineRecalculateNhTable()
 	}()
 
 	// create queues
@@ -430,29 +408,13 @@ func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *L
 }
 
 func (device *Device) LookupPeerIDAtConfig(pk NoisePublicKey) (ID mtypes.Vertex, err error) {
-	if device.IsSuperNode {
-		var peerlist []mtypes.SuperPeerInfo
-		if device.SuperConfig == nil {
-			return 0, errors.New("superconfig is nil")
-		}
-		peerlist = device.SuperConfig.Peers
-		pkstr := pk.ToString()
-		for _, peerinfo := range peerlist {
-			if peerinfo.PubKey == pkstr {
-				return peerinfo.NodeID, nil
-			}
-		}
-	} else {
-		var peerlist []mtypes.PeerInfo
-		if device.EdgeConfig == nil {
-			return 0, errors.New("edgeconfig is nil")
-		}
-		peerlist = device.EdgeConfig.Peers
-		pkstr := pk.ToString()
-		for _, peerinfo := range peerlist {
-			if peerinfo.PubKey == pkstr {
-				return peerinfo.NodeID, nil
-			}
+	if device.EdgeConfig == nil {
+		return 0, errors.New("edgeconfig is nil")
+	}
+	pkstr := pk.ToString()
+	for _, peerinfo := range device.EdgeConfig.Peers {
+		if peerinfo.PubKey == pkstr {
+			return peerinfo.NodeID, nil
 		}
 	}
 

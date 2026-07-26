@@ -140,7 +140,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	EnabledAf := econfig.DisableAf.Disalbed2Enabled()
 
-	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, false, configPath, &econfig, nil, nil, Version)
+	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version)
 	defer the_device.Close()
 	if superNodeV2Enabled {
 		the_device.EnableSuperHTTP(econfigV2)

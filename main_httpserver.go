@@ -40,8 +40,6 @@ type http_shared_objects struct {
 	http_PeerState   map[string]*PeerState
 	http_PeerIPs     map[string]*HttpPeerLocalIP
 
-	http_sconfig *mtypes.SuperConfig
-
 	http_sconfig_path string
 	http_econfig_tmp  *mtypes.EdgeConfig
 

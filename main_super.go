@@ -614,7 +614,7 @@ func legacyUDPFieldPresent(configPath string) (bool, string) {
 	if err != nil {
 		return false, ""
 	}
-	for _, name := range []string{"PrivKeyV4", "PrivKeyV6", "ListenPort", "FwMark", "API_Prefix"} {
+	for _, name := range []string{"PrivKeyV4", "PrivKeyV6", "ListenPort", "FwMark", "API_Prefix", "ListenPort_EdgeAPI", "ListenPort_ManageAPI"} {
 		// Match top-level key (`^name:`) only — same-shape keys nested
 		// under v2 SuperNodeV2 etc. are legitimate.
 		if bytes.HasPrefix(raw, []byte(name+":")) ||
