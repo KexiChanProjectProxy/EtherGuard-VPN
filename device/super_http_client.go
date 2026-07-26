@@ -446,9 +446,12 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 			reconnect = nil
 			startStream()
 		case <-streamErr:
+			streamCancel()
 			streamDone = nil
 			streamErr = nil
 			streamCancel = nil
+			streamEvents = nil
+			streamConnected = nil
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
