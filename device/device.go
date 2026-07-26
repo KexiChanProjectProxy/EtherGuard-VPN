@@ -620,6 +620,9 @@ func (device *Device) Close() {
 	if device.controlCancel != nil {
 		device.controlCancel()
 	}
+	if device.superSTUN != nil {
+		device.superSTUN.Close()
+	}
 
 	device.tap.device.Close()
 	device.downLocked()

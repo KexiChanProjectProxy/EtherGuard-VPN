@@ -649,25 +649,56 @@ func ValidateSTUNURI(raw string) error {
 	if scheme != "stun" && scheme != "stuns" {
 		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "scheme must be stun or stuns, got %q", scheme)
 	}
-	host, portStr, err := net.SplitHostPort(rest)
+	authority := rest
+	if strings.HasPrefix(rest, "//") {
+		authority = strings.TrimPrefix(rest, "//")
+	}
+	if authority == "" || strings.ContainsAny(authority, "/?#@") {
+		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid authority %q", authority)
+	}
+	host, portStr, err := net.SplitHostPort(authority)
 	if err != nil {
-		// Allow "stun:host:port" (RFC 7064 style without //).
-		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid host:port %q: %v", rest, err)
+		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid host:port %q: %v", authority, err)
 	}
 	if host == "" {
 		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "missing host")
 	}
-	if net.ParseIP(host) == nil {
-		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid IP host %q", host)
+	if net.ParseIP(host) == nil && !validSTUNHostname(host) {
+		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid host %q", host)
 	}
 	if portStr == "" {
 		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "missing port")
+	}
+	for _, character := range portStr {
+		if character < '0' || character > '9' {
+			return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid port %q", portStr)
+		}
 	}
 	p, err := strconv.Atoi(portStr)
 	if err != nil || p <= 0 || p > 65535 {
 		return newControlV2Error(ControlV2ErrInvalidSTUNServer, "", "invalid port %q", portStr)
 	}
 	return nil
+}
+
+func validSTUNHostname(host string) bool {
+	if strings.HasSuffix(host, ".") {
+		host = strings.TrimSuffix(host, ".")
+	}
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // splitHostPort accepts "ip:port" or "[v6]:port".

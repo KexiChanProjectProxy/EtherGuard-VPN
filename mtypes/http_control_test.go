@@ -278,6 +278,54 @@ func TestControlV2ParametersInvalidSTUNURI(t *testing.T) {
 	}
 }
 
+func TestValidateSTUNURIAcceptsDNSHostnamesAndAuthorities(t *testing.T) {
+	valid := []string{
+		"stun:stun.example.com:3478",
+		"stun://stun.example.com:3478",
+		"stuns:stun.example.com:5349",
+		"stun:[2001:db8::1]:3478",
+	}
+	for _, raw := range valid {
+		t.Run(raw, func(t *testing.T) {
+			// When
+			err := ValidateSTUNURI(raw)
+
+			// Then
+			if err != nil {
+				t.Fatalf("ValidateSTUNURI(%q): %v", raw, err)
+			}
+		})
+	}
+}
+
+func TestValidateSTUNURIReturnsTypedErrorsForMalformedAuthorities(t *testing.T) {
+	invalid := []string{
+		"",
+		"http://stun.example.com:3478",
+		"stun://:3478",
+		"stun:stun.example.com",
+		"stun://stun.example.com:notaport",
+		"stun://stun.example.com:0",
+		"stun://bad_host.example.com:3478",
+		"stun://user@stun.example.com:3478",
+		"stun://stun.example.com:3478/path",
+	}
+	for _, raw := range invalid {
+		t.Run(raw, func(t *testing.T) {
+			// When
+			err := ValidateSTUNURI(raw)
+
+			// Then
+			if !IsControlV2Error(err) {
+				t.Fatalf("ValidateSTUNURI(%q) error = %T, want typed ControlV2Error", raw, err)
+			}
+			if got := ErrorCode(err); got != ControlV2ErrInvalidSTUNServer {
+				t.Fatalf("ValidateSTUNURI(%q) code = %v, want %v", raw, got, ControlV2ErrInvalidSTUNServer)
+			}
+		})
+	}
+}
+
 // TestControlV2ParametersInvalidDuration ensures zero/negative timings are
 // rejected.
 func TestControlV2ParametersInvalidDuration(t *testing.T) {

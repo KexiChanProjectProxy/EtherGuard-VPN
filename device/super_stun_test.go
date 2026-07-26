@@ -2,6 +2,7 @@ package device
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -29,6 +30,7 @@ type sameBindSTUNFake struct {
 	responses map[string]net.IP
 	delay     map[string]time.Duration
 	incoming  chan []byte
+	sent      chan string
 	closed    chan struct{}
 	closeOnce sync.Once
 }
@@ -39,6 +41,7 @@ func newSameBindSTUNFake(port uint16) *sameBindSTUNFake {
 		responses: make(map[string]net.IP),
 		delay:     make(map[string]time.Duration),
 		incoming:  make(chan []byte, 8),
+		sent:      make(chan string, 8),
 		closed:    make(chan struct{}),
 	}
 }
@@ -58,6 +61,10 @@ func (b *sameBindSTUNFake) ParseEndpoint(address string) (conn.Endpoint, error) 
 	return stunTestEndpoint{address: address}, nil
 }
 func (b *sameBindSTUNFake) Send(packet []byte, endpoint conn.Endpoint) error {
+	select {
+	case b.sent <- endpoint.DstToString():
+	default:
+	}
 	var tx [stun.TransactionIDSize]byte
 	copy(tx[:], packet[8:20])
 	mappedIP, ok := b.responses[endpoint.DstToString()]
@@ -84,6 +91,150 @@ func (b *sameBindSTUNFake) Send(packet []byte, endpoint conn.Endpoint) error {
 		}
 	}()
 	return nil
+}
+
+func TestSuperSTUNResolvesHostnameBeforeSendingLiteralEndpoint(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40100)
+	bind.responses["203.0.113.80:3478"] = net.ParseIP("198.51.100.80")
+	device := &Device{}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	resolverCalled := false
+	manager.resolver = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		resolverCalled = true
+		if host != "stun.example.test" {
+			t.Fatalf("resolver host = %q", host)
+		}
+		return []net.IPAddr{{IP: net.ParseIP("203.0.113.80")}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiveSTUNTestPackets(ctx, manager, bind.receive)
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun://stun.example.test:3478"}, 100*time.Millisecond)
+
+	// Then
+	if !resolverCalled {
+		t.Fatal("hostname resolver was not called")
+	}
+	if len(candidates) != 1 || candidates[0].Address != "198.51.100.80:40100" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
+func TestSuperSTUNBypassesResolverForLiteralURI(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40101)
+	bind.responses["203.0.113.81:3478"] = net.ParseIP("198.51.100.81")
+	device := &Device{}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	manager.resolver = func(context.Context, string) ([]net.IPAddr, error) {
+		t.Fatal("literal URI unexpectedly invoked resolver")
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiveSTUNTestPackets(ctx, manager, bind.receive)
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun:203.0.113.81:3478"}, 100*time.Millisecond)
+
+	// Then
+	if len(candidates) != 1 || candidates[0].Address != "198.51.100.81:40101" {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
+func TestSuperSTUNDiscoveryReturnsPromptlyWhenCallerCancelsResolver(t *testing.T) {
+	// Given
+	manager := NewSuperSTUNManager(&Device{})
+	resolverStarted := make(chan struct{})
+	resolverStopped := make(chan struct{})
+	manager.resolver = func(ctx context.Context, _ string) ([]net.IPAddr, error) {
+		close(resolverStarted)
+		<-ctx.Done()
+		close(resolverStopped)
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan []mtypes.ControlV2Candidate, 1)
+	go func() { result <- manager.Discover(ctx, []string{"stun:stun.example.test:3478"}, time.Second) }()
+	<-resolverStarted
+
+	// When
+	cancel()
+
+	// Then
+	select {
+	case candidates := <-result:
+		if len(candidates) != 0 {
+			t.Fatalf("candidates = %#v", candidates)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("discovery did not return after caller cancellation")
+	}
+	select {
+	case <-resolverStopped:
+	case <-time.After(time.Second):
+		t.Fatal("resolver did not observe caller cancellation")
+	}
+}
+
+func TestSuperSTUNResolverErrorPublishesNoCandidatesOrPendingRequests(t *testing.T) {
+	// Given
+	manager := NewSuperSTUNManager(&Device{})
+	manager.resolver = func(context.Context, string) ([]net.IPAddr, error) {
+		return nil, errors.New("resolver unavailable")
+	}
+
+	// When
+	candidates := manager.Discover(context.Background(), []string{"stun:stun.example.test:3478"}, time.Second)
+
+	// Then
+	if len(candidates) != 0 {
+		t.Fatalf("candidates = %#v", candidates)
+	}
+	manager.mu.Lock()
+	pending := len(manager.pending)
+	manager.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending transactions = %d, want 0", pending)
+	}
+}
+
+func TestSuperSTUNCloseCancelsInFlightRequestAndDrainsPending(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40102)
+	device := &Device{}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	result := make(chan []mtypes.ControlV2Candidate, 1)
+	go func() {
+		result <- manager.Discover(context.Background(), []string{"stun:203.0.113.82:3478"}, time.Second)
+	}()
+	<-bind.sent
+
+	// When
+	manager.Close()
+
+	// Then
+	select {
+	case candidates := <-result:
+		if len(candidates) != 0 {
+			t.Fatalf("candidates = %#v", candidates)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("in-flight STUN request did not return after manager close")
+	}
+	manager.mu.Lock()
+	pending := len(manager.pending)
+	manager.mu.Unlock()
+	if pending != 0 {
+		t.Fatalf("pending transactions = %d, want 0", pending)
+	}
 }
 func (b *sameBindSTUNFake) receive(packet []byte) (int, conn.Endpoint, error) {
 	select {

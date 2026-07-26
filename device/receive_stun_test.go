@@ -74,6 +74,26 @@ func TestReceiveDemultiplexesSTUNBeforeWireGuard(t *testing.T) {
 			t.Fatal("bad STUN magic cookie was accepted")
 		}
 	})
+
+	t.Run("rejects delivery after manager close", func(t *testing.T) {
+		// Given
+		manager := newPendingSTUNManagerForTest(transactionID)
+		manager.Close()
+
+		// When
+		handled := manager.HandlePacket(valid.Raw)
+
+		// Then
+		if handled {
+			t.Fatal("closed manager accepted stale STUN response")
+		}
+		manager.mu.Lock()
+		pending := len(manager.pending)
+		manager.mu.Unlock()
+		if pending != 0 {
+			t.Fatalf("pending transactions = %d, want 0", pending)
+		}
+	})
 }
 
 func newPendingSTUNManagerForTest(transactionID [stun.TransactionIDSize]byte) *SuperSTUNManager {
