@@ -49,6 +49,7 @@ type ControlHTTPClient struct {
 	mu          sync.Mutex
 	current     *mtypes.ControlV2Snapshot
 	lastEventID string
+	refresh     chan struct{}
 }
 
 func NewControlHTTPClient(base, prefix string, id mtypes.Vertex, key string) *ControlHTTPClient {
@@ -63,6 +64,7 @@ func NewControlHTTPClient(base, prefix string, id mtypes.Vertex, key string) *Co
 		Jitter:     defaultJitter,
 		MinBackoff: defaultMinBackoff,
 		MaxBackoff: defaultMaxBackoff,
+		refresh:    make(chan struct{}, 1),
 	}
 }
 
@@ -182,6 +184,15 @@ func (c *ControlHTTPClient) Current() *mtypes.ControlV2Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.current
+}
+
+// RequestSnapshotRefresh asks Sync to fetch a new ETag-bearing snapshot. It is
+// non-blocking and coalesces requests while Sync is already fetching one.
+func (c *ControlHTTPClient) RequestSnapshotRefresh() {
+	select {
+	case c.refresh <- struct{}{}:
+	default:
+	}
 }
 
 // recordEventID tracks the most-recently delivered SSE event ID for replay on reconnect.
@@ -434,6 +445,10 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 			backoff = c.MinBackoff
 		case <-streamEvents:
 			stopPolling()
+			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
+				apply(snapshot)
+			}
+		case <-c.refresh:
 			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
 				apply(snapshot)
 			}
