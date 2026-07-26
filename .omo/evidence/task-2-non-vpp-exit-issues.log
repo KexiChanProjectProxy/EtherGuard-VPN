@@ -1,0 +1,46 @@
+Task 2 — serialized SSE-first synchronization
+
+RED PHASE
+Command:
+go test -race ./device -run 'TestControlHTTPClientSync(PollsOnlyWhileSSEUnavailable|SerializesApplyWhenEventAndPollOverlap)$' -count=1
+Output:
+FAIL github.com/KusakabeSi/EtherGuard-VPN/device [build failed]
+device/receive_stun_test.go:81:11: manager.Close undefined (type *SuperSTUNManager has no field or method Close)
+device/super_stun_test.go:103:10: manager.resolver undefined (type *SuperSTUNManager has no field or method resolver)
+
+The red run was blocked by concurrent out-of-scope SuperSTUNManager edits. After
+those edits completed, the focused tests compiled and the pre-implementation
+always-on poll topology would have violated the healthy-stream assertion.
+
+GREEN PHASE
+Command:
+go test -race ./device -run 'TestControlHTTPClientSync(PollsOnlyWhileSSEUnavailable|SerializesApplyWhenEventAndPollOverlap)$' -count=1
+Output:
+ok github.com/KusakabeSi/EtherGuard-VPN/device 1.523s
+
+QA HAPPY PATH
+- Held a healthy SSE response after its event-driven snapshot: snapshot request
+  count remained constant for 50ms (>3 poll intervals).
+- Dropped that stream: fallback polling advanced snapshot requests before the
+  bounded 100ms reconnect.
+- Held the replacement SSE response: snapshot request count again remained
+  constant for 50ms, proving reconnect cancels fallback polling.
+
+QA FAILURE PATH
+- Focused verification also ran TestControlHTTPClientSyncPollingFallback: three
+  HTTP 503 stream failures caused fallback snapshot progress and bounded retry.
+- TestControlHTTPClientMalformedSSENoState verified malformed SSE parsing does
+  not mutate snapshot state; cancellation remains context-driven.
+- TestControlHTTPClientSyncSerializesApplyWhenEventAndPollOverlap asserted a
+  maximum apply concurrency of one.
+
+FINAL VERIFICATION
+go test -race ./device -run 'Test(ControlHTTPClient|SuperHTTPRuntime)' -count=1
+ok github.com/KusakabeSi/EtherGuard-VPN/device 2.429s
+
+go build ./...
+go build: ok
+
+FOLLOW-UP SSE CONTEXT CLEANUP
+- Failed SSE reconnects now invoke their child context cancel function before clearing stream state, preventing cancelled children from remaining registered under Sync's parent context.
+- The failure transition also clears dead event and connection channels; `go test -race ./device -run 'Test(ControlHTTPClient|SuperHTTPRuntime)' -count=1` and `go build ./...` pass.

@@ -1,0 +1,46 @@
+# HTTP-only Super E2E deleted-peer convergence flake
+
+## Reproduction before the fix
+
+Command:
+
+```text
+go test -race -count=10 . -run 'TestHTTPOnlySuperEndToEnd'
+```
+
+Result: 8 failures in 28.635s, all at the deleted-peer convergence assertion.
+
+Focused causal regression before the fix:
+
+```text
+go test -race -count=1 . -run 'TestControlHTTPV2SSETerminates_whenHubCloses'
+--- FAIL: TestControlHTTPV2SSETerminates_whenHubCloses (1.01s)
+    super_control_http_test.go:891: SSE response did not terminate after hub close
+```
+
+## Root cause
+
+`ControlEventHub.Close` closed SSE subscribers, which stopped the renderer, but
+`ControlHTTPHandler.handleEvents` waited only for `r.Context().Done()`. The
+active HTTP response therefore remained open after a hub close. Edge B's
+`ControlHTTPClient.Sync` only enables polling after its SSE reader returns an
+error; it never observed one and retained peer 101. Instrumenting the original
+predicate showed `snapshot_removed=true peer_removed=false`, ruling out a
+stale authoritative snapshot/ETag response and a short convergence window.
+
+The fix selects on the renderer subscriber's `Done` channel as well as request
+cancellation, allowing the SSE response to end and the existing polling
+fallback to apply the deletion. The test harness also gives each already-closed
+edge its own existing three-second lifecycle check rather than reusing the
+shutdown operation's expired deadline; this does not alter the deleted-peer
+three-second convergence contract.
+
+## Verification after the fix
+
+```text
+go test -race -count=1 . -run 'TestControlHTTPV2SSETerminates_whenHubCloses'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.072s
+
+go test -race -count=20 . -run 'TestHTTPOnlySuperEndToEnd'
+ok   github.com/KusakabeSi/EtherGuard-VPN  19.254s
+```

@@ -1,0 +1,91 @@
+# Task 5 evidence
+
+## Red phase — retired listener pre-scan
+--- FAIL: TestLegacyUDPFieldPresentDetectsRetiredListenerNames (0.00s)
+    --- FAIL: TestLegacyUDPFieldPresentDetectsRetiredListenerNames/ListenPort_EdgeAPI (0.00s)
+        main_super_http_test.go:396: legacyUDPFieldPresent() = (false, ""), want (true, "ListenPort_EdgeAPI")
+    --- FAIL: TestLegacyUDPFieldPresentDetectsRetiredListenerNames/ListenPort_ManageAPI (0.00s)
+        main_super_http_test.go:396: legacyUDPFieldPresent() = (false, ""), want (true, "ListenPort_ManageAPI")
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	0.062s
+FAIL
+
+EXIT STATUS: 1
+
+## Intermediate compile failure — remaining Super paths removed
+
+# github.com/KusakabeSi/EtherGuard-VPN/device
+device/peer.go:556:18: peer.device.IsSuperNode undefined (type *Device has no field or method IsSuperNode)
+device/peer.go:659:12: device.IsSuperNode undefined (type *Device has no field or method IsSuperNode)
+device/receive.go:483:13: device.IsSuperNode undefined (type *Device has no field or method IsSuperNode)
+device/receivesendproc.go:150:12: device.IsSuperNode undefined (type *Device has no field or method IsSuperNode)
+device/receivesendproc.go:311:9: device.Chan_server_register undefined (type *Device has no field or method Chan_server_register)
+device/receivesendproc.go:316:9: device.Chan_server_pong undefined (type *Device has no field or method Chan_server_pong)
+FAIL	github.com/KusakabeSi/EtherGuard-VPN [build failed]
+FAIL
+# github.com/KusakabeSi/EtherGuard-VPN/device
+device/receivesendproc.go:13:2: "strings" imported and not used
+FAIL	github.com/KusakabeSi/EtherGuard-VPN [build failed]
+FAIL
+
+## Intermediate test fixture correction
+
+--- FAIL: TestSuperRejectsLegacyV1Config (0.01s)
+    --- FAIL: TestSuperRejectsLegacyV1Config/PrivKeyV4 (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigPrivKeyV4257862606/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/PrivKeyV6 (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigPrivKeyV64034553888/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/ListenPort (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigListenPort2582261106/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/FwMark (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigFwMark3264378769/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/API_Prefix (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigAPI_Prefix3600482649/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/ListenPort_EdgeAPI (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigListenPort_EdgeAPI3004138359/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+    --- FAIL: TestSuperRejectsLegacyV1Config/ListenPort_ManageAPI (0.00s)
+        main_super_http_test.go:376: expected *mtypes.ControlV2Error, got *fmt.wrapError: super: parse v2 config "/tmp/TestSuperRejectsLegacyV1ConfigListenPort_ManageAPI554567655/001/super.yaml": yaml: line 2: found a tab character that violates indentation
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	0.069s
+FAIL
+
+## Green phase — retired listener pre-scan and typed rejection
+
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.067s
+
+## QA — targeted device behavior and Super HTTP happy path
+
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	1.064s
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.187s
+
+## QA — package race suite, build, vet, and retired-reference scan
+
+-test.shuffle 1785043690453290995
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x1 addr=0x0 pc=0xa3bae8]
+
+goroutine 608 [running]:
+github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).SaveToConfig(0xc000005208, 0xc000b55008, {0xc7ec08, 0xc0005a4ea0})
+	/home/kexi/EtherGuard-VPN/device/peer.go:662 +0xa8
+github.com/KusakabeSi/EtherGuard-VPN/device.(*Peer).SetEndpointFromPacket.func1(0xc000b55008, {0xc7ec08, 0xc0005a4ea0})
+	/home/kexi/EtherGuard-VPN/device/peer.go:602 +0x1e9
+github.com/KusakabeSi/EtherGuard-VPN/device.(*Peer).SetEndpointFromPacket(0xc000b55008, {0xc7ec08, 0xc0005a4ea0})
+	/home/kexi/EtherGuard-VPN/device/peer.go:605 +0x5c
+github.com/KusakabeSi/EtherGuard-VPN/device.TestSetEndpointFromPacket_doesNotHoldPeerLockDuringLocalAddressProbe.func1()
+	/home/kexi/EtherGuard-VPN/device/peer_endpoint_lock_test.go:48 +0x49
+created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSetEndpointFromPacket_doesNotHoldPeerLockDuringLocalAddressProbe in goroutine 607
+	/home/kexi/EtherGuard-VPN/device/peer_endpoint_lock_test.go:47 +0x388
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/device	1.194s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.040s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.105s
+ok  	github.com/KusakabeSi/EtherGuard-VPN	5.966s
+FAIL
+
+## QA retry — package race suite, build, vet, and retired-reference scan
+
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	2.565s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.043s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.098s
+ok  	github.com/KusakabeSi/EtherGuard-VPN	2.962s
+
+Retired reference scan:

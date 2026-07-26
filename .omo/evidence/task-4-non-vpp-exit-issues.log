@@ -1,0 +1,64 @@
+Task 4 — Retire SuperInfo and migrate Edge mode selection
+
+RED PHASE
+Command:
+go test ./mtypes -run '^TestEdgeConfigV2RejectsLegacySuperBlock$' -count=1
+
+Output:
+--- FAIL: TestEdgeConfigV2RejectsLegacySuperBlock (0.00s)
+    --- FAIL: TestEdgeConfigV2RejectsLegacySuperBlock/enabled (0.00s)
+        http_control_test.go:535: expected typed ControlV2Error, got <nil>: <nil>
+    --- FAIL: TestEdgeConfigV2RejectsLegacySuperBlock/disabled (0.00s)
+        http_control_test.go:535: expected typed ControlV2Error, got <nil>: <nil>
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/mtypes	0.008s
+FAIL
+
+GREEN PHASE
+Command:
+go test ./mtypes -run '^TestEdgeConfigV2RejectsLegacySuperBlock$' -count=1
+
+Output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	0.008s
+
+QA
+Command:
+go test -race -count=1 ./gencfg -run '^TestGenSuperCfgHTTPOnly$'
+
+Output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.075s
+
+Command:
+go test -race -count=1 . -run '^TestStaticAndP2PEdgeFixturesParseWithoutLegacySuper$'
+
+Output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.069s
+
+Command:
+go build ./... && go vet ./...
+
+Output:
+go build: ok
+go vet: ok
+
+Focused race suite (blocked by an existing HTTP-only E2E deletion convergence failure):
+go test -race -shuffle=on -count=1 ./mtypes ./gencfg ./device . -run 'Test(HTTPOnly|Edge|ControlV2|SuperConfigV2)'
+
+Output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.040s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.061s [no tests to run]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	1.061s [no tests to run]
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.08s)
+    super_http_e2e_test.go:126: end-to-end condition did not converge
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	3.176s
+FAIL
+
+The same test fails in isolation after the migration:
+go test -race -count=1 . -run '^TestHTTPOnlySuperEndToEnd$'
+
+--- FAIL: TestHTTPOnlySuperEndToEnd (6.08s)
+    super_http_e2e_test.go:126: end-to-end condition did not converge
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	6.170s
+FAIL

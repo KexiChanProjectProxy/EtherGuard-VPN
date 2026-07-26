@@ -1,0 +1,179 @@
+# Final Verification Wave F3 — non-vpp-exit-issues
+
+Date: 2026-07-26
+Mode: read-only product verification. No product files changed.
+
+## Commands and results
+
+```text
+$ go test -race -count=1 ./mtypes ./device -run 'Test(ControlV2Parameters|SuperConfigV2|SuperSTUN|ReceiveDemultiplexesSTUN)'
+ok   github.com/KusakabeSi/EtherGuard-VPN/mtypes  1.034s
+ok   github.com/KusakabeSi/EtherGuard-VPN/device  1.094s
+
+$ go test -race -count=1 ./device -run 'Test(ControlHTTPClient|SuperHTTPRuntime)'
+ok   github.com/KusakabeSi/EtherGuard-VPN/device  2.430s
+
+$ go test -race -count=1 . -run 'Test(SuperRejectsLegacyV1Config|Edge)'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.066s
+
+$ go test -race -count=1 . -run 'TestSuperGracefulShutdown'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.071s
+
+$ go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.167s
+
+$ go test -race -count=1 ./device -run 'TestSuperHTTPRuntimeStartsAfterReadyAndReports'
+ok   github.com/KusakabeSi/EtherGuard-VPN/device  1.115s
+
+$ go test -race -count=1 . -run 'TestControlStateRegistrationAndReport|TestControlStateReportedCandidateReachesOtherEdges'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.110s
+
+# Re-run after historical-baseline inspection
+$ go test -race -count=1 . -run 'TestControlStateRegistrationAndReport|TestControlStateReportedCandidateReachesOtherEdges'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.105s
+
+$ go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.163s
+```
+
+All commands exited 0. The flake history in
+`.omo/notepads/non-vpp-exit-issues/issues.md` identifies the old failure at
+`super_http_e2e_test.go:126`; the exact HTTP-only E2E command above passed, so
+this run did not reproduce it.
+
+## Source/test evidence and fail-closed behavior
+
+* **STUN parsing and lifecycle:** `TestControlV2ParametersParse` accepts
+  hostname and `stun://` forms; `TestValidateSTUNURIReturnsTypedErrorsForMalformedAuthorities`
+  asserts typed `ControlV2ErrInvalidSTUNServer` for malformed authority forms;
+  `TestSuperSTUNResolvesHostnameBeforeSendingLiteralEndpoint` requires resolver
+  use; `TestSuperSTUNBypassesResolverForLiteralURI` fails if a literal invokes
+  it. `TestSuperSTUNDiscoveryReturnsPromptlyWhenCallerCancelsResolver` requires
+  discovery and resolver termination within one second. `TestSuperSTUNCloseCancelsInFlightRequestAndDrainsPending`
+  requires the in-flight request to return within one second and pending=0.
+  `TestReceiveDemultiplexesSTUNBeforeWireGuard/rejects delivery after manager close`
+  calls post-close delivery and asserts handled=false and pending=0 (the call
+  itself proves no panic). These are the prompt/closed assertions for STUN
+  failure and cancellation paths.
+* **SSE fallback:** `TestControlHTTPClientSyncPollsOnlyWhileSSEUnavailable`
+  asserts no timer polls while the stream is healthy, polling after stream
+  failure, and polling stops after reconnect; it also requires `Sync` to return
+  `context.Canceled` promptly. `TestControlHTTPClientSyncPollingFallback`
+  asserts polling during three failed stream attempts and continued reconnect
+  attempts. `TestControlHTTPClientSyncSerializesApplyWhenEventAndPollOverlap`
+  asserts max concurrent apply=1. The implementation's `Sync` returns from its
+  context-done select, so the fallback failure path closes rather than running
+  indefinitely.
+* **Legacy rejection:** `TestSuperRejectsLegacyV1Config` asserts a typed
+  `legacy_udp_field` error for `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`,
+  `API_Prefix`, `ListenPort_EdgeAPI`, and `ListenPort_ManageAPI`.
+  `TestEdgeConfigV2RejectsLegacySuperBlock` asserts the same typed error for
+  `DynamicRoute.SuperNode` with both `UseSuperNode:true` and `false`.
+  `mtypes.EdgeConfigV2.UnmarshalYAML` separately rejects `LegacySuper` and
+  `DynamicRoute.SuperNode`; `main_super.go:legacyUDPFieldPresent` pre-scans the
+  Super fields before parse. Each rejects synchronously at the YAML boundary.
+* **Graceful shutdown:** `main_super.go:Shutdown` invokes `hub.Close()` before
+  either `http.Server.Shutdown`; `handleEvents` selects on the subscriber Done
+  channel. `TestSuperGracefulShutdown` requires `Shutdown` to return within its
+  timeout, the SSE body to close within three seconds, and no goroutine leak.
+* **Register candidate labeling — BLOCKER (historically rechecked):** The exact
+  `GIT_MASTER=1 git show 9b56ff9:super_control_state.go | sed -n '64,90p'`
+  baseline command shows `Register` maps `LocalV4`/`LocalV6` to
+  `ControlV2CandidateLocal`, but maps `PublicV4`/`PublicV6` to
+  `ControlV2CandidateSTUN`. The current source is identical. The historical
+  `9b56ff9:super_control_state_test.go` has no test that asserts register-time
+  source labels; the closest green tests are
+  `TestControlStateRegistrationAndReport` and
+  `TestControlStateReportedCandidateReachesOtherEdges`. Therefore there is no
+  test name proving the claimed all-local behavior, and the exact source
+  contradicts it.
+
+## Verdict
+
+REJECT — all requested race tests are green, but the exact 9b56ff9 baseline and
+current source label register-time public candidates as STUN, not local, and no
+test proves the requested all-local invariant.
+
+## Regression test: pin register-time candidate source labels
+
+Test: TestControlStateRegisterCandidateSourceLabels (super_control_state_test.go)
+Asserts the pre-existing Register-time labeling at super_control_state.go:76-79:
+- req.LocalV4 / req.LocalV6 -> mtypes.ControlV2CandidateLocal (source "local")
+- req.PublicV4 / req.PublicV6 -> mtypes.ControlV2CandidateSTUN (source "stun")
+Pinned: LocalV4/LocalV6 maps to Local; PublicV4/PublicV6 maps to STUN.
+
+```
+$ go test -race -count=1 -v . -run 'TestControlStateRegisterCandidateSourceLabels'
+=== RUN   TestControlStateRegisterCandidateSourceLabels
+--- PASS: TestControlStateRegisterCandidateSourceLabels (0.00s)
+PASS
+ok   github.com/KusakabeSi/EtherGuard-VPN	1.061s
+```
+
+## Successor F3 re-audit — 2026-07-26
+
+This is the successor final-wave review. The two prior REJECT verdicts relied
+on the premise that register-time candidates must all be labeled Local. That
+premise is invalid: the established invariant, now pinned by
+`TestControlStateRegisterCandidateSourceLabels`, is LocalV4/LocalV6 -> Local
+and PublicV4/PublicV6 -> STUN. The pre-plan source already used that mapping.
+
+```text
+$ go test -race -count=1 ./mtypes ./device -run 'Test(ControlV2Parameters|SuperConfigV2|SuperSTUN|ReceiveDemultiplexesSTUN)'
+ok   github.com/KusakabeSi/EtherGuard-VPN/mtypes  1.032s
+ok   github.com/KusakabeSi/EtherGuard-VPN/device  1.087s
+
+$ go test -race -count=1 ./device -run 'Test(ControlHTTPClient|SuperHTTPRuntime)'
+ok   github.com/KusakabeSi/EtherGuard-VPN/device  2.445s
+
+$ go test -race -count=1 . -run 'Test(SuperRejectsLegacyV1Config|Edge)'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.071s
+
+$ go test -race -count=1 . -run 'TestSuperGracefulShutdown'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.076s
+
+$ go test -race -count=1 . -run 'TestControlStateRegisterCandidateSourceLabels'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.061s
+
+$ go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok   github.com/KusakabeSi/EtherGuard-VPN  1.260s
+```
+
+All mandated race suites passed. Direct source/test review confirms:
+
+* **STUN fail-closed/cancellation:**
+  `TestControlV2ParametersInvalidSTUNURI` and
+  `TestValidateSTUNURIReturnsTypedErrorsForMalformedAuthorities` reject bad
+  inputs with typed errors; `TestValidateSTUNURIAcceptsDNSHostnamesAndAuthorities`
+  accepts hostname and `stun://` forms. `TestSuperSTUNDiscoveryReturnsPromptlyWhenCallerCancelsResolver`
+  requires both discovery and resolver termination within one second.
+  `TestSuperSTUNResolverErrorPublishesNoCandidatesOrPendingRequests`,
+  `TestSuperSTUNAllServersFailPublishesNoMappedCandidates`, and
+  `TestSuperSTUNCloseCancelsInFlightRequestAndDrainsPending` require empty
+  candidates/pending state and prompt close return. `TestReceiveDemultiplexesSTUNBeforeWireGuard`
+  rejects unknown transactions, malformed fingerprints, bad cookies, and
+  post-Close delivery (handled=false, pending=0, without panic).
+* **SSE failure/cancellation:** `TestControlHTTPClientSyncPollingFallback`
+  requires polling while SSE repeatedly fails; `TestControlHTTPClientSyncPollsOnlyWhileSSEUnavailable`
+  proves no polls while healthy, polls after failure, stops after reconnection,
+  and returns `context.Canceled`; `TestControlHTTPClientSyncSerializesApplyWhenEventAndPollOverlap`
+  caps concurrent apply at one. `TestControlHTTPClientMalformedSSENoState`
+  proves malformed SSE does not mutate snapshot state. Runtime cancellation is
+  independently required by `TestSuperHTTPRuntimeSyncFallsBackToPollingAndStops`.
+* **Legacy config fail-closed:** `TestSuperRejectsLegacyV1Config` requires
+  typed `legacy_udp_field` rejection for the Super legacy fields including
+  `ListenPort_EdgeAPI` and `ListenPort_ManageAPI`; `TestEdgeConfigV2RejectsLegacySuperBlock`
+  requires the same typed rejection for `DynamicRoute.SuperNode` with both
+  `UseSuperNode:true` and `false`. The established edge decoder coverage also
+  rejects the `LegacySuper` key.
+* **Graceful shutdown:** `superRuntime.Shutdown` calls `hub.Close()` before
+  either `http.Server.Shutdown`, and `handleEvents` selects on
+  `renderer.Subscriber().Done()`. `TestSuperGracefulShutdown` requires
+  shutdown success within timeout, prompt SSE-body closure, and no goroutine
+  leak.
+* **Register labels and E2E:** `TestControlStateRegisterCandidateSourceLabels`
+  pins LocalV4/LocalV6 -> Local and PublicV4/PublicV6 -> STUN. The mandated
+  `TestHTTPOnlySuperEndToEnd` passed; no failure occurred at its historical
+  `super_http_e2e_test.go:126` flake location.
+
+Successor verdict: APPROVE. No product files were changed.

@@ -1,0 +1,164 @@
+# Final Verification Wave F4 — non-vpp-exit-issues
+
+Scope: public configuration fixtures and Super-mode migration documentation.
+Mode: read-only review; this evidence log is the sole `.omo` audit artifact.
+
+## Fixture scan
+
+Command: temporary `/tmp/etherguard_fixture_scan.go` using `gopkg.in/yaml.v2`;
+the temporary scanner recursively enumerated all three required fixture roots,
+parsed every YAML document, and recursively rejected `UseSuperNode`,
+`LegacySuper`, `PrivKeyV4`, `PrivKeyV6`, `ListenPort_EdgeAPI`,
+`ListenPort_ManageAPI`, `DynamicRoute.SuperNode`, and `API_Prefix` in Super
+fixtures.  The scratch file was removed after execution.
+
+```
+FIXTURE_COUNT: 21
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge1.yaml
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge2.yaml
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge3.yaml
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge4.yaml
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge5.yaml
+PARSE_OK CLEAN example_config/p2p_mode/EgNet_edge6.yaml
+PARSE_OK CLEAN example_config/p2p_mode/genp2p.yaml
+PARSE_OK CLEAN example_config/p2p_mode/genp2p_2.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge1.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge2.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge3.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge4.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge5.yaml
+PARSE_OK CLEAN example_config/static_mode/EgNet_edge6.yaml
+PARSE_OK CLEAN example_config/static_mode/genstatic.yaml
+PARSE_OK CLEAN example_config/super_mode/EgNet_edge001.yaml
+PARSE_OK CLEAN example_config/super_mode/EgNet_edge002.yaml
+PARSE_OK CLEAN example_config/super_mode/EgNet_edge100.yaml
+PARSE_OK CLEAN example_config/super_mode/EgNet_super.yaml
+PARSE_OK CLEAN example_config/super_mode/gensuper.yaml
+PARSE_OK CLEAN example_config/super_mode/testfd/n1_fd.yaml
+RESULT: ALL_FIXTURES_PARSE_AND_HAVE_NO_RETIRED_KEYS
+```
+
+## Documentation-to-runtime comparison
+
+### STUN URI validation and resolution — PASS
+
+* English doc `example_config/super_mode/README.md:134`: “Both
+  `stun:host:port` and `stun://host:port` URI forms are accepted” and “Hosts
+  may be IP literals ... or syntactically valid DNS hostnames”; Chinese doc
+  `README_zh.md:134`: “接受`stun:host:port`和`stun://host:port`兩種URI格式”
+  and “主機可以是IP literal ... 或語法上合法的DNS主機名”.
+* Code `mtypes/http_control.go:641-651` cuts the scheme and removes optional
+  `//`; `:655-677` parses host/port, accepts an IP or `validSTUNHostname`, and
+  returns without resolution. This is validation-only and does no I/O.
+* English/Chinese docs `:134` say resolution happens at runtime in
+  `SuperSTUNManager`; code `device/super_stun.go:120-149` parses the STUN URI,
+  bypasses lookup for an IP at `:125-126`, and calls the injected resolver only
+  for a hostname at `:135`.
+
+### Polling is fallback-only — PASS
+
+* English and Chinese docs `README.md:126` / `README_zh.md:126` state:
+  “Polling is fallback-only” / “輪詢僅作為回退機制”.
+* `device/super_http_client.go:401-413` starts SSE before polling;
+  `:431-438` stops polling when the stream connects or events arrive; and
+  `:448-459` starts polling only after stream termination before reconnect.
+
+### Legacy rejection lists — PASS
+
+* English and Chinese docs `:9` and `:198` list exactly `PrivKeyV4`,
+  `PrivKeyV6`, `ListenPort`, `FwMark`, `API_Prefix`, `ListenPort_EdgeAPI`, and
+  `ListenPort_ManageAPI`.
+* `main_super.go:617-624` scans exactly those seven top-level names.
+* English/Chinese docs `:175` say `LegacySuper` and
+  `DynamicRoute.SuperNode` are rejected. `mtypes/http_control.go:615-621`
+  rejects exactly those two Edge configuration forms.
+
+### No generic endpoint-hostname support — PASS
+
+* English/Chinese docs `:134` explicitly limit DNS hostname resolution to
+  STUN and state that generic endpoint parsing remains IP-literal-only.
+* `conn/conn.go:172-187` splits the endpoint and rejects it when
+  `net.ParseIP(host) == nil`.
+
+### No third-party STUN DNS dependency in examples — PASS
+
+* `example_config/super_mode/EgNet_super.yaml:7-9` supplies only RFC 5737/3849
+  documentation IP literals: `stun:203.0.113.10:3478` and
+  `stuns:[2001:db8::10]:5349`; no third-party DNS hostname occurs.
+
+### VPP residual risk — PASS
+
+* English/Chinese docs `README.md:207` / `README_zh.md:207` explicitly state
+  that VPP is excluded and unvalidated, no libmemif host ran `make vpp`, and
+  VPP build/runtime regressions remain possible.
+
+### Periodic STUN-refresh documentation — FAIL (stale/contradictory claim)
+
+* English doc `README.md:134` states: “STUN refresh is one-shot at register
+  time (no periodic refresh).” Chinese doc `README_zh.md:134` is semantically
+  identical: “STUN刷新在註冊時一次性執行（無週期性刷新）”.
+* The same English and Chinese tables instead claim at `README.md:152` /
+  `README_zh.md:152`: `STUNRefreshIntervalSeconds | How often to refresh STUN
+  candidates` / `STUN候選位址刷新間隔`. This is a public claim of periodic
+  refresh and directly contradicts line 134.
+* Runtime confirms no periodic timer: `device/super_http_runtime.go:60-93`
+  invokes `runtime.refreshSTUN(ctx, snapshot.Parameters)` once at `:75`, before
+  starting `Sync` and `reportLoop`; `refreshSTUN` at `:146-164` performs a
+  single `Discover` call at `:150`. No periodic refresh scheduling exists in
+  this flow.
+
+The English and Chinese documents are semantically aligned with each other,
+but both retain the same stale periodic-refresh table claim. Under the review
+rule that any stale or overclaiming documentation statement rejects the wave,
+this is a blocking failure.
+
+## Required test commands
+
+```
+$ go test -race -count=1 . -run 'TestDocs'
+ok  github.com/KusakabeSi/EtherGuard-VPN  1.140s
+
+$ go test -race -shuffle=on -count=1 ./gencfg
+ok  github.com/KusakabeSi/EtherGuard-VPN/gencfg  1.109s
+```
+
+The passed gencfg suite includes `TestGenSuperCfgHTTPOnly`
+(`gencfg/gencfgSM_test.go:13-62`): it unmarshals generated Super YAML at
+`:31-34`, validates it at `:35-36`, validates every generated STUN URI at
+`:41-44`, unmarshals each generated Edge YAML at `:54-57`, and validates each
+Edge config at `:58-60`.
+
+## VERDICT: REJECT
+
+Blocking condition: stale/contradictory public documentation for
+`STUNRefreshIntervalSeconds` in both language versions.
+
+---
+
+## Re-audit after documentation correction
+
+The prior blocking inconsistency is resolved in both language versions.
+
+* English `example_config/super_mode/README.md:152`: “Reserved: present in
+  config schema but currently inert; STUN is one-shot at register time (no
+  periodic refresh)”.
+* Chinese `example_config/super_mode/README_zh.md:152`: “保留：存在於設定結構中
+  但目前無效；STUN在註冊時一次性執行（無週期性刷新）”.
+* These statements agree with the existing STUN section at English/Chinese
+  `:134`, and with runtime: `device/super_http_runtime.go:75` makes the sole
+  `refreshSTUN` call after registration, while `:146-164` makes one
+  `Discover` call with no periodic scheduler.
+
+Documentation-contract test evidence:
+
+```
+$ go test -race -count=1 . -run 'TestDocs'
+ok  github.com/KusakabeSi/EtherGuard-VPN  1.128s
+```
+
+The passing suite includes `TestDocsSTUNRefreshReserved`
+(`docs_contract_test.go:370-388`), which requires every Super-mode document
+to contain `STUNRefreshIntervalSeconds` and a reserved/inert qualifier. The
+existing fixture scan and gencfg verification above remain passing evidence.
+
+## FINAL VERDICT: APPROVE

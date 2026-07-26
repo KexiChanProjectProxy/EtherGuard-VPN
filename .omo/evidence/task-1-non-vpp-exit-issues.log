@@ -1,0 +1,49 @@
+# Task 1 — DNS STUN discovery and race-safe shutdown
+
+## Red phase
+
+```text
+$ go test ./mtypes ./device -run 'Test(ValidateSTUNURI|SuperSTUN)' -count=1
+--- FAIL: TestValidateSTUNURIAcceptsDNSHostnamesAndAuthorities (0.00s)
+    --- FAIL: TestValidateSTUNURIAcceptsDNSHostnamesAndAuthorities/stun:stun.example.com:3478 (0.00s)
+        http_control_test.go:295: ValidateSTUNURI("stun:stun.example.com:3478"): control v2: invalid_stun_server: invalid IP host "stun.example.com"
+    --- FAIL: TestValidateSTUNURIAcceptsDNSHostnamesAndAuthorities/stun://stun.example.com:3478 (0.00s)
+        http_control_test.go:295: ValidateSTUNURI("stun://stun.example.com:3478"): control v2: invalid_stun_server: invalid IP host "//stun.example.com"
+FAIL
+FAIL    github.com/KusakabeSi/EtherGuard-VPN/mtypes  0.008s
+FAIL    github.com/KusakabeSi/EtherGuard-VPN/device [build failed]
+
+$ go test ./device -run 'TestSuperSTUN(Resolves|Bypasses|DiscoveryReturns|Close)' -count=1
+# github.com/KusakabeSi/EtherGuard-VPN/device [github.com/KusakabeSi/EtherGuard-VPN/device.test]
+device/receive_stun_test.go:81:11: manager.Close undefined (type *SuperSTUNManager has no field or method Close)
+device/super_stun_test.go:103:10: manager.resolver undefined (type *SuperSTUNManager has no field or method resolver)
+device/super_stun_test.go:198:10: manager.Close undefined (type *SuperSTUNManager has no field or method Close)
+FAIL    github.com/KusakabeSi/EtherGuard-VPN/device [build failed]
+FAIL
+```
+
+## Green phase
+
+```text
+$ go test ./mtypes ./device -run 'Test(ControlV2Parameters|SuperConfigV2|SuperSTUN|ReceiveDemultiplexesSTUN)' -count=1
+ok      github.com/KusakabeSi/EtherGuard-VPN/mtypes  0.007s
+ok      github.com/KusakabeSi/EtherGuard-VPN/device  0.037s
+```
+
+## QA scenarios
+
+- Happy path: an injected DNS resolver returns `203.0.113.80`; the existing bind receives the literal `203.0.113.80:3478`, and discovery publishes `198.51.100.80:40100`.
+- Literal URI path: `stun:203.0.113.81:3478` bypasses the resolver and publishes its mapped candidate.
+- Failure path: resolver error and cancellation publish no candidates and leave no pending transaction; malformed URI forms return `ControlV2ErrInvalidSTUNServer`.
+- Shutdown path: closing the manager cancels an in-flight request, drains `pending`, and later STUN packet delivery is rejected without closing response channels.
+
+## Verification
+
+```text
+$ go test -race ./mtypes ./device -run 'Test(ControlV2Parameters|SuperConfigV2|SuperSTUN|ReceiveDemultiplexesSTUN)'
+ok      github.com/KusakabeSi/EtherGuard-VPN/mtypes  1.035s
+ok      github.com/KusakabeSi/EtherGuard-VPN/device  1.090s
+
+$ go build ./...
+(exit 0)
+```

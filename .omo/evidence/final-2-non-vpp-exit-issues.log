@@ -1,0 +1,47 @@
+Final Verification Wave F2 - non-vpp-exit-issues
+Timestamp: 2026-07-26T01:44:35-04:00
+>>> go version
+go version go1.26.5 linux/amd64
+>>> git log --oneline -9
+f94b00e refactor(http): remove unreachable super udp remnants
+9fbdd10 docs(super): document final HTTP-only migration behavior
+ca48c5e refactor(super): remove legacy super config runtime
+9b56ff9 fix(e2e): terminate SSE streams when hub closes
+e78013f refactor(config): remove legacy edge super configuration
+2344f4d fix(control): cancel stream context on SSE failure
+16f665c fix(stun): support hostname discovery and deterministic shutdown
+47335ab fix(control): poll snapshots only while SSE is unavailable
+2c39357 fix(vet): avoid ordered-map lock copies and buffer signals
+
+>>> COMMAND 1: go build ./... && go vet ./...
+EXIT CODE: 0
+
+>>> COMMAND 2: go test -race -shuffle=on -count=1 -timeout 900s ./...
+ok  	github.com/KusakabeSi/EtherGuard-VPN	5.987s
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn	[no test files]
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	2.625s
+?   	github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.098s
+?   	github.com/KusakabeSi/EtherGuard-VPN/ipc	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.042s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/orderdmap	1.028s
+?   	github.com/KusakabeSi/EtherGuard-VPN/path	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter	1.025s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay	1.029s
+?   	github.com/KusakabeSi/EtherGuard-VPN/rwcancel	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n	1.026s
+?   	github.com/KusakabeSi/EtherGuard-VPN/tap	[no test files]
+EXIT CODE: 0
+
+>>> COMMAND 3.1: go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.171s
+EXIT CODE: 0
+
+>>> COMMAND 3.2: go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.181s
+EXIT CODE: 0
+
+>>> COMMAND 3.3: go test -race -count=1 . -run 'TestHTTPOnlySuperEndToEnd'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.178s
+EXIT CODE: 0

@@ -1,0 +1,90 @@
+Task 7 — non-vpp-exit-issues
+Date: 2026-07-26
+
+Scope: main_httpserver.go, main_httpserver_test.go, mtypes/config.go,
+mtypes/metamessage.go, and mtypes/metamessage_test.go only.
+
+Reference-proof scans before deletion
+=====================================
+codegraph_explore "SUPER_Events http_shared_objects PeerState HttpPeerLocalIP ServerUpdateMsg":
+  - main_httpserver.go::HttpPeerLocalIP and PeerState were returned only as
+    declarations; no dependents were reported.
+  - mtypes/metamessage.go::SUPER_Events was returned only as its declaration.
+  - ServerUpdateMsg was retained as required.
+
+aft_search "HttpPeerLocalIP":
+  main_httpserver.go HttpPeerLocalIP [struct] lines 53-56  ↩0
+aft_search "PeerState":
+  main_httpserver.go PeerState [struct] lines 73-80  ↩0
+aft_search "HttpState HttpPeerInfo":
+  main_httpserver.go HttpState [struct] lines 58-66  ↩0
+  main_httpserver.go HttpPeerInfo [struct] lines 68-71  ↩0
+aft_search "SUPER_Events":
+  mtypes/metamessage.go SUPER_Events [struct] lines 200-203  ↩0
+aft_search "API_Peerinfo":
+  mtypes/config.go API_Peerinfo [struct] lines 197-201  ↩0
+aft_search "API_SuperParams":
+  mtypes/config.go API_SuperParams [struct] lines 203-209  ↩0
+aft_search "API_report_peerinfo":
+  mtypes/metamessage.go API_report_peerinfo [struct] lines 180-184  ↩0
+  mtypes/metamessage.go ParseAPI_report_peerinfo [function] lines 186-192  ↩0
+aft_search "API_report_peerinfo_jwt_claims":
+  mtypes/metamessage.go API_report_peerinfo_jwt_claims [struct] lines 194-198  ↩0
+aft_search "gob.Register SUPER_Events API_report_peerinfo API_Peerinfo API_SuperParams StateHash":
+  Returned the legacy declarations only; no gob.Register registration or live
+  construction was found.
+
+Deleted after those scans:
+  - http_shared_objects's retired graph/device/hash/peer/config fields;
+    its only live field is http_passwords, written by main_super.go's
+    initHTTPObjectPasswords and read by manageAuthOK.
+  - HttpPeerLocalIP, HttpState, HttpPeerInfo, and PeerState.
+  - SUPER_Events, API_report_peerinfo, ParseAPI_report_peerinfo, and
+    API_report_peerinfo_jwt_claims.
+  - API_Peerinfo, API_SuperParams, and API_Peers.
+
+Retained deliberately:
+  - API_connurl and StateHash: the first post-delete build proved live
+    references in device/peer.go:52, device/super_http_runtime.go:225, and
+    device/device.go:78. They were restored immediately.
+  - QueryPeerMsg and BoardcastPeerMsg: their parsers remain live in
+    device/receivesendproc.go; no deletion attempted.
+  - ServerUpdateMsg and every ServerCommand numeric constant: retained by
+    task requirement. ParseServerUpdateMsg remains live in receivesendproc.
+  - RegisterMsg, PingMsg, and PongMsg: their parsers remain live in
+    receivesendproc. New Gob round-trip coverage protects all three.
+
+QA
+==
+Focused HTTP handler tests passed:
+  go test -race -count=1 . -run 'TestHTTPMux_returnsGoneForLegacyRoutes_whenManageIsNil|TestManageAuthOK_acceptsConfiguredPassword_andRejectsLegacyFailures'
+  ok github.com/KusakabeSi/EtherGuard-VPN 1.110s
+  - all five legacy /manage/* routes return 410 when manage == nil;
+  - missing and wrong passwords return 401; the configured password passes
+    manageAuthOK, preserving the ManageV2 password gate.
+
+Serialization regression passed:
+  go test -race -count=1 ./mtypes -run TestLegacyDatagrams_roundTrip_whenSerializedWithGob
+  ok github.com/KusakabeSi/EtherGuard-VPN/mtypes 1.025s
+  - RegisterMsg, PingMsg, and PongMsg each Gob round-trip through their
+    production parser.
+
+Static and build gates:
+  aft_inspect (dead_code, unused_exports): no unused exports; its remaining
+  parser warnings are known call-graph false positives, including the live
+  legacy datagram parsers above.
+  go build ./...: ok
+  go vet ./...: clean
+
+Full race gate status at this point:
+  go test -race -shuffle=on -count=1 -timeout 900s ./...
+  FAIL TestDocsSTUNURIAcceptsHostnames at docs_contract_test.go:295 because
+  example_config/super_mode/README.md still claims "IP literals only".
+  This is an out-of-scope concurrent worker's exclusive documentation/test
+  pair; no scoped code test failed. Re-run after that pair lands.
+
+Final orchestrator verification:
+  The combined final wave reports go build ./..., go vet ./..., and
+  go test -race -shuffle=on -count=1 -timeout 900s ./... passing after the
+  concurrent documentation pair landed. No task-7 source change followed the
+  focused checks above.
