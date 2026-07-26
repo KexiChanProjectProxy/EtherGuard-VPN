@@ -2,6 +2,7 @@ package mtypes
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -506,26 +507,37 @@ Peers:
 	}
 }
 
-// TestEdgeConfigV2RejectsLegacySuperUDPFields ensures the v2 Edge config
-// parser rejects legacy Super UDP-only fields (EndpointV4/PubKeyV4/etc).
-func TestEdgeConfigV2RejectsLegacySuperUDPFields(t *testing.T) {
-	body := `
+func TestEdgeConfigV2RejectsLegacySuperBlock(t *testing.T) {
+	cases := []struct {
+		name         string
+		useSuperNode bool
+	}{
+		{name: "enabled", useSuperNode: true},
+		{name: "disabled", useSuperNode: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Given
+			body := fmt.Sprintf(`
 NodeID: 10
 NodeName: edge-010
-LegacySuper:
-  EndpointV4: 203.0.113.1:3000
-  PubKeyV4: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-  PSKey: legacy
-SuperNodeV2:
-  APIUrl: https://super.example.com:8443
-  NodeID: 65530
-  ControlPSKey: iPM8FXfnHVzwjguZHRW9bLNY+h7+B1O2oTJtktptQkI=
-`
-	var cfg EdgeConfigV2
-	if err := yamlUnmarshal([]byte(body), &cfg); err == nil {
-		if err := cfg.Validate(); err == nil {
-			t.Fatalf("expected rejection of LegacySuper")
-		}
+DynamicRoute:
+  SuperNode:
+    UseSuperNode: %t
+`, tc.useSuperNode)
+
+			// When
+			var cfg EdgeConfigV2
+			err := yamlUnmarshal([]byte(body), &cfg)
+
+			// Then
+			if !IsControlV2Error(err) {
+				t.Fatalf("expected typed ControlV2Error, got %T: %v", err, err)
+			}
+			if got := ErrorCode(err); got != ControlV2ErrLegacyUDPField {
+				t.Fatalf("error code = %q, want %q", got, ControlV2ErrLegacyUDPField)
+			}
+		})
 	}
 }
 

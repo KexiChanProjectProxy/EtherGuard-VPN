@@ -39,6 +39,7 @@ type EdgeConfig struct {
 	AfPrefer              int              `yaml:"AfPrefer"`
 	LogLevel              LoggerInfo       `yaml:"LogLevel"`
 	DynamicRoute          DynamicRouteInfo `yaml:"DynamicRoute"`
+	SuperNodeV2Enabled    bool             `yaml:"-"`
 	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
 	ResetEndPointInterval float64          `yaml:"ResetEndPointInterval"`
 	Peers                 []PeerInfo       `yaml:"Peers"`
@@ -145,17 +146,16 @@ func (v *Vertex) ToString() string {
 }
 
 type DynamicRouteInfo struct {
-	SendPingInterval     float64   `yaml:"SendPingInterval"`
-	PeerAliveTimeout     float64   `yaml:"PeerAliveTimeout"`
-	TimeoutCheckInterval float64   `yaml:"TimeoutCheckInterval"`
-	ConnNextTry          float64   `yaml:"ConnNextTry"`
-	DupCheckTimeout      float64   `yaml:"DupCheckTimeout"`
-	AdditionalCost       float64   `yaml:"AdditionalCost"`
-	DampingFilterRadius  uint64    `yaml:"DampingFilterRadius"`
-	SaveNewPeers         bool      `yaml:"SaveNewPeers"`
-	SuperNode            SuperInfo `yaml:"SuperNode"`
-	P2P                  P2PInfo   `yaml:"P2P"`
-	NTPConfig            NTPInfo   `yaml:"NTPConfig"`
+	SendPingInterval     float64 `yaml:"SendPingInterval"`
+	PeerAliveTimeout     float64 `yaml:"PeerAliveTimeout"`
+	TimeoutCheckInterval float64 `yaml:"TimeoutCheckInterval"`
+	ConnNextTry          float64 `yaml:"ConnNextTry"`
+	DupCheckTimeout      float64 `yaml:"DupCheckTimeout"`
+	AdditionalCost       float64 `yaml:"AdditionalCost"`
+	DampingFilterRadius  uint64  `yaml:"DampingFilterRadius"`
+	SaveNewPeers         bool    `yaml:"SaveNewPeers"`
+	P2P                  P2PInfo `yaml:"P2P"`
+	NTPConfig            NTPInfo `yaml:"NTPConfig"`
 }
 
 type NTPInfo struct {
@@ -164,22 +164,6 @@ type NTPInfo struct {
 	SyncTimeInterval float64  `yaml:"SyncTimeInterval"`
 	NTPTimeout       float64  `yaml:"NTPTimeout"`
 	Servers          []string `yaml:"Servers"`
-}
-
-// SuperInfo is the legacy Edge-side view of the Super. In v2 it is replaced
-// by SuperNodeV2 (see http_control.go). The fields are kept temporarily
-// for transition; new code should consume SuperNodeV2 instead.
-type SuperInfo struct {
-	UseSuperNode         bool     `yaml:"UseSuperNode"`
-	PSKey                string   `yaml:"PSKey"`
-	EndpointV4           string   `yaml:"EndpointV4"`
-	PubKeyV4             string   `yaml:"PubKeyV4"`
-	EndpointV6           string   `yaml:"EndpointV6"`
-	PubKeyV6             string   `yaml:"PubKeyV6"`
-	EndpointEdgeAPIUrl   string   `yaml:"EndpointEdgeAPIUrl"`
-	SkipLocalIP          bool     `yaml:"SkipLocalIP"`
-	AdditionalLocalIP    []string `yaml:"AdditionalLocalIP"`
-	SuperNodeInfoTimeout float64  `yaml:"SuperNodeInfoTimeout"`
 }
 
 type P2PInfo struct {

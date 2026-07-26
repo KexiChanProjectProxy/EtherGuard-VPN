@@ -199,7 +199,6 @@ func GenNMCfg(NMCinfigPath string, enableP2P bool, printExample bool) (err error
 		}
 	}
 	econfig.DynamicRoute.P2P.UseP2P = enableP2P
-	econfig.DynamicRoute.SuperNode.UseSuperNode = false
 	econfig.NextHopTable = next
 	if enableP2P {
 		econfig.NextHopTable = make(mtypes.NextHopTable)
@@ -234,12 +233,6 @@ func GenNMCfg(NMCinfigPath string, enableP2P bool, printExample bool) (err error
 		}
 	}
 	econfig.DynamicRoute.NTPConfig.Servers = make([]string, 0)
-	econfig.DynamicRoute.SuperNode.PSKey = ""
-	econfig.DynamicRoute.SuperNode.EndpointV4 = ""
-	econfig.DynamicRoute.SuperNode.EndpointV6 = ""
-	econfig.DynamicRoute.SuperNode.PubKeyV4 = ""
-	econfig.DynamicRoute.SuperNode.PubKeyV6 = ""
-	econfig.DynamicRoute.SuperNode.EndpointEdgeAPIUrl = ""
 
 	var pskdb device.PSKDB
 	for NodeID, Edge := range edge_infos {

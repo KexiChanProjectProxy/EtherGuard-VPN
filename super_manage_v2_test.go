@@ -246,10 +246,6 @@ func TestManageV2AddPeerWritesFreshProfiles(t *testing.T) {
 	if edge1.SuperNodeV2.ControlPSKey != "edge-one-key-fresh" {
 		t.Fatalf("edge1 PSKey: got %q want %q", edge1.SuperNodeV2.ControlPSKey, "edge-one-key-fresh")
 	}
-	if edge1.LegacySuper != nil {
-		t.Fatalf("edge1 must not carry a LegacySuper block: %+v", edge1.LegacySuper)
-	}
-
 	// edge_2.yaml: peer-2's key, NOT peer-1's.
 	edge2 := readEdgeYAML(t, filepath.Join(dir, "edge_2.yaml"))
 	if edge2.SuperNodeV2.ControlPSKey != "edge-two-key-fresh" {

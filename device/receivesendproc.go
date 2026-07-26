@@ -443,7 +443,7 @@ func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.Boardc
 }
 
 func (device *Device) RoutineTryReceivedEndpoint() {
-	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
+	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.SuperNodeV2Enabled) {
 		return
 	}
 	timeout := mtypes.S2TD(device.EdgeConfig.DynamicRoute.ConnNextTry)
@@ -494,7 +494,7 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 }
 
 func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
-	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
+	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.SuperNodeV2Enabled) {
 		return
 	}
 	if device.EdgeConfig.DynamicRoute.TimeoutCheckInterval == 0 {
@@ -509,7 +509,7 @@ func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
 }
 
 func (device *Device) RoutineSendPing(startchan chan struct{}) {
-	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.DynamicRoute.SuperNode.UseSuperNode) {
+	if !(device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.EdgeConfig.SuperNodeV2Enabled) {
 		return
 	}
 	var waitchan <-chan time.Time

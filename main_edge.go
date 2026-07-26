@@ -27,7 +27,7 @@ import (
 )
 
 func printExampleEdgeConf() {
-	tconfig, _ := gencfg.GetExampleEdgeConf("", true)
+	tconfig, _ := gencfg.GetExampleEdgeConfV2("")
 	toprint, _ := yaml.Marshal(tconfig)
 	fmt.Print(string(toprint))
 }
@@ -43,14 +43,21 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	//return
 
 	err = mtypes.ReadYaml(configPath, &econfigV2)
-	if err == nil && econfigV2.SuperNodeV2.APIUrl != "" {
+	if err != nil {
+		return fmt.Errorf("parse v2 edge config %q: %w", configPath, err)
+	}
+	superNodeV2Enabled := econfigV2.SuperNodeV2.APIUrl != ""
+	if superNodeV2Enabled {
+		if err := econfigV2.Validate(); err != nil {
+			return fmt.Errorf("validate v2 edge config %q: %w", configPath, err)
+		}
 		econfig.Interface = econfigV2.Interface
 		econfig.NodeID = econfigV2.NodeID
 		econfig.NodeName = econfigV2.NodeName
 		econfig.DefaultTTL = econfigV2.DefaultTTL
 		econfig.LogLevel = econfigV2.LogLevel
 		econfig.Peers = econfigV2.Peers
-		econfig.DynamicRoute.SuperNode.UseSuperNode = true
+		econfig.SuperNodeV2Enabled = true
 	} else {
 		err = mtypes.ReadYaml(configPath, &econfig)
 	}
@@ -122,7 +129,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	////////////////////////////////////////////////////
 	// Config
-	if !econfig.DynamicRoute.P2P.UseP2P && !econfig.DynamicRoute.SuperNode.UseSuperNode {
+	if !econfig.DynamicRoute.P2P.UseP2P && !econfig.SuperNodeV2Enabled {
 		econfig.LogLevel.LogNTP = false // NTP in static mode is useless
 	}
 	graph, err := path.NewGraph(3, false, econfig.DynamicRoute.P2P.GraphRecalculateSetting, econfig.DynamicRoute.NTPConfig, econfig.LogLevel)
@@ -135,7 +142,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, false, configPath, &econfig, nil, nil, Version)
 	defer the_device.Close()
-	if econfigV2.SuperNodeV2.APIUrl != "" {
+	if superNodeV2Enabled {
 		the_device.EnableSuperHTTP(econfigV2)
 	}
 	pk, err := device.Str2PriKey(econfig.PrivKey)

@@ -46,7 +46,7 @@ func TestGenSuperCfgHTTPOnly(t *testing.T) {
 
 	for _, name := range []string{"TestNet_edge1.yaml", "TestNet_edge2.yaml", "TestNet_edge3.yaml"} {
 		data := readGeneratedFile(t, outputDir, name)
-		for _, obsolete := range []string{"PrivKeyV4:", "PrivKeyV6:", "ListenPort:", "FwMark:", "API_Prefix:"} {
+		for _, obsolete := range []string{"PrivKeyV4:", "PrivKeyV6:", "ListenPort:", "FwMark:", "API_Prefix:", "LegacySuper:", "SuperNode:"} {
 			if strings.Contains(string(data), obsolete) {
 				t.Errorf("%s contains obsolete field %q", name, obsolete)
 			}

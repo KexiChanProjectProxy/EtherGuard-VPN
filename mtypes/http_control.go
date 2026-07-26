@@ -589,21 +589,16 @@ type EdgeConfigV2 struct {
 	DefaultTTL  uint8          `yaml:"DefaultTTL"`
 	LogLevel    LoggerInfo     `yaml:"LogLevel"`
 	SuperNodeV2 SuperNodeV2Ref `yaml:"SuperNodeV2"`
-	LegacySuper *SuperInfo     `yaml:"LegacySuper,omitempty"`
 	Peers       []PeerInfo     `yaml:"Peers"`
 }
 
-// Validate rejects a leftover LegacySuper block and ensures the Edge has a
-// real NodeID + SuperNodeV2 reference.
+// Validate ensures the Edge has a real NodeID + SuperNodeV2 reference.
 func (c *EdgeConfigV2) Validate() error {
 	if c.NodeID.IsSpecial() {
 		return newControlV2Error(ControlV2ErrInvalidNodeID, "NodeID", "NodeID is special: %s", c.NodeID.ToString())
 	}
 	if c.NodeName == "" {
 		return newControlV2Error(ControlV2ErrMissingField, "NodeName", "NodeName is required")
-	}
-	if c.LegacySuper != nil {
-		return newControlV2Error(ControlV2ErrLegacyUDPField, "LegacySuper", "LegacySuper block is not allowed in Control API v2")
 	}
 	if err := c.SuperNodeV2.Validate(); err != nil {
 		return err
@@ -617,12 +612,13 @@ func (c *EdgeConfigV2) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if err := unmarshal(&probe); err != nil {
 		return err
 	}
-	if _, ok := probe["DynamicRoute"]; ok {
-		// DynamicRoute is permitted only for Super-specific sub-blocks, not
-		// the v2 Edge itself; we surface a typed error rather than silently
-		// dropping it.
-		// (Edge runtime will not read it.)
-		_ = ok
+	if _, ok := probe["LegacySuper"]; ok {
+		return newControlV2Error(ControlV2ErrLegacyUDPField, "LegacySuper", "legacy Edge Super block is not allowed in Control API v2")
+	}
+	if dynamicRoute, ok := probe["DynamicRoute"].(map[interface{}]interface{}); ok {
+		if _, ok := dynamicRoute["SuperNode"]; ok {
+			return newControlV2Error(ControlV2ErrLegacyUDPField, "DynamicRoute.SuperNode", "legacy Edge Super block is not allowed in Control API v2")
+		}
 	}
 	type alias EdgeConfigV2
 	var a alias

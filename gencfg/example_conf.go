@@ -62,17 +62,6 @@ func GetExampleEdgeConf(templatePath string, getDemo bool) (mtypes.EdgeConfig, e
 			AdditionalCost:       10,
 			DampingFilterRadius:  4,
 			SaveNewPeers:         true,
-			SuperNode: mtypes.SuperInfo{
-				UseSuperNode:         true,
-				PSKey:                "iPM8FXfnHVzwjguZHRW9bLNY+h7+B1O2oTJtktptQkI=",
-				EndpointV4:           "127.0.0.1:3000",
-				PubKeyV4:             "LJ8KKacUcIoACTGB/9Ed9w0osrJ3WWeelzpL2u4oUic=",
-				EndpointV6:           "[::1]:3000",
-				PubKeyV6:             "HCfL6YJtpJEGHTlJ2LgVXIWKB/K95P57LHTJ42ZG8VI=",
-				EndpointEdgeAPIUrl:   "http://127.0.0.1:3000/eg_api",
-				SuperNodeInfoTimeout: 50,
-				AdditionalLocalIP:    []string{"11.11.11.11:11111"},
-			},
 			P2P: mtypes.P2PInfo{
 				UseP2P:           false,
 				SendPeerInterval: 20,
@@ -113,9 +102,6 @@ func GetExampleEdgeConf(templatePath string, getDemo bool) (mtypes.EdgeConfig, e
 		econfig.Peers = []mtypes.PeerInfo{}
 		econfig.NextHopTable = make(mtypes.NextHopTable)
 		econfig.DynamicRoute.P2P.GraphRecalculateSetting.ManualLatency = make(mtypes.DistTable)
-		econfig.DynamicRoute.SuperNode.EndpointV4 = ""
-		econfig.DynamicRoute.SuperNode.EndpointV6 = ""
-		econfig.DynamicRoute.SuperNode.AdditionalLocalIP = []string{}
 	}
 	return econfig, &fs.PathError{Path: "", Err: fmt.Errorf("no path provided")}
 }

@@ -355,8 +355,8 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 		DynamicRoute: mtypes.DynamicRouteInfo{
 			PeerAliveTimeout: 0,
 			DupCheckTimeout:  5,
-			SuperNode:        mtypes.SuperInfo{UseSuperNode: true},
 		},
+		SuperNodeV2Enabled: true,
 	}
 	edge := device.NewDevice(tapDevice, id, bind, device.NewLogger(device.LogLevelSilent, "e2e"), graph, false, "", legacy, nil, nil, "e2e")
 	if err := edge.SetPrivateKey(privateKey); err != nil {

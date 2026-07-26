@@ -37,17 +37,6 @@ DynamicRoute:
   AdditionalCost: 10
   DampingFilterRadius: 4
   SaveNewPeers: true
-  SuperNode:
-    UseSuperNode: false
-    PSKey: ""
-    EndpointV4: ""
-    PubKeyV4: ""
-    EndpointV6: ""
-    PubKeyV6: ""
-    EndpointEdgeAPIUrl: ""
-    SkipLocalIP: false
-    AdditionalLocalIP: []
-    SuperNodeInfoTimeout: 50
   P2P:
     UseP2P: false
     SendPeerInterval: 20
