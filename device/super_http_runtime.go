@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -29,13 +30,12 @@ type SuperHTTPRuntime struct {
 	once  sync.Once
 	apply sync.Mutex
 
-	mu                  sync.RWMutex
-	candidates          []mtypes.ControlV2Candidate
-	parameters          mtypes.ControlV2Parameters
-	generation          uint64
-	recoveryRequests    map[mtypes.Vertex]time.Time
-	lastRecoveryRequest time.Time
-	parameterUpdates    chan struct{}
+	mu               sync.RWMutex
+	candidates       []mtypes.ControlV2Candidate
+	parameters       mtypes.ControlV2Parameters
+	generation       uint64
+	recoveryRequests map[mtypes.Vertex]time.Time
+	parameterUpdates chan struct{}
 }
 
 func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
@@ -268,8 +268,14 @@ func (runtime *SuperHTTPRuntime) observedEndpoints() []mtypes.ControlV2ObservedE
 		return nil
 	}
 	peers := runtime.device.allPeersByIDSnapshot()
-	observed := make([]mtypes.ControlV2ObservedEndpoint, 0, len(peers))
-	for id, peer := range peers {
+	ids := make([]mtypes.Vertex, 0, len(peers))
+	for id := range peers {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(left, right int) bool { return ids[left] < ids[right] })
+	observed := make([]mtypes.ControlV2ObservedEndpoint, 0, min(len(ids), 256))
+	for _, id := range ids {
+		peer := peers[id]
 		static, _, _ := peer.endpointRetryConfig()
 		if id == runtime.config.NodeID || static || !peer.IsPeerAlive() || peer.GetEndpointSrcStr() == "" {
 			continue
@@ -279,6 +285,9 @@ func (runtime *SuperHTTPRuntime) observedEndpoints() []mtypes.ControlV2ObservedE
 			continue
 		}
 		observed = append(observed, mtypes.ControlV2ObservedEndpoint{TargetNodeID: id, Address: address})
+		if len(observed) == 256 {
+			break
+		}
 	}
 	return observed
 }
@@ -293,6 +302,9 @@ func (runtime *SuperHTTPRuntime) recoverExhaustedPeers() {
 			continue
 		}
 		if peer.IsPeerAlive() {
+			runtime.mu.Lock()
+			delete(runtime.recoveryRequests, peer.ID)
+			runtime.mu.Unlock()
 			continue
 		}
 		if peer.endpoint_trylist.ConsumeSuperCycleComplete() && runtime.shouldRequestSnapshotRefresh(peer.ID, time.Now()) {
@@ -314,14 +326,10 @@ func (runtime *SuperHTTPRuntime) pruneRecoveryRequests(existing map[mtypes.Verte
 func (runtime *SuperHTTPRuntime) shouldRequestSnapshotRefresh(id mtypes.Vertex, now time.Time) bool {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
-	if now.Sub(runtime.lastRecoveryRequest) < 30*time.Second {
-		return false
-	}
 	if previous, exists := runtime.recoveryRequests[id]; exists && now.Sub(previous) < 30*time.Second {
 		return false
 	}
 	runtime.recoveryRequests[id] = now
-	runtime.lastRecoveryRequest = now
 	return true
 }
 

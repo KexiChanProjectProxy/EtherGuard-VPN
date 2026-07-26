@@ -175,6 +175,46 @@ func TestSuperHTTPRuntimeRecoveryCoalescesPeerRefreshes(t *testing.T) {
 	}
 }
 
+func TestSuperHTTPRuntimeRecoveryAllowsDifferentPeersWithinCoalesceWindow(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	now := time.Date(2026, time.July, 26, 0, 0, 0, 0, time.UTC)
+
+	// When
+	firstPeerRequested := runtime.shouldRequestSnapshotRefresh(7, now)
+	secondPeerRequested := runtime.shouldRequestSnapshotRefresh(8, now.Add(time.Second))
+
+	// Then
+	if !firstPeerRequested || !secondPeerRequested {
+		t.Fatalf("different-peer refresh decisions = %v, %v", firstPeerRequested, secondPeerRequested)
+	}
+}
+
+func TestSuperHTTPRuntimeRecoveryClearsCoalesceStateWhenPeerRecovers(t *testing.T) {
+	// Given
+	now := time.Now()
+	device := &Device{
+		EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 60}},
+	}
+	device.peers.IDMap = make(map[mtypes.Vertex]*Peer)
+	peer := &Peer{ID: 7, device: device, endpoint: runtimeTestEndpoint{}}
+	peer.LastPacketReceivedAdd1Sec.Store(&now)
+	device.peers.IDMap[peer.ID] = peer
+	runtime := NewSuperHTTPRuntime(device, mtypes.EdgeConfigV2{})
+	runtime.recoveryRequests[peer.ID] = now
+
+	// When
+	runtime.recoverExhaustedPeers()
+
+	// Then
+	runtime.mu.RLock()
+	_, exists := runtime.recoveryRequests[peer.ID]
+	runtime.mu.RUnlock()
+	if exists {
+		t.Fatal("recovered peer retained recovery coalesce state")
+	}
+}
+
 func TestSuperHTTPRuntimeRecoveryCapSurvivesNewSnapshotGeneration(t *testing.T) {
 	// Given
 	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
@@ -212,6 +252,57 @@ func TestSuperHTTPRuntimeRecoveryStateDropsRemovedPeers(t *testing.T) {
 		t.Fatal("removed peer retained recovery state")
 	}
 }
+
+func TestSuperHTTPRuntimeObservedEndpointsCapsAndSortsEligiblePeers(t *testing.T) {
+	// Given
+	now := time.Now()
+	device := &Device{
+		ID:         1,
+		EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 60}},
+	}
+	device.peers.IDMap = make(map[mtypes.Vertex]*Peer)
+	for id := mtypes.Vertex(2); id < 302; id++ {
+		peer := &Peer{ID: id, device: device, endpoint: runtimeTestEndpoint{}}
+		peer.LastPacketReceivedAdd1Sec.Store(&now)
+		device.peers.IDMap[id] = peer
+	}
+	runtime := NewSuperHTTPRuntime(device, mtypes.EdgeConfigV2{NodeID: device.ID})
+
+	// When
+	first := runtime.observedEndpoints()
+	second := runtime.observedEndpoints()
+
+	// Then
+	if len(first) != 256 {
+		t.Fatalf("observed endpoint count = %d, want 256", len(first))
+	}
+	if err := (&mtypes.ControlV2ReportRequest{NodeID: device.ID, Observed: first}).Validate(); err != nil {
+		t.Fatalf("capped observed report is invalid: %v", err)
+	}
+	for index, observed := range first {
+		wantID := mtypes.Vertex(index + 2)
+		if observed.TargetNodeID != wantID {
+			t.Fatalf("observed[%d] target = %v, want %v", index, observed.TargetNodeID, wantID)
+		}
+		if second[index] != observed {
+			t.Fatalf("observed endpoint order is not deterministic at index %d", index)
+		}
+	}
+}
+
+type runtimeTestEndpoint struct{}
+
+func (runtimeTestEndpoint) ClearSrc() {}
+
+func (runtimeTestEndpoint) SrcToString() string { return "192.0.2.1:51820" }
+
+func (runtimeTestEndpoint) DstToString() string { return "203.0.113.1:51820" }
+
+func (runtimeTestEndpoint) DstToBytes() []byte { return []byte("203.0.113.1:51820") }
+
+func (runtimeTestEndpoint) DstIP() net.IP { return net.ParseIP("203.0.113.1") }
+
+func (runtimeTestEndpoint) SrcIP() net.IP { return net.ParseIP("192.0.2.1") }
 
 func runtimeTestSnapshot(t *testing.T, revision uint64) *mtypes.ControlV2Snapshot {
 	t.Helper()
