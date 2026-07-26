@@ -305,11 +305,11 @@ func TestControlStateObservedVoteRemovalIsRevisionSafe(t *testing.T) {
 	// When the observer votes again and expires
 	reportObservedVote(t, svc, 2, 1, "198.51.100.11:51820")
 	now = now.Add(4 * time.Second)
+	svc.mu.Lock()
 	for _, id := range []mtypes.Vertex{1, 2, 3} {
-		if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: id}); err != nil {
-			t.Fatalf("heartbeat %d: %v", id, err)
-		}
+		svc.peers[id].view.LastSeen = now
 	}
+	svc.mu.Unlock()
 	now = now.Add(time.Second)
 	revision = svc.Revision()
 	eventCount = len(events)
@@ -321,6 +321,93 @@ func TestControlStateObservedVoteRemovalIsRevisionSafe(t *testing.T) {
 	}
 	if got := observedPeer(t, svc.SnapshotFor(3), 1).ObservedV4; len(got) != 0 {
 		t.Fatalf("expiry retained votes: %#v", got)
+	}
+}
+
+func TestControlStateObservedReportReplacesCompleteVoteSet(t *testing.T) {
+	// Given one observer voting for two targets and a reader of both targets.
+	svc := NewControlState(ControlStateConfig{})
+	registerObservedPeers(t, svc, 1, 2, 3, 4)
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) { events = append(events, event) })
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{
+		NodeID: 2,
+		Observed: []mtypes.ControlV2ObservedEndpoint{
+			{TargetNodeID: 1, Address: "198.51.100.10:51820"},
+			{TargetNodeID: 3, Address: "198.51.100.30:51820"},
+		},
+	}); err != nil {
+		t.Fatalf("initial report: %v", err)
+	}
+	if got := observedPeer(t, svc.SnapshotFor(4), 3).ObservedV4; len(got) != 1 {
+		t.Fatalf("initial target 3 hints = %#v", got)
+	}
+
+	// When the observer's next complete report omits target 3, its old vote is purged.
+	revision := svc.Revision()
+	eventCount := len(events)
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	if svc.Revision() != revision+1 || len(events) != eventCount+1 {
+		t.Fatalf("omitted target removal revision/events = %d/%d, want %d/%d", svc.Revision(), len(events), revision+1, eventCount+1)
+	}
+	if got := observedPeer(t, svc.SnapshotFor(4), 3).ObservedV4; len(got) != 0 {
+		t.Fatalf("omitted target retained hints: %#v", got)
+	}
+
+	// Then repeating the now-complete set is invisible to snapshot consumers.
+	revision = svc.Revision()
+	eventCount = len(events)
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	if svc.Revision() != revision || len(events) != eventCount {
+		t.Fatalf("unchanged complete set changed revision/events: %d/%d", svc.Revision(), len(events))
+	}
+}
+
+func TestControlStateSuppressedVoteExpiryIsSilent(t *testing.T) {
+	// Given a vote that is suppressed because it duplicates the target's candidate.
+	now := time.Unix(0, 0)
+	svc := NewControlState(ControlStateConfig{Now: func() time.Time { return now }, PeerAliveTimeout: 5 * time.Second})
+	target := controlRegisterRequest(1, "target")
+	target.PublicV4 = []string{"198.51.100.10:51820"}
+	if _, err := svc.Register(context.Background(), target, "target-key"); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+	registerObservedPeers(t, svc, 2, 3)
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) { events = append(events, event) })
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	if got := observedPeer(t, svc.SnapshotFor(3), 1).ObservedV4; len(got) != 0 {
+		t.Fatalf("self-suppressed vote published: %#v", got)
+	}
+
+	// When the vote expires while the observer remains alive, no published output changed.
+	svc.mu.Lock()
+	for _, id := range []mtypes.Vertex{1, 2, 3} {
+		svc.peers[id].view.LastSeen = now.Add(4 * time.Second)
+	}
+	svc.mu.Unlock()
+	now = now.Add(5 * time.Second)
+	revision := svc.Revision()
+	eventCount := len(events)
+	svc.SweepTimeouts()
+
+	// Then expiry produces neither a revision bump nor an event.
+	if svc.Revision() != revision || len(events) != eventCount {
+		t.Fatalf("suppressed vote expiry changed revision/events: %d/%d", svc.Revision(), len(events))
+	}
+}
+
+func TestControlStateSnapshotPeersAreSortedByNodeID(t *testing.T) {
+	// Given peers inserted in a deliberately unsorted order.
+	svc := NewControlState(ControlStateConfig{})
+	registerObservedPeers(t, svc, 30, 10, 20)
+
+	// Then every snapshot produces peers in NodeID order.
+	for i := 0; i < 32; i++ {
+		peers := svc.SnapshotFor(99).Peers
+		if len(peers) != 3 || peers[0].NodeID != 10 || peers[1].NodeID != 20 || peers[2].NodeID != 30 {
+			t.Fatalf("snapshot %d peer order = %#v", i, peers)
+		}
 	}
 }
 

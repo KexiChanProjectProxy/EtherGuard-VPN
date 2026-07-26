@@ -194,7 +194,10 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		s.mu.Unlock()
 		return ErrControlStateUnknownPeer
 	}
-	beforeObserved := s.observedHintsForTargetsLocked(observedTargets(req.Observed))
+	previousTargets := s.observedTargetsForObserverLocked(req.NodeID)
+	reportedTargets := make(map[mtypes.Vertex]struct{}, len(req.Observed))
+	hintTargets := append(previousTargets, observedTargets(req.Observed)...)
+	beforeObserved := s.observedHintsForTargetsLocked(hintTargets)
 	peer.candidates = cloneCandidates(req.Candidates)
 	peer.view.LastSeen = s.now()
 	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
@@ -211,12 +214,23 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		}
 	}
 	for _, observation := range req.Observed {
+		reportedTargets[observation.TargetNodeID] = struct{}{}
 		votes := s.observedVotes[observation.TargetNodeID]
 		if votes == nil {
 			votes = make(map[mtypes.Vertex]controlObservedVote)
 			s.observedVotes[observation.TargetNodeID] = votes
 		}
 		votes[req.NodeID] = controlObservedVote{address: observation.Address, receivedAt: s.now()}
+	}
+	for _, target := range previousTargets {
+		if _, reported := reportedTargets[target]; reported {
+			continue
+		}
+		votes := s.observedVotes[target]
+		delete(votes, req.NodeID)
+		if len(votes) == 0 {
+			delete(s.observedVotes, target)
+		}
 	}
 	viewChanged = viewChanged || s.observedHintsChangedLocked(beforeObserved)
 	if viewChanged {
@@ -257,17 +271,18 @@ func (s *ControlState) SweepTimeouts() int {
 	now := s.now()
 	s.mu.Lock()
 	removed := 0
-	var event *mtypes.ControlV2PeerChangePayload
-	eventKind := mtypes.ControlV2EventPeerChange
+	type affectedPeer struct {
+		name string
+		kind mtypes.ControlV2EventType
+	}
+	affected := make(map[mtypes.Vertex]affectedPeer)
 	beforeObserved := s.observedHintsForTargetsLocked(observedVoteTargets(s.observedVotes))
 	for target, votes := range s.observedVotes {
 		for observer, vote := range votes {
 			if s.peerAliveTimeout > 0 && !vote.receivedAt.Add(s.peerAliveTimeout).After(now) {
 				delete(votes, observer)
-				if event == nil {
-					if peer, ok := s.peers[target]; ok {
-						event = &mtypes.ControlV2PeerChangePayload{NodeID: target, NodeName: peer.view.NodeName}
-					}
+				if peer, ok := s.peers[target]; ok {
+					affected[target] = affectedPeer{name: peer.view.NodeName, kind: mtypes.ControlV2EventPeerChange}
 				}
 			}
 		}
@@ -277,20 +292,28 @@ func (s *ControlState) SweepTimeouts() int {
 	}
 	for id, peer := range s.peers {
 		if s.peerAliveTimeout > 0 && !peer.view.LastSeen.Add(s.peerAliveTimeout).After(now) {
-			if event == nil {
-				event = &mtypes.ControlV2PeerChangePayload{NodeID: id, NodeName: peer.view.NodeName}
-			}
-			eventKind = mtypes.ControlV2EventPeerGone
+			affected[id] = affectedPeer{name: peer.view.NodeName, kind: mtypes.ControlV2EventPeerGone}
 			delete(s.peers, id)
 			s.clearObservedVotesForObserverLocked(id)
 			delete(s.observedVotes, id)
 			removed++
 		}
 	}
-	if removed > 0 || s.observedHintsChangedLocked(beforeObserved) {
+	changed := removed > 0 || s.observedHintsChangedLocked(beforeObserved)
+	if changed {
 		s.revision++
 	}
 	rev := s.revision
+	var event *mtypes.ControlV2PeerChangePayload
+	eventKind := mtypes.ControlV2EventPeerChange
+	if changed {
+		for id, affectedPeer := range affected {
+			if event == nil || id < event.NodeID {
+				event = &mtypes.ControlV2PeerChangePayload{NodeID: id, NodeName: affectedPeer.name}
+				eventKind = affectedPeer.kind
+			}
+		}
+	}
 	s.mu.Unlock()
 	if event != nil {
 		s.emit(eventKind, event.NodeID, event.NodeName, rev)
@@ -314,6 +337,7 @@ func (s *ControlState) snapshotLocked(requester mtypes.Vertex, revision uint64) 
 		peer.LatencyMS = cloneLatency(peer.LatencyMS)
 		peers = append(peers, peer)
 	}
+	sort.Slice(peers, func(i, j int) bool { return peers[i].NodeID < peers[j].NodeID })
 	return mtypes.ControlV2Snapshot{Revision: revision, IssuedAt: s.now(), Parameters: cloneParameters(s.parameters), Peers: peers}
 }
 
