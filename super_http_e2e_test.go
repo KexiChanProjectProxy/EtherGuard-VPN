@@ -135,15 +135,20 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 	if err := topology.shutdown(shutdownCtx); err != nil {
 		t.Fatalf("clean topology shutdown: %v", err)
 	}
-	select {
-	case <-topology.edgeA.Wait():
-	case <-shutdownCtx.Done():
-		t.Fatal("Edge A did not close")
-	}
-	select {
-	case <-topology.edgeB.Wait():
-	case <-shutdownCtx.Done():
-		t.Fatal("Edge B did not close")
+	for _, edge := range []struct {
+		name string
+		done <-chan int
+	}{
+		{name: "A", done: topology.edgeA.Wait()},
+		{name: "B", done: topology.edgeB.Wait()},
+	} {
+		edgeCloseCtx, stopEdgeClose := context.WithTimeout(context.Background(), 3*time.Second)
+		select {
+		case <-edge.done:
+		case <-edgeCloseCtx.Done():
+			t.Fatalf("Edge %s did not close", edge.name)
+		}
+		stopEdgeClose()
 	}
 }
 

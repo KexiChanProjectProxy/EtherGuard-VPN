@@ -267,7 +267,10 @@ func (h *testHarness) serveSSE(w http.ResponseWriter, r *http.Request, _ mtypes.
 		return
 	}
 	defer renderer.Close()
-	<-r.Context().Done()
+	select {
+	case <-r.Context().Done():
+	case <-renderer.Subscriber().Done():
+	}
 }
 
 // sseWriter adapts http.ResponseWriter into the (io.Writer + Flush()) pair
@@ -853,6 +856,42 @@ func TestControlHTTPV2GracefulCancellation(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatalf("SSE renderer did not release after cancellation")
+	}
+}
+
+func TestControlHTTPV2SSETerminates_whenHubCloses(t *testing.T) {
+	// Given an authenticated Edge with an established SSE response.
+	h := newTestHarness(t)
+	const pskey = "edge-hub-close"
+	h.seedEdge(16, "pi", pskey)
+	req, err := http.NewRequest(http.MethodGet, h.server.URL+"/edge/v2/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	signRequest(req, 16, pskey, nil)
+	resp, err := h.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatalf("read initial SSE framing: %v", err)
+	}
+
+	// When the Super event hub becomes unavailable.
+	h.hub.Close()
+
+	// Then the active stream terminates so the Edge can enter polling fallback.
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, reader)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE response did not terminate after hub close")
 	}
 }
 

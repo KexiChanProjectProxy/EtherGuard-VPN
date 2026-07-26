@@ -228,7 +228,10 @@ func (h *ControlHTTPHandler) handleEvents(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer renderer.Close()
-	<-r.Context().Done()
+	select {
+	case <-r.Context().Done():
+	case <-renderer.Subscriber().Done():
+	}
 }
 
 // writeAuthError translates a *ControlAuthError into the uniform HTTP
