@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -41,9 +42,15 @@ type controlPeerRecord struct {
 	candidates []mtypes.ControlV2Candidate
 }
 
+type controlObservedVote struct {
+	address    string
+	receivedAt time.Time
+}
+
 type ControlState struct {
 	mu                 sync.RWMutex
 	peers              map[mtypes.Vertex]*controlPeerRecord
+	observedVotes      map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote
 	parameters         mtypes.ControlV2Parameters
 	graph              *graphpath.IG
 	peerAliveTimeout   time.Duration
@@ -58,7 +65,7 @@ func NewControlState(config ControlStateConfig) *ControlState {
 	if now == nil {
 		now = time.Now
 	}
-	return &ControlState{peers: make(map[mtypes.Vertex]*controlPeerRecord), parameters: cloneParameters(config.Parameters), graph: config.Graph, peerAliveTimeout: config.PeerAliveTimeout, usePSKForInterEdge: config.UsePSKForInterEdge, now: now, publish: config.Publish}
+	return &ControlState{peers: make(map[mtypes.Vertex]*controlPeerRecord), observedVotes: make(map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote), parameters: cloneParameters(config.Parameters), graph: config.Graph, peerAliveTimeout: config.PeerAliveTimeout, usePSKForInterEdge: config.UsePSKForInterEdge, now: now, publish: config.Publish}
 }
 
 func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2RegisterRequest, controlPSKey string) (mtypes.ControlV2Snapshot, error) {
@@ -73,6 +80,9 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 	}
 	s.mu.Lock()
 	old, exists := s.peers[req.NodeID]
+	observedTargets := s.observedTargetsForObserverLocked(req.NodeID)
+	observedTargets = append(observedTargets, req.NodeID)
+	beforeObserved := s.observedHintsForTargetsLocked(observedTargets)
 	candidateState := append([]mtypes.ControlV2Candidate{}, addressesToCandidates(req.LocalV4, mtypes.ControlV2CandidateLocal)...)
 	candidateState = append(candidateState, addressesToCandidates(req.LocalV6, mtypes.ControlV2CandidateLocal)...)
 	candidateState = append(candidateState, addressesToCandidates(req.PublicV4, mtypes.ControlV2CandidateSTUN)...)
@@ -84,6 +94,8 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 		changed = changed || !sameStrings(old.view.LocalV4, view.LocalV4) || !sameStrings(old.view.LocalV6, view.LocalV6) || !sameStrings(old.view.PublicV4, view.PublicV4) || !sameStrings(old.view.PublicV6, view.PublicV6)
 	}
 	s.peers[req.NodeID] = &controlPeerRecord{view: view, controlKey: controlPSKey, candidates: candidateState}
+	s.clearObservedVotesForObserverLocked(req.NodeID)
+	changed = changed || s.observedHintsChangedLocked(beforeObserved)
 	if changed {
 		s.revision++
 	}
@@ -123,6 +135,8 @@ func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) err
 		return ErrControlStateUnknownPeer
 	}
 	delete(s.peers, nodeID)
+	s.clearObservedVotesForObserverLocked(nodeID)
+	delete(s.observedVotes, nodeID)
 	name := peer.view.NodeName
 	s.revision++
 	rev := s.revision
@@ -180,6 +194,7 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		s.mu.Unlock()
 		return ErrControlStateUnknownPeer
 	}
+	beforeObserved := s.observedHintsForTargetsLocked(observedTargets(req.Observed))
 	peer.candidates = cloneCandidates(req.Candidates)
 	peer.view.LastSeen = s.now()
 	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
@@ -195,13 +210,23 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 			s.graph.UpdateLatency(pong.SourceNode, pong.DestNode, pong.LatencyMS, pong.AliveSeconds, 0, true, true)
 		}
 	}
+	for _, observation := range req.Observed {
+		votes := s.observedVotes[observation.TargetNodeID]
+		if votes == nil {
+			votes = make(map[mtypes.Vertex]controlObservedVote)
+			s.observedVotes[observation.TargetNodeID] = votes
+		}
+		votes[req.NodeID] = controlObservedVote{address: observation.Address, receivedAt: s.now()}
+	}
+	viewChanged = viewChanged || s.observedHintsChangedLocked(beforeObserved)
 	if viewChanged {
 		s.revision++
 	}
 	rev := s.revision
+	name := peer.view.NodeName
 	s.mu.Unlock()
 	if viewChanged {
-		s.emit(mtypes.ControlV2EventPeerChange, req.NodeID, peer.view.NodeName, rev)
+		s.emit(mtypes.ControlV2EventPeerChange, req.NodeID, name, rev)
 	}
 	return nil
 }
@@ -232,21 +257,43 @@ func (s *ControlState) SweepTimeouts() int {
 	now := s.now()
 	s.mu.Lock()
 	removed := 0
-	var events []mtypes.ControlV2PeerChangePayload
+	var event *mtypes.ControlV2PeerChangePayload
+	eventKind := mtypes.ControlV2EventPeerChange
+	beforeObserved := s.observedHintsForTargetsLocked(observedVoteTargets(s.observedVotes))
+	for target, votes := range s.observedVotes {
+		for observer, vote := range votes {
+			if s.peerAliveTimeout > 0 && !vote.receivedAt.Add(s.peerAliveTimeout).After(now) {
+				delete(votes, observer)
+				if event == nil {
+					if peer, ok := s.peers[target]; ok {
+						event = &mtypes.ControlV2PeerChangePayload{NodeID: target, NodeName: peer.view.NodeName}
+					}
+				}
+			}
+		}
+		if len(votes) == 0 {
+			delete(s.observedVotes, target)
+		}
+	}
 	for id, peer := range s.peers {
 		if s.peerAliveTimeout > 0 && !peer.view.LastSeen.Add(s.peerAliveTimeout).After(now) {
-			events = append(events, mtypes.ControlV2PeerChangePayload{NodeID: id, NodeName: peer.view.NodeName})
+			if event == nil {
+				event = &mtypes.ControlV2PeerChangePayload{NodeID: id, NodeName: peer.view.NodeName}
+			}
+			eventKind = mtypes.ControlV2EventPeerGone
 			delete(s.peers, id)
+			s.clearObservedVotesForObserverLocked(id)
+			delete(s.observedVotes, id)
 			removed++
 		}
 	}
-	if removed > 0 {
+	if removed > 0 || s.observedHintsChangedLocked(beforeObserved) {
 		s.revision++
 	}
 	rev := s.revision
 	s.mu.Unlock()
-	for _, event := range events {
-		s.emit(mtypes.ControlV2EventPeerGone, event.NodeID, event.NodeName, rev)
+	if event != nil {
+		s.emit(eventKind, event.NodeID, event.NodeName, rev)
 	}
 	return removed
 }
@@ -263,10 +310,129 @@ func (s *ControlState) snapshotLocked(requester mtypes.Vertex, revision uint64) 
 		peer.LocalV6 = append([]string{}, peer.LocalV6...)
 		peer.PublicV4 = append([]string{}, peer.PublicV4...)
 		peer.PublicV6 = append([]string{}, peer.PublicV6...)
+		peer.ObservedV4, peer.ObservedV6 = s.observedHintsLocked(id)
 		peer.LatencyMS = cloneLatency(peer.LatencyMS)
 		peers = append(peers, peer)
 	}
 	return mtypes.ControlV2Snapshot{Revision: revision, IssuedAt: s.now(), Parameters: cloneParameters(s.parameters), Peers: peers}
+}
+
+func (s *ControlState) observedTargetsForObserverLocked(observer mtypes.Vertex) []mtypes.Vertex {
+	targets := make([]mtypes.Vertex, 0)
+	for target, votes := range s.observedVotes {
+		if _, ok := votes[observer]; ok {
+			targets = append(targets, target)
+		}
+	}
+	return targets
+}
+
+func (s *ControlState) clearObservedVotesForObserverLocked(observer mtypes.Vertex) {
+	for target, votes := range s.observedVotes {
+		delete(votes, observer)
+		if len(votes) == 0 {
+			delete(s.observedVotes, target)
+		}
+	}
+}
+
+func observedTargets(observations []mtypes.ControlV2ObservedEndpoint) []mtypes.Vertex {
+	targets := make([]mtypes.Vertex, 0, len(observations))
+	for _, observation := range observations {
+		targets = append(targets, observation.TargetNodeID)
+	}
+	return targets
+}
+
+func observedVoteTargets(votes map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote) []mtypes.Vertex {
+	targets := make([]mtypes.Vertex, 0, len(votes))
+	for target := range votes {
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+func (s *ControlState) observedHintsForTargetsLocked(targets []mtypes.Vertex) map[mtypes.Vertex][]mtypes.ControlV2ObservedAddress {
+	hints := make(map[mtypes.Vertex][]mtypes.ControlV2ObservedAddress, len(targets))
+	for _, target := range targets {
+		v4, v6 := s.observedHintsLocked(target)
+		hints[target] = append(v4, v6...)
+	}
+	return hints
+}
+
+func (s *ControlState) observedHintsChangedLocked(before map[mtypes.Vertex][]mtypes.ControlV2ObservedAddress) bool {
+	for target, oldHints := range before {
+		v4, v6 := s.observedHintsLocked(target)
+		if !sameObservedHints(oldHints, append(v4, v6...)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *ControlState) observedHintsLocked(target mtypes.Vertex) ([]mtypes.ControlV2ObservedAddress, []mtypes.ControlV2ObservedAddress) {
+	record, ok := s.peers[target]
+	if !ok {
+		return nil, nil
+	}
+	selfCandidates := make(map[string]struct{}, len(record.candidates))
+	for _, candidate := range record.candidates {
+		selfCandidates[candidate.Address] = struct{}{}
+	}
+	counts := make(map[string]uint32)
+	for _, vote := range s.observedVotes[target] {
+		if _, self := selfCandidates[vote.address]; !self {
+			counts[vote.address]++
+		}
+	}
+	type observedHint struct {
+		mtypes.ControlV2ObservedAddress
+		ipv6 bool
+	}
+	hints := make([]observedHint, 0, len(counts))
+	for address, count := range counts {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			continue
+		}
+		ip := net.ParseIP(host)
+		hints = append(hints, observedHint{ControlV2ObservedAddress: mtypes.ControlV2ObservedAddress{Address: address, ReporterCount: count}, ipv6: ip != nil && ip.To4() == nil})
+	}
+	sort.Slice(hints, func(i, j int) bool {
+		if hints[i].ReporterCount != hints[j].ReporterCount {
+			return hints[i].ReporterCount > hints[j].ReporterCount
+		}
+		return hints[i].Address < hints[j].Address
+	})
+	var v4, v6 []mtypes.ControlV2ObservedAddress
+	for _, hint := range hints {
+		if len(v4)+len(v6) == 16 {
+			break
+		}
+		if hint.ipv6 {
+			if len(v6) < 14 {
+				v6 = append(v6, hint.ControlV2ObservedAddress)
+			}
+			continue
+		}
+		if len(v4) < 14 {
+			v4 = append(v4, hint.ControlV2ObservedAddress)
+		}
+	}
+	return v4, v6
+}
+
+func sameObservedHints(a, b []mtypes.ControlV2ObservedAddress) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *ControlState) emit(kind mtypes.ControlV2EventType, id mtypes.Vertex, name string, revision uint64) {

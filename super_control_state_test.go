@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -197,4 +199,228 @@ func TestControlStateRegisterCandidateSourceLabels(t *testing.T) {
 			t.Errorf("candidate %q source = %q, want %q", candidate.Address, candidate.Source, wantSource)
 		}
 	}
+}
+
+func TestControlStateObservedVotesAggregateReplaceAndRemainAnonymous(t *testing.T) {
+	// Given a target and two observers with a receipt-time clock
+	now := time.Unix(100, 0)
+	svc := NewControlState(ControlStateConfig{Now: func() time.Time { return now }, PeerAliveTimeout: time.Minute})
+	registerObservedPeers(t, svc, 1, 2, 3, 4)
+	targetLastSeen := observedPeer(t, svc.SnapshotFor(4), 1).LastSeen
+
+	// When observers report one canonical vote each and one replaces its vote
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	reportObservedVote(t, svc, 3, 1, "198.51.100.10:51820")
+	observed := observedPeer(t, svc.SnapshotFor(4), 1).ObservedV4
+	if len(observed) != 1 || observed[0].Address != "198.51.100.10:51820" || observed[0].ReporterCount != 2 {
+		t.Fatalf("aggregate after two votes = %#v", observed)
+	}
+	reportObservedVote(t, svc, 2, 1, "198.51.100.11:51820")
+
+	// Then the old vote is replaced, liveness is untouched, and JSON is anonymous.
+	peer := observedPeer(t, svc.SnapshotFor(4), 1)
+	if len(peer.ObservedV4) != 2 || peer.ObservedV4[0] != (mtypes.ControlV2ObservedAddress{Address: "198.51.100.10:51820", ReporterCount: 1}) || peer.ObservedV4[1] != (mtypes.ControlV2ObservedAddress{Address: "198.51.100.11:51820", ReporterCount: 1}) {
+		t.Fatalf("replacement aggregate = %#v", peer.ObservedV4)
+	}
+	if !peer.LastSeen.Equal(targetLastSeen) {
+		t.Fatalf("target LastSeen changed through observer vote: %s -> %s", targetLastSeen, peer.LastSeen)
+	}
+	encoded, err := json.Marshal(peer)
+	if err != nil {
+		t.Fatalf("marshal peer: %v", err)
+	}
+	if string(encoded) == "" || containsJSONKey(encoded, "observer") {
+		t.Fatalf("observed snapshot leaked attribution: %s", encoded)
+	}
+}
+
+func TestControlStateObservedSnapshotCapsAndSuppressesSelfCandidates(t *testing.T) {
+	// Given a target with a self-reported endpoint and enough reporters to exceed every cap
+	svc := NewControlState(ControlStateConfig{})
+	target := controlRegisterRequest(1, "target")
+	target.PublicV4 = []string{"198.51.100.250:51820"}
+	if _, err := svc.Register(context.Background(), target, "target-key"); err != nil {
+		t.Fatalf("register target: %v", err)
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(100, "reader"), "reader-key"); err != nil {
+		t.Fatalf("register reader: %v", err)
+	}
+	for id := mtypes.Vertex(2); id <= 34; id++ {
+		if _, err := svc.Register(context.Background(), controlRegisterRequest(id, fmt.Sprintf("observer-%d", id)), fmt.Sprintf("key-%d", id)); err != nil {
+			t.Fatalf("register observer %d: %v", id, err)
+		}
+		address := fmt.Sprintf("198.51.100.%d:51820", id)
+		if id == 2 {
+			address = "198.51.100.250:51820"
+		}
+		if id >= 20 {
+			address = fmt.Sprintf("[2001:db8::%x]:51820", id)
+		}
+		reportObservedVote(t, svc, id, 1, address)
+	}
+
+	// When another edge reads the target snapshot
+	peer := observedPeer(t, svc.SnapshotFor(100), 1)
+
+	// Then self candidates are absent and published hints obey total/family bounds.
+	if containsObserved(peer.ObservedV4, "198.51.100.250:51820") {
+		t.Fatalf("self candidate published: %#v", peer.ObservedV4)
+	}
+	if got := len(peer.ObservedV4) + len(peer.ObservedV6); got != 16 {
+		t.Fatalf("total observed hints = %d, want 16", got)
+	}
+	if len(peer.ObservedV4) > 14 || len(peer.ObservedV6) > 14 {
+		t.Fatalf("family caps exceeded: v4=%d v6=%d", len(peer.ObservedV4), len(peer.ObservedV6))
+	}
+}
+
+func TestControlStateObservedVoteRemovalIsRevisionSafe(t *testing.T) {
+	// Given an observed hint and an event collector
+	now := time.Unix(0, 0)
+	svc := NewControlState(ControlStateConfig{Now: func() time.Time { return now }, PeerAliveTimeout: 5 * time.Second})
+	registerObservedPeers(t, svc, 1, 2, 3)
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) { events = append(events, event) })
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+
+	// When an unchanged report is followed by observer re-registration
+	revision := svc.Revision()
+	eventCount := len(events)
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	if svc.Revision() != revision || len(events) != eventCount {
+		t.Fatalf("unchanged vote changed revision/events: revision=%d events=%d", svc.Revision(), len(events))
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(2, "observer-2"), "key-2"); err != nil {
+		t.Fatalf("re-register observer: %v", err)
+	}
+
+	// Then re-registration removes the hint through exactly one revision/event.
+	if svc.Revision() != revision+1 || len(events) != eventCount+1 {
+		t.Fatalf("re-register removal revision/events = %d/%d, want %d/%d", svc.Revision(), len(events), revision+1, eventCount+1)
+	}
+	if got := observedPeer(t, svc.SnapshotFor(3), 1).ObservedV4; len(got) != 0 {
+		t.Fatalf("re-register retained votes: %#v", got)
+	}
+
+	// When the observer votes again and expires
+	reportObservedVote(t, svc, 2, 1, "198.51.100.11:51820")
+	now = now.Add(4 * time.Second)
+	for _, id := range []mtypes.Vertex{1, 2, 3} {
+		if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: id}); err != nil {
+			t.Fatalf("heartbeat %d: %v", id, err)
+		}
+	}
+	now = now.Add(time.Second)
+	revision = svc.Revision()
+	eventCount = len(events)
+	svc.SweepTimeouts()
+
+	// Then expiry removes the stale observer vote with one revision/event.
+	if svc.Revision() != revision+1 || len(events) != eventCount+1 {
+		t.Fatalf("expiry removal revision/events = %d/%d, want %d/%d", svc.Revision(), len(events), revision+1, eventCount+1)
+	}
+	if got := observedPeer(t, svc.SnapshotFor(3), 1).ObservedV4; len(got) != 0 {
+		t.Fatalf("expiry retained votes: %#v", got)
+	}
+}
+
+func TestControlStateObservedVotesClearWhenObserverDeletes(t *testing.T) {
+	// Given an observer vote visible to a third edge
+	svc := NewControlState(ControlStateConfig{})
+	registerObservedPeers(t, svc, 1, 2, 3)
+	reportObservedVote(t, svc, 2, 1, "198.51.100.10:51820")
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) { events = append(events, event) })
+	revision := svc.Revision()
+
+	// When the observer is deleted
+	if err := svc.DeletePeer(context.Background(), 2); err != nil {
+		t.Fatalf("delete observer: %v", err)
+	}
+
+	// Then its vote disappears through one revision notification.
+	if svc.Revision() != revision+1 || len(events) != 1 {
+		t.Fatalf("delete removal revision/events = %d/%d, want %d/1", svc.Revision(), len(events), revision+1)
+	}
+	if got := observedPeer(t, svc.SnapshotFor(3), 1).ObservedV4; len(got) != 0 {
+		t.Fatalf("delete retained votes: %#v", got)
+	}
+}
+
+func TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps(t *testing.T) {
+	// Given a shared state with one target, readers, and live observers
+	svc := NewControlState(ControlStateConfig{PeerAliveTimeout: time.Hour})
+	registerObservedPeers(t, svc, 1, 100)
+	for id := mtypes.Vertex(2); id < 18; id++ {
+		registerObservedPeers(t, svc, id)
+	}
+
+	// When reports, snapshots, and timeout sweeps race through the state lock
+	var wg sync.WaitGroup
+	for id := mtypes.Vertex(2); id < 18; id++ {
+		wg.Add(1)
+		go func(observer mtypes.Vertex) {
+			defer wg.Done()
+			reportObservedVote(t, svc, observer, 1, fmt.Sprintf("198.51.100.%d:51820", observer))
+		}(id)
+	}
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.SnapshotFor(100)
+			svc.SweepTimeouts()
+		}()
+	}
+	wg.Wait()
+
+	// Then the bounded snapshot remains usable after concurrent mutation.
+	if got := len(observedPeer(t, svc.SnapshotFor(100), 1).ObservedV4); got != 14 {
+		t.Fatalf("concurrent observed hints = %d, want 14", got)
+	}
+}
+
+func registerObservedPeers(t *testing.T, svc *ControlState, ids ...mtypes.Vertex) {
+	t.Helper()
+	for _, id := range ids {
+		if _, err := svc.Register(context.Background(), controlRegisterRequest(id, fmt.Sprintf("observer-%d", id)), fmt.Sprintf("key-%d", id)); err != nil {
+			t.Fatalf("register %d: %v", id, err)
+		}
+	}
+}
+
+func reportObservedVote(t *testing.T, svc *ControlState, observer, target mtypes.Vertex, address string) {
+	t.Helper()
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: observer, Observed: []mtypes.ControlV2ObservedEndpoint{{TargetNodeID: target, Address: address}}}); err != nil {
+		t.Fatalf("report observer %d target %d: %v", observer, target, err)
+	}
+}
+
+func observedPeer(t *testing.T, snapshot mtypes.ControlV2Snapshot, id mtypes.Vertex) mtypes.ControlV2Peer {
+	t.Helper()
+	for _, peer := range snapshot.Peers {
+		if peer.NodeID == id {
+			return peer
+		}
+	}
+	t.Fatalf("peer %d absent from snapshot: %#v", id, snapshot.Peers)
+	return mtypes.ControlV2Peer{}
+}
+
+func containsObserved(observed []mtypes.ControlV2ObservedAddress, address string) bool {
+	for _, hint := range observed {
+		if hint.Address == address {
+			return true
+		}
+	}
+	return false
+}
+
+func containsJSONKey(encoded []byte, key string) bool {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return true
+	}
+	_, found := decoded[key]
+	return found
 }
