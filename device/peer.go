@@ -196,8 +196,9 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 		if et.superAttempt == nil {
 			et.superAttempt = make(map[string]struct{})
 		}
+		_, alreadyAttempted := et.superAttempt[smallest.URL]
 		et.superAttempt[smallest.URL] = struct{}{}
-		if len(et.superAttempt) == len(et.trymap_super) {
+		if !alreadyAttempted && len(et.superAttempt) == len(et.trymap_super) {
 			et.superCycleComplete = true
 		}
 	}

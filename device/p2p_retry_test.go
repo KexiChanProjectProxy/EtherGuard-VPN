@@ -132,6 +132,31 @@ func TestEndpointTrylistConsumesOneCompletionPerSnapshotGeneration(t *testing.T)
 	}
 }
 
+func TestEndpointTrylistDoesNotRepeatCompletionWithinSnapshotGeneration(t *testing.T) {
+	// Given
+	trylist := newSuperTrylistForTest()
+	trylist.UpdateSuper(superCandidates(
+		mtypes.APIConnURLCandidate{URL: "192.0.2.10:51820", Source: mtypes.APIConnURLSourceLocal},
+		mtypes.APIConnURLCandidate{URL: "192.0.2.20:51820", Source: mtypes.APIConnURLSourceSTUN},
+	), true, 0)
+	trylist.GetNextTry()
+	trylist.GetNextTry()
+
+	// When
+	completed := trylist.ConsumeSuperCycleComplete()
+	for range 3 {
+		trylist.GetNextTry()
+		if trylist.ConsumeSuperCycleComplete() {
+			t.Fatal("completion repeated after the snapshot candidate pass was already consumed")
+		}
+	}
+
+	// Then
+	if !completed {
+		t.Fatal("completion was not reported after the initial candidate pass")
+	}
+}
+
 func TestEndpointTrylistSuperSnapshotUpdateIsSafeConcurrentWithRetries(t *testing.T) {
 	// Given
 	trylist := newSuperTrylistForTest()
