@@ -1,0 +1,112 @@
+## [2026-07-25 12:50] Task: 6 — replay-safe per-Edge HMAC auth at the Control API boundary (w3-auth)
+
+### Worktree
+- `/home/kexi/eg-super-http/w3-auth` (branch `super-http-w3-auth`)
+- HEAD before: `12e1f26 merge: Super control event hub (task 7)`
+- New HEAD: pending (this commit).
+
+### Files written
+- `super_control_auth.go`       (~340 LOC incl. comments)
+- `super_control_auth_test.go`  (~660 LOC, 21 tests)
+
+No existing file was modified.
+
+### TDD red proof
+```
+$ go vet ./... (FAIL: undefined: ControlAuthenticator)
+$ go vet ./... (FAIL: cannot call pointer method ToString on mtypes.Vertex)
+  -> fixed by assigning local vars before .ToString() (Vertex has pointer
+     receiver; map/return values are not addressable)
+$ go vet ./... (ok: only pre-existing orderdmap warnings; new code clean)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlAuth' (ok 1.277s, 21/21 PASS)
+$ go test -race -shuffle=on -count=1 ./... (ok: root/device/gencfg/mtypes/ratelimiter/replay/tai64n all green)
+$ go vet . (only pre-existing orderdmap warnings; new code clean)
+```
+
+### Tests (21, all passing)
+1. TestControlAuthHappyPath                          — valid signed request passes; NodeID + body returned
+2. TestControlAuthBadSignature                       — tampered HMAC fails; error is *ControlAuthError; key/original-sig not leaked
+3. TestControlAuthWrongPath                          — signature bound to /snapshot, request rewritten to /report → fails
+4. TestControlAuthWrongMethod                        — GET→POST swap fails
+5. TestControlAuthWrongBodyDigest                    — body mutated after signing → digest mismatch fails
+6. TestControlAuthStaleTimestamp                     — ts 5 min in past (re-signed for valid HMAC) → fails
+7. TestControlAuthFutureTimestampBeyondSkew          — ts 10 min ahead (re-signed) → fails
+8. TestControlAuthReplayRejected                     — same request sent twice → second fails
+9. TestControlAuthOversizedBodyRejectedBeforeFullRead— body > 1 MiB → ErrControlAuthBodyTooLarge
+10. TestControlAuthUnknownNodeID                      — NodeID 100 not registered → ErrControlAuthUnknownNode
+11. TestControlAuthKeyIsolation                       — A's key signing for B's NodeID → fails
+12. TestControlAuthErrorDoesNotLeakKeyMaterial        — tampered/wrong-path/unknown-node errors carry no key bytes
+13. TestControlAuthNonceCacheBounded                  — 500 distinct nonces w/ cap 64; cache ≤ 64
+14. TestControlAuthConcurrentRequests                 — 16 goroutines × 50 distinct reqs → 0 failures under -race
+15. TestControlAuthNonceTTLExpiryAllowsReplayAfterTTL — same req after TTL expiry succeeds
+16. TestControlAuthMissingHeaders                     — each of the 4 headers individually removed → fails
+17. TestControlAuthSpecialNodeIDRejected              — NodeID_SuperNode → fails
+18. TestControlAuthNonceCacheEvictsExpiredEntries    — 5 nonces, sweep after TTL → cache empties
+19. TestControlAuthBodyCapReadsNoMoreThanCap          — body > cap with HMAC over prefix → ErrControlAuthBodyTooLarge
+20. TestControlAuthViaHTTPServer                      — httptest.Server end-to-end (handler sees authed NodeID)
+21. TestControlAuthHTTPErrorResponseNoKeyMaterial     — uniform 401 response body contains no PSKey bytes
+22. TestControlAuthNoLeakViaContextOrLog              — wrapped error chain carries no PSKey; both sub-check
+                                                        errors map to 401 via ControlAuthHTTPStatus
+
+### Public API surface (consume these names exactly — task 9 wires them in)
+Constants (in `super_control_auth.go`):
+- `ControlAuthHeaderNodeID = "X-EG-NodeID"`
+- `ControlAuthHeaderTimestamp = "X-EG-Timestamp"`
+- `ControlAuthHeaderNonce = "X-EG-Nonce"`
+- `ControlAuthHeaderSignature = "X-EG-Signature"`
+- `ControlAuthTimestampSkew = 60 * time.Second`
+- `ControlAuthMaxBodyBytes int64 = 1 << 20`           (1 MiB)
+- `defaultControlAuthMaxNonceCache = 16 << 10`        (16384)
+- `defaultControlAuthNonceTTL = 2 * ControlAuthTimestampSkew`
+
+Public error sentinels (used via errors.Is):
+- `ErrControlAuthMissingHeader`
+- `ErrControlAuthInvalidNodeID`
+- `ErrControlAuthUnknownNode`
+- `ErrControlAuthInvalidTimestamp`
+- `ErrControlAuthBodyTooLarge`
+- `ErrControlAuthInvalidSignature`
+- `ErrControlAuthReplay`
+
+Types / helpers:
+- `ControlAuthError` (single uniform error type; Error() always returns the
+  constant `"control auth failed"`; underlying Code sentinel via Unwrap).
+- `IsControlAuthError(err) bool`
+- `ControlAuthHTTPStatus(err) int` — maps to 401 (everything) or 413
+  (body-too-large only).
+
+Verifier (root package `main`):
+- `ControlAuthenticatorConfig` — `Now func() time.Time`, `NonceCacheTTL time.Duration`,
+  `MaxNonceCache int`. Sensible defaults for nil/0.
+- `NewControlAuthenticator(state *ControlState, cfg ControlAuthenticatorConfig) *ControlAuthenticator`
+- `(a *ControlAuthenticator).Verify(r *http.Request) (mtypes.Vertex, []byte, error)`
+- `(a *ControlAuthenticator).SweepNonces() int` — runtime eviction hook (task 11 wires it on a timer)
+- `(a *ControlAuthenticator).RegisterTestKey(nodeID mtypes.Vertex, pskey string)` — TEST-ONLY
+- `(a *ControlAuthenticator).NonceCacheSizeForTest() int` — TEST-ONLY
+- `(a *ControlAuthenticator).SweepNoncesForTest() int` — TEST-ONLY
+
+Test-only extension on `ControlState`:
+- `(s *ControlState).setControlKeyForTest(nodeID, pskey)` — installed under
+  the same write lock used by Register; emits peer_change outside the lock
+  on first registration. Used by the verifier's RegisterTestKey helper.
+
+### Design / invariant summary
+1. The verifier resolves the per-Edge control PSKey exclusively via
+   `ControlState.ControlKeyFor(nodeID)`. The lock is released before the
+   HMAC computation runs.
+2. Body is bounded BEFORE hashing via `http.MaxBytesReader` so a >1 MiB
+   payload is short-circuited at the network layer.
+3. Timestamp window is ±ControlAuthTimestampSkew (=60s). Stale and
+   future-beyond-skew requests are rejected.
+4. Nonce cache is per-(NodeID, nonce) so two Edges can independently reuse
+   a nonce string. TTL defaults to 2× the skew window. Cap defaults to 16384.
+5. HMAC comparison via `hmac.Equal` (constant-time).
+6. Every sub-check returns `*ControlAuthError{Code: <sentinel>}`. The
+   `Error()` method always returns `"control auth failed"`. No sub-check
+   detail is exposed to clients; the HTTP handler maps to 401 (or 413 for
+   body-too-large) and writes a generic body.
+7. `ControlPSKey` and the expected signature are NEVER serialised, logged,
+   included in error messages, returned through Verify, or surfaced via
+   the HTTP error response.
+8. `RegisterTestKey` is the only path that bypasses the normal Register
+   flow; production code MUST use `ControlState.Register`.

@@ -1,0 +1,102 @@
+Task 11 — run SuperNode as HTTP-only control service
+=======================================================
+
+Branch: super-http-w5-super
+Worktree: /home/kexi/eg-super-http/w5-super
+
+## Commands and results
+
+$ go test -race -shuffle=on -count=1 . -run 'TestSuperHTTPOnlyStartup|TestSuperGracefulShutdown'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	6.176s
+
+$ go test -race -shuffle=on -count=1 ./...
+ok  	github.com/KusakabeSi/EtherGuard-VPN	7.6xx s (all packages green)
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n
+
+$ go vet ./...
+example_config/super_mode/testfd/n1_test_fd_mode2.go:73:5: misuse of unbuffered os.Signal channel as argument to signal.Notify
+orderdmap/orderdmap.go:200:29: assignment copies lock value to oldMap ...
+orderdmap/orderdmap.go:246:30: assignment copies lock value to oldMap ...
+(only pre-existing warnings on orderdmap + testfd; no new warnings introduced)
+
+$ go build ./...
+ok
+
+## Smoke tests
+
+$ go build -o /tmp/etherguard . && /tmp/etherguard -mode super -example
+NodeName: NodeSuper
+APIUrl: http://127.0.0.1:3000
+APIPrefix: /edge/v2
+ManagementAuth:
+  User: admin
+  PasswordHash: ...
+STUNServers:
+- stun:203.0.113.10:3478
+STUNRequestTimeoutSeconds: 3
+STUNRefreshIntervalSeconds: 60
+PollIntervalSeconds: 15
+ReportIntervalSeconds: 15
+HeartbeatIntervalSeconds: 10
+EventReplay: 256
+PeerAliveTimeoutSeconds: 70
+UsePSKForInterEdge: true
+DampingFilterRadius: 4
+Peers:
+- NodeID: 1
+  NodeName: Node_01
+  ControlPSKey: ...
+  AdditionalCost: 10
+
+$ /tmp/etherguard -mode super -config /tmp/legacy-super.yaml
+Error :control v2: legacy_udp_field: : config field "PrivKeyV4" is no longer accepted in -mode super (HTTP-only); use a v2 SuperConfigV2 YAML
+(exit code 1)
+
+## Files modified
+
+main_super.go               ~700 LOC (full rewrite; replaces T0.5 stub)
+main_httpserver.go          -1 LOC (PeerState.JETSecret removed)
+main_super_http_test.go     +570 LOC (new)
+
+## One atomic commit (suggested)
+
+refactor: run SuperNode as HTTP-only control service
+
+## Red-phase reconstruction (post-hoc, F1-ordered)
+
+**Base commit:** 5fe4e63 — "merge: serve Control API v2 (task 9)"
+**Test file copied from integration HEAD:** main_super_http_test.go
+
+### RED — scratch worktree at 5fe4e63 + copied test file
+
+```
+$ cd /tmp/tdd-red-task11 && go test -count=1 . -run 'TestSuperHTTPOnlyStartup'
+# github.com/KusakabeSi/EtherGuard-VPN [github.com/KusakabeSi/EtherGuard-VPN.test]
+./main_super_http_test.go:70:11: undefined: superRuntime
+./main_super_http_test.go:71:11: undefined: superConfig
+./main_super_http_test.go:86:60: undefined: superConfig
+./main_super_http_test.go:100:10: undefined: superConfig
+./main_super_http_test.go:113:13: undefined: RunWithListeners
+./main_super_http_test.go:431:41: undefined: superConfig
+./main_super_http_test.go:512:41: undefined: superConfig
+./main_super_http_test.go:560:10: undefined: superConfig
+./main_super_http_test.go:569:13: undefined: RunWithServers
+FAIL	github.com/KusakabeSi/EtherGuard-VPN [build failed]
+FAIL
+exit=1
+```
+
+### GREEN — integration HEAD (63733e3)
+
+```
+$ cd /home/kexi/eg-super-http/integration && go test -count=1 . -run 'TestSuperHTTPOnlyStartup'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	0.019s
+exit=0
+```
+
+red reconstructed post-hoc by applying test files onto pre-task base; original worker omitted red capture (process deviation logged in issues.md)

@@ -1,0 +1,33 @@
+[2026-07-25T13:07:57-04:00] Task 10 runtime implementation
+- RED: focused test initially failed with undefined NewSuperHTTPRuntime.
+- PASS: go test -race -shuffle=on -count=1 ./device -run 'TestSuperHTTPRuntime'
+- PASS: go test -race -shuffle=on -count=1 ./...
+- go vet ./... blocked by pre-existing warnings in orderdmap/orderdmap.go:200,246 and example_config/super_mode/testfd/n1_test_fd_mode2.go:73; no task-owned file warning.
+- Runtime waits for SuperHTTPReady after listen_port setup, registers local/STUN candidates, serializes snapshot apply, runs client Sync + reports, and cancels on Device.Close.
+
+## Red-phase reconstruction (post-hoc, F1-ordered)
+
+**Base commit:** 12e1f26 — "merge: Super control event hub (task 7)"
+**Test file copied from integration HEAD:** device/super_http_runtime_test.go
+
+### RED — scratch worktree at 12e1f26 + copied test file
+
+```
+$ cd /tmp/tdd-red-task10 && go test -count=1 ./device -run 'TestSuperHTTPRuntime'
+# github.com/KusakabeSi/EtherGuard-VPN/device [github.com/KusakabeSi/EtherGuard-VPN/device.test]
+device/super_http_runtime_test.go:38:13: undefined: NewSuperHTTPRuntime
+device/super_http_runtime_test.go:78:13: undefined: NewSuperHTTPRuntime
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/device [build failed]
+FAIL
+exit=1
+```
+
+### GREEN — integration HEAD (63733e3)
+
+```
+$ cd /home/kexi/eg-super-http/integration && go test -count=1 ./device -run 'TestSuperHTTPRuntime'
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	0.071s
+exit=0
+```
+
+red reconstructed post-hoc by applying test files onto pre-task base; original worker omitted red capture (process deviation logged in issues.md)

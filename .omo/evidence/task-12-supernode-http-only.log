@@ -1,0 +1,99 @@
+## Task 12: Document the breaking Super v2 operation
+## Branch: super-http-w6-docs (commit 11dc479)
+## Worktree: /home/kexi/eg-super-http/w6-docs
+## Date: 2026-07-25
+
+### Files modified
+- README.md (+1/-1) — Updated Super Mode description in Working Mode table
+- README_zh.md (+1/-1) — Updated Super Mode description in Working Mode table
+- example_config/super_mode/README.md (+418/-812) — Full rewrite for v2 HTTP-only
+- example_config/super_mode/README_zh.md (+??/-??) — Chinese translation synced
+- docs_contract_test.go (new, 274 LOC) — Assertion check for docs correctness
+
+### What was documented
+1. Quick-start with v2 gensuper.yaml and generated configs
+2. Control API v2 routes: POST register/report, GET snapshot/events
+3. HMAC signing scheme (X-EG-NodeID/Timestamp/Nonce/Signature headers)
+4. Security boundary: ControlPSKey is per-Edge SECRET, json:"-" tag
+5. TLS via reverse proxy required for production
+6. SSE with Last-Event-ID + polling fallback + ETag/304
+7. STUN same-socket limitation
+8. No relay/TURN: failed hole-punch = unreachable
+9. v1 config rejection with migration pointer
+10. Complete v2 SuperNode and EdgeNode config parameter tables
+
+### docs_contract_test.go covers
+- TestDocsNoLegacyUDPSuperKeys: no PrivKeyV4/V6/ListenPort/FwMark/API_Prefix in Super context
+- TestDocsNoServerUpdateUDPConcept: no "### ServerUpdate" heading
+- TestDocsReferenceV2APIRoutes: all /edge/v2/* routes match super_control_http.go
+- TestDocsReferenceValidYAMLKeys: YAML keys in Super config tables match v2 structs
+- TestDocsControlAPIHeadersMatch: all four X-EG-* headers present
+- TestDocsProtocolVersionMatch: "v2" present
+- TestDocsEventTypesMatch: peer_change/peer_gone/params_change/revision present
+
+### Verification
+```
+$ cd /home/kexi/eg-super-http/w6-docs
+$ go test -race -shuffle=on -count=1 ./...
+ok  github.com/KusakabeSi/EtherGuard-VPN     7.746s
+ok  github.com/KusakabeSi/EtherGuard-VPN/device     2.104s
+ok  github.com/KusakabeSi/EtherGuard-VPN/gencfg     1.094s
+ok  github.com/KusakabeSi/EtherGuard-VPN/mtypes     1.043s
+ok  github.com/KusakabeSi/EtherGuard-VPN/ratelimiter 1.025s
+ok  github.com/KusakabeSi/EtherGuard-VPN/replay      1.030s
+ok  github.com/KusakabeSi/EtherGuard-VPN/tai64n      1.024s
+```
+
+### Commit
+11dc479 docs: describe HTTP-only Super mode v2
+
+## Red-phase reconstruction (post-hoc, F1-ordered)
+
+**Base commit:** f44d87a — "merge: HTTP-only Super control service (task 11)"
+**Test file copied from integration HEAD:** docs_contract_test.go
+
+### RED — scratch worktree at f44d87a + copied test file
+
+```
+$ cd /tmp/tdd-red-task12 && go test -count=1 . -run 'TestDocs'
+--- FAIL: TestDocsControlAPIHeadersMatch (0.00s)
+    docs_contract_test.go:181: example_config/super_mode/README.md: missing HMAC header "X-EG-NodeID"
+    docs_contract_test.go:181: example_config/super_mode/README.md: missing HMAC header "X-EG-Timestamp"
+    docs_contract_test.go:181: example_config/super_mode/README.md: missing HMAC header "X-EG-Nonce"
+    docs_contract_test.go:181: example_config/super_mode/README.md: missing HMAC header "X-EG-Signature"
+    docs_contract_test.go:181: example_config/super_mode/README_zh.md: missing HMAC header "X-EG-NodeID"
+    docs_contract_test.go:181: example_config/super_mode/README_zh.md: missing HMAC header "X-EG-Timestamp"
+    docs_contract_test.go:181: example_config/super_mode/README_zh.md: missing HMAC header "X-EG-Nonce"
+    docs_contract_test.go:181: example_config/super_mode/README_zh.md: missing HMAC header "X-EG-Signature"
+--- FAIL: TestDocsProtocolVersionMatch (0.00s)
+    docs_contract_test.go:194: README.md: missing protocol version "v2"
+    docs_contract_test.go:194: README_zh.md: missing protocol version "v2"
+    docs_contract_test.go:194: example_config/super_mode/README.md: missing protocol version "v2"
+    docs_contract_test.go:194: example_config/super_mode/README_zh.md: missing protocol version "v2"
+--- FAIL: TestDocsEventTypesMatch (0.00s)
+    docs_contract_test.go:213: example_config/super_mode/README.md: missing SSE event type "peer_change"
+    docs_contract_test.go:213: example_config/super_mode/README.md: missing SSE event type "peer_gone"
+    docs_contract_test.go:213: example_config/super_mode/README.md: missing SSE event type "params_change"
+    docs_contract_test.go:213: example_config/super_mode/README.md: missing SSE event type "revision"
+    docs_contract_test.go:213: example_config/super_mode/README_zh.md: missing SSE event type "peer_change"
+    docs_contract_test.go:213: example_config/super_mode/README_zh.md: missing SSE event type "peer_gone"
+    docs_contract_test.go:213: example_config/super_mode/README_zh.md: missing SSE event type "params_change"
+    docs_contract_test.go:213: example_config/super_mode/README_zh.md: missing SSE event type "revision"
+--- FAIL: TestDocsNoServerUpdateUDPConcept (0.00s)
+    docs_contract_test.go:62: example_config/super_mode/README.md: legacy '### ServerUpdate' heading found (UDP concept removed in v2)
+    docs_contract_test.go:62: example_config/super_mode/README_zh.md: legacy '### ServerUpdate' heading found (UDP concept removed in v2)
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	0.026s
+FAIL
+exit=1
+```
+
+### GREEN — integration HEAD (63733e3)
+
+```
+$ cd /home/kexi/eg-super-http/integration && go test -count=1 . -run 'TestDocs'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	0.023s
+exit=0
+```
+
+red reconstructed post-hoc by applying test files onto pre-task base; original worker omitted red capture (process deviation logged in issues.md)

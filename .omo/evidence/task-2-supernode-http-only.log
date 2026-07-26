@@ -1,0 +1,28 @@
+
+## 2026-07-25 Task 2: Generate HTTP-only Super v2 configurations
+Worktree: /home/kexi/eg-super-http/w2-gencfg
+
+RED PHASE
+$ go test -race -shuffle=on -count=1 ./gencfg -run 'TestGenSuperCfgHTTPOnly|TestGeneratedControlKeysAreIsolated'
+EXIT_CODE=1
+FAIL: gencfg did not compile because example_conf.go and gencfgSM.go referenced removed SuperConfig fields PrivKeyV4, PrivKeyV6, ListenPort, and API_Prefix.
+
+GREEN PHASE
+$ go test -race -shuffle=on -count=1 ./gencfg -run 'TestGenSuperCfgHTTPOnly|TestGeneratedControlKeysAreIsolated'
+EXIT_CODE=0
+ok github.com/KusakabeSi/EtherGuard-VPN/gencfg
+$ go test -race -shuffle=on -count=1 ./gencfg
+EXIT_CODE=0
+ok github.com/KusakabeSi/EtherGuard-VPN/gencfg
+$ go build ./gencfg
+EXIT_CODE=0
+$ go vet ./gencfg
+EXIT_CODE=0
+$ GIT_MASTER=1 git diff --check
+EXIT_CODE=0
+
+Assertions:
+- Happy path: generated SuperConfigV2 and EdgeConfigV2 YAML parse and Validate successfully; API URL/prefix and IP-literal STUN list are retained.
+- Failure guard: generated YAML is rejected by tests if obsolete PrivKeyV4, PrivKeyV6, ListenPort, FwMark, or API_Prefix keys appear.
+- Isolation: each Edge ControlPSKey matches exactly its own SuperConfigV2Peer and no generated Edge config contains another Edge's control key.
+- Templates: Super v2 template parsing fails on legacy UDP fields through SuperConfigV2.UnmarshalYAML rather than silently dropping them.

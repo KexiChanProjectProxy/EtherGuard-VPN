@@ -1,0 +1,8 @@
+# Worktree preflight - supernode-http-only
+# Recorded: 2026-07-25T10:49:39-04:00
+## git status --porcelain
+?? .omo/
+## git rev-parse HEAD
+ea5f05be01be567e53765d1909d4af87175e0168
+## git branch --show-current
+master

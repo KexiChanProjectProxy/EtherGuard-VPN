@@ -1,0 +1,58 @@
+TDD red phase command: go test ./device -run TestControlHTTPClient -count=1
+exit=0 (placeholder test skipped; implementation pending)
+Targeted test: go test -race -shuffle=on -count=1 ./device -run TestControlHTTPClient
+exit=0
+TDD green phase:
+go test -race -shuffle=on -count=1 ./device -run TestControlHTTPClient|TestSSEParser => ok (1.197s)
+go test -race -shuffle=on -count=1 ./device => ok (1.212s)
+go build ./device => ok
+go vet ./device => ok
+notepad append: learnings.md updated
+
+TDD fix iteration (round 2):
+- Replaced soft t.Logf reconnect assertion with hard check: second SSE connect MUST carry Last-Event-ID=evt-1.
+- Added TestControlHTTPClientSyncPollingFallback: 3 SSE 503s then success, polling ticker must fire >= 3 snapshots during the down window.
+- Added TestControlHTTPClientSyncMonotonic: stale snapshots must NEVER trigger apply; rev=10 pre-seed must survive.
+- Restructured Sync: polling runs on a dedicated goroutine independent of SSE state; SSE reconnect uses bounded exponential backoff with jitter (default 100ms..30s, configurable via MinBackoff/MaxBackoff/Jitter).
+- SSE event IDs recorded on every successful delivery via recordEventID; replayed on reconnect via Last-Event-ID header.
+- SSE parser: per-test ParseReader helper to avoid io.Reader interface dispatch.
+
+Verification (round 2):
+- go test -race -shuffle=on -count=1 ./device -run 'TestControlHTTPClient|TestSSEParser' => ok (1.985s)
+- go test -race -shuffle=on -count=1 ./device => ok (2.035s)
+- go vet ./device => ok
+- go build ./device => ok
+
+## Red-phase reconstruction (post-hoc, F1-ordered)
+
+**Base commit:** fd1786b — "config: define HTTP-only Super control contracts"
+**Test file copied from integration HEAD:** device/super_http_client_test.go
+
+### RED — scratch worktree at fd1786b + copied test file
+
+```
+$ cd /tmp/tdd-red-task4 && go test -count=1 ./device -run 'TestControlHTTPClient'
+# github.com/KusakabeSi/EtherGuard-VPN/device [github.com/KusakabeSi/EtherGuard-VPN/device.test]
+device/super_http_client_test.go:32:90: undefined: ControlHTTPClient
+device/super_http_client_test.go:34:7: undefined: NewControlHTTPClient
+device/super_http_client_test.go:53:24: undefined: HeaderTimestamp
+device/super_http_client_test.go:54:24: undefined: HeaderNonce
+device/super_http_client_test.go:55:22: undefined: HeaderSignature
+device/super_http_client_test.go:56:23: undefined: HeaderNodeID
+device/super_http_client_test.go:306:23: undefined: SSEParser
+device/super_http_client_test.go:331:13: undefined: SSEParser
+device/super_http_client_test.go:353:23: undefined: SSEParser
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/device [build failed]
+FAIL
+exit=1
+```
+
+### GREEN — integration HEAD (63733e3)
+
+```
+$ cd /home/kexi/eg-super-http/integration && go test -count=1 ./device -run 'TestControlHTTPClient'
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	0.801s
+exit=0
+```
+
+red reconstructed post-hoc by applying test files onto pre-task base; original worker omitted red capture (process deviation logged in issues.md)

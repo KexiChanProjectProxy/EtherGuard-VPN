@@ -1,0 +1,331 @@
+# F1 approval-gate audit — supernode-http-only
+# Auditor: Sisyphus-Junior
+# Date: 2026-07-25
+# Scope: read-only audit of /home/kexi/eg-super-http/integration and main worktree.
+
+## Verdict
+
+REJECT
+
+Mandatory rejection findings:
+1. **Main-worktree preservation failed.** The preflight recorded `ea5f05b`; the
+   actual main `HEAD`/`refs/heads/master` is `9f18b3a`, whose parent is
+   `88de103`. Therefore master has two commits beyond preflight, not the one
+   documented/adopted `9f18b3a`: `88de103 bound super peer endpoint discovery`
+   is unaccounted for in `issues.md`.
+2. **TDD evidence is incomplete.** Task 4 records a purported RED phase with
+   exit 0 because a placeholder test was skipped. Tasks 9, 11, and 12 contain
+   no RED phase. Task 10's six-line log only asserts an initial failure, with
+   neither its command/exit result nor acceptance output. This violates the
+   required red→green evidence for every task.
+3. **Task 12 exceeded its plan write-set without a documented deviation.** Its
+   declared files are the four READMEs, but commit `11dc479` also adds
+   `docs_contract_test.go`. `issues.md` does not authorize this deviation.
+
+## Required material read
+
+Read in full:
+- `.omo/plans/supernode-http-only.md`
+- `.omo/notepads/supernode-http-only/{learnings,issues,decisions}.md`
+- all 14 task evidence files and `worktree-preflight-supernode-http-only.log`
+
+Observed documented deviations accepted as documented:
+- T0.5 neutralization was expressly inserted by `decisions.md`.
+- T2 `gencfg/types.go`; T3 `device/device.go`; T4 reconnect follow-up;
+  T5 candidate follow-up; T8 state extension; T9 state test seam; T11 one-line
+  `main_httpserver.go` JETSecret removal; T13 six-file PubKey plumbing.
+
+## Commands run and observed results
+
+### Integration history, write sets, and dependency order
+
+Command:
+```
+git -C /home/kexi/eg-super-http/integration log --oneline ea5f05b..HEAD
+```
+Result: all task commits and integration merges exist through `63733e3`.
+First-parent order was:
+```
+fd1786b T1
+6cc7437 T2
+8699bab T3 merge
+adbd83e T4 merge
+e45ba7d T0.5 merge
+f90262e T5 merge
+12e1f26 T7 merge
+474c662 T6 merge
+2013827 T8 merge
+eb56dc9 T10 merge
+5fe4e63 T9 merge
+f44d87a T11 merge
+6dd9569 T12 merge
+63733e3 T13 merge
+```
+This respects the dependency matrix and the documented T0.5 resequencing.
+
+Command:
+```
+for c in $(git -C /home/kexi/eg-super-http/integration rev-list --reverse ea5f05b..HEAD); do
+  git -C /home/kexi/eg-super-http/integration show --stat --oneline --no-renames "$c"
+done
+```
+Result: T1 matches its three files. T2's additional `gencfg/types.go`, T3's
+additional `device/device.go`, T0.5's `main_super.go`, T5's candidate follow-up,
+T8's state extension, T9's state seam, T10's documented client follow-up,
+T11's `main_httpserver.go`, and T13's PubKey files match documented exceptions.
+T12 contains an undocumented fifth file, `docs_contract_test.go` (rejection
+finding above).
+
+Focused write-set commands:
+```
+git -C /home/kexi/eg-super-http/integration diff-tree --no-commit-id --name-only -r 11dc479
+git -C /home/kexi/eg-super-http/integration diff-tree --no-commit-id --name-only -r dc5eec7
+```
+Observed T12 files:
+```
+README.md
+README_zh.md
+docs_contract_test.go
+example_config/super_mode/README.md
+example_config/super_mode/README_zh.md
+```
+Observed T10 files include the documented `device/super_http_client.go` follow-up
+plus its five declared runtime files.
+
+### Must-not-have scans
+
+Command:
+```
+grep -nE 'device\.NewDevice|conn\.NewDefaultBind|tap\.CreateDummyTAP|startUAPI\(|UAPI' \
+  /home/kexi/eg-super-http/integration/main_super.go \
+  /home/kexi/eg-super-http/integration/main_httpserver.go \
+  /home/kexi/eg-super-http/integration/main.go
+```
+Result: `Super` ignores `useUAPI` and `bindmode`; production startup uses
+`net.Listen("tcp", ...)`. The only UAPI match in `main_super.go` is the shared
+`startUAPI` definition for `main_edge.go`, not a Super call. No Super Device,
+bind, TAP, or UAPI construction was found.
+
+```
+grep -RInE 'net\.(ListenUDP|DialUDP|ListenPacket)|ListenPacket\("udp|Dial\("udp' \
+  /home/kexi/eg-super-http/integration --include='*.go'
+```
+Result: matches are pre-existing generic Edge bind/TAP code and vendored
+dependencies; `device/super_stun.go` uses `device.net.bind.ParseEndpoint` and
+`bind.Send`, not a socket constructor. The same-bind implementation stores the
+active bind and sends STUN through it.
+
+```
+grep -RInE 'ControlPSKey.*json:|json:.*ControlPSKey' \
+  /home/kexi/eg-super-http/integration --include='*.go'
+```
+Result: exactly two production declarations, both `json:"-"`:
+`SuperConfigV2Peer.ControlPSKey` and `SuperNodeV2Ref.ControlPSKey`.
+
+```
+grep -RInE 'func edge_(get|post)_(superparams|peerinfo|nhtable|nodeinfo)|/edge/(superparams|peerinfo|nhtable|nodeinfo)' \
+  /home/kexi/eg-super-http/integration --include='*.go'
+```
+Result: no legacy v1 `/edge/` handler/route matched.
+
+```
+  /home/kexi/eg-super-http/integration --include='*.go' --include='go.mod' --include='go.sum'
+```
+Result: only vendored Pion STUN URI/source comments and unrelated vendored port
+names matched; no migration runtime TURN, relay, or WebSocket addition found.
+
+Additional observation: a broad `ServerUpdate` scan still finds legacy
+`ServerUpdate` parsing/dispatch in `device/receive.go` and
+`device/receivesendproc.go`. It appears on the retained Edge legacy path rather
+than the Super runtime; this audit does not count it as a Super UDP listener,
+but it should be removed/justified before claiming the plan's stronger
+"no ServerUpdate transport" wording.
+
+### Main-worktree preservation
+
+Command:
+```
+git -C /home/kexi/EtherGuard-VPN status --porcelain
+```
+Result:
+```
+?? .omo/
+```
+The filesystem status itself is permitted.
+
+Command:
+```
+git -C /home/kexi/EtherGuard-VPN rev-parse HEAD refs/heads/master
+```
+Result:
+```
+HEAD = refs/heads/master = 9f18b3afa0da69355c68185e30825e882f0fa574
+9f18b3a release UAPI peer locks per entry
+88de103 bound super peer endpoint discovery
+9f18b3a parent = 88de103b0dddeb7b0568465420a0b33e8704706b
+```
+`issues.md` documents only `9f18b3a`; preflight recorded `ea5f05b`.
+Thus `88de103` is an unaccounted main-worktree mutation.
+
+### Evidence completeness
+
+Command:
+```
+for f in /home/kexi/EtherGuard-VPN/.omo/evidence/task-{1..13}-supernode-http-only.log \
+         /home/kexi/EtherGuard-VPN/.omo/evidence/task-neutralize-supernode-http-only.log \
+         /home/kexi/EtherGuard-VPN/.omo/evidence/worktree-preflight-supernode-http-only.log; do
+  wc -l < "$f"
+done
+```
+Result: all required files exist. Line counts are T1 130, T2 28, T3 7, T4 24,
+T5 63, T6 111, T7 126, T8 155, T9 64, T10 6, T11 68, T12 48, T13 115,
+T0.5 338, preflight 8.
+
+Per-task evidence assessment:
+| Task | Commit/evidence assessment |
+| --- | --- |
+| 1 | `fd1786b`; declared files, explicit failing RED and passing GREEN — pass. |
+| 2 | `6cc7437`; documented `gencfg/types.go`; RED/GREEN — pass. |
+| 3 | `3e4b690`; documented device wiring; same-bind assertion and RED/GREEN — pass. |
+| 4 | `ea3721a`/`3ec4bb5`/`5ca343a`; declared files/follow-up accepted, but RED exits 0 because a placeholder test was skipped — fail TDD evidence. |
+| T0.5 | `e3ec872`; authorized resequencing; build RED/GREEN — pass. |
+| 5 | `f45c379`/`78fb077`; candidate follow-up documented; RED/GREEN — pass. |
+| 6 | `210b129`; declared files; red compiler/vet proof and green tests recorded. |
+| 7 | `59be3e5`; declared files; RED/GREEN — pass. |
+| 8 | `2d1c5ba`; documented state addition; RED/GREEN — pass. |
+| 9 | `cbe1f38`; documented state test seam, but no RED-phase evidence — fail TDD evidence. |
+| 10 | `dc5eec7`; evidence lacks reproducible RED command/exit and acceptance output — fail TDD evidence. |
+| 11 | `30c290e`; documented JETSecret removal, but no RED-phase evidence — fail TDD evidence. |
+| 12 | `11dc479`; no RED phase and undocumented `docs_contract_test.go` — fail. |
+| 13 | `52391e4`; documented PubKey plumbing; debug failure and final green E2E/full-suite output recorded. |
+
+## Gate conclusion
+
+The HTTP-only Super runtime and same-bind STUN evidence are present, and the
+forbidden Super-runtime/PSKey/v1-handler scans are otherwise clean. However,
+the approval gate cannot waive the mandatory preservation, write-ownership, or
+per-task TDD-evidence requirements. Remediate/document `88de103`, reconcile
+Task 12's write-set, and supply valid RED→GREEN evidence for Tasks 4, 9, 10,
+11, and 12 before re-audit.
+
+### Audit-report verification
+
+Command:
+```
+lsp_diagnostics /home/kexi/EtherGuard-VPN/.omo/evidence/final-supernode-http-only-plan.log
+```
+Result: no LSP server is configured for `.log`; this is a plaintext evidence
+artifact and has no language diagnostics. The file was re-read after writing;
+it begins with the recorded `REJECT` verdict.
+
+VERDICT: REJECT
+
+---
+
+# F1 re-review — 2026-07-25
+
+## Re-review disposition
+
+The prior REJECT is superseded. The original implementation commits remain
+unchanged; the orchestrator documented the previously unaccounted items and
+added honest, post-hoc scratch-worktree RED evidence for the five affected
+tasks. The required current targeted tests pass.
+
+## Evidence and authorization re-check
+
+Read:
+- `.omo/notepads/supernode-http-only/issues.md`
+- `.omo/notepads/supernode-http-only/decisions.md`
+- amended task evidence for 4, 9, 10, 11, 12, and task-13 evidence.
+
+Observed:
+- `issues.md` records `88de103` as an adopted, tested peer-endpoint-lock fix;
+  `decisions.md` records both adopted master commits as outside the integration
+  diff.
+- `issues.md` records the original missing RED captures and the reconstruction
+  method. Each amended log now gives its exact scratch base, copied test file,
+  failing command/output/exit 1, and passing integration-head command/exit 0:
+  T4 (`fd1786b`), T9 (`eb56dc9`), T10 (`12e1f26`), T11 (`5fe4e63`), and T12
+  (`f44d87a`). This is sufficient evidence that each direct test distinguishes
+  the pre-task state from the final implementation; the provenance is explicitly
+  identified as post-hoc rather than misrepresented as original worker output.
+- `decisions.md` records that `docs_contract_test.go` was pre-authorized in the
+  Task-12 delegation and F4 prompt. It is therefore an accepted T12 write-set
+  exception.
+
+## Commands run and results
+
+### Required integration test re-run
+
+```
+cd /home/kexi/eg-super-http/integration
+  'TestSuperSTUN|TestReceiveDemultiplexesSTUNBeforeWireGuard|TestControlHTTPClient|TestSuperHTTPRuntime'
+go test -race -shuffle=on -count=1 . -run \
+  'TestControlHTTPV2|TestSuperHTTPOnlyStartup|TestSuperGracefulShutdown|TestDocs|TestHTTPOnlySuperEndToEnd'
+```
+Result:
+```
+ok github.com/KusakabeSi/EtherGuard-VPN/device 2.022s
+ok github.com/KusakabeSi/EtherGuard-VPN 6.852s
+```
+This re-proves same-bind STUN/demultiplexing, HTTP client/runtime, v2 HTTP
+routes/SSE, HTTP-only Super startup/shutdown, documentation contracts, and
+the HTTP-only E2E topology.
+
+### Adopted-master commits and integration isolation
+
+```
+GIT_MASTER=1 git -C /home/kexi/EtherGuard-VPN log --oneline ea5f05b..HEAD
+GIT_MASTER=1 git -C /home/kexi/EtherGuard-VPN show --stat --oneline 88de103
+GIT_MASTER=1 git -C /home/kexi/EtherGuard-VPN show --stat --oneline 9f18b3a
+GIT_MASTER=1 git -C /home/kexi/eg-super-http/integration diff --name-only \
+  ea5f05b..HEAD -- device/peer.go device/uapi.go device/peer_endpoint_lock_test.go device/uapi_lock_test.go
+cd /home/kexi/EtherGuard-VPN && go test -race -shuffle=on -count=1 ./device
+```
+Result:
+```
+9f18b3a release UAPI peer locks per entry
+88de103 bound super peer endpoint discovery
+
+88de103: device/peer.go and device/peer_endpoint_lock_test.go (110 insertions, 18 deletions)
+9f18b3a: device/uapi.go and device/uapi_lock_test.go (99 insertions, 1 deletion)
+
+integration diff for all four adopted-file paths: empty
+ok github.com/KusakabeSi/EtherGuard-VPN/device 1.081s
+```
+The two master commits are now expressly adopted and isolated from the
+integration diff.
+
+### Main-worktree preservation and amended evidence presence
+
+```
+GIT_MASTER=1 git -C /home/kexi/EtherGuard-VPN status --porcelain
+wc -l .omo/evidence/task-{4,9,10,11,12}-supernode-http-only.log
+```
+Result:
+```
+?? .omo/
+task-4: 58
+task-9: 95
+task-10: 33
+task-11: 102
+task-12: 99
+```
+No non-`.omo/` working-tree mutation is present.
+
+## Must-not-have conclusion carried forward
+
+The original scans remain valid: Super starts only TCP `net.Listen` HTTP
+servers, ignores UAPI/bind CLI inputs, has no Super `device.Device`, UDP bind,
+dummy TAP, or UAPI construction; control PSKey JSON fields use `json:"-"`; no
+legacy `/edge/` v1 handlers matched; and no project TURN/relay/WebSocket
+runtime addition was found. Legacy `ServerUpdate` symbols remain in generic
+Edge protocol code but are not wired to the HTTP-only Super runtime or any
+Super peer path; the inspected v2 Super runtime does not construct a Device.
+
+## Final re-review verdict
+
+All prior rejection causes are now documented, evidenced, or pre-authorized;
+the required current targeted tests pass; and main worktree preservation holds.
+
+VERDICT: APPROVE

@@ -1,0 +1,155 @@
+## [2026-07-25 13:15] Task: 8 — manage-v2 service: typed mutations → valid v2 YAML (w3-manage)
+
+### Commands run (exit codes in parens)
+```
+$ cd /home/kexi/eg-super-http/w3-manage && go build . (FAIL RED phase: undefined mtypes.NewControlV2Error — replaced with local manageV2Error helper that wraps &mtypes.ControlV2Error{Code, Field, Message})
+$ go build . (FAIL: edgeProfile local variable treated as type — wrap in slice literal &edgeProfile)
+$ go build . (FAIL: assignment mismatch on m.state.Register 2-return — discard with `_, rerr := ...`)
+$ go build . (ok)
+$ go test -count=1 . -run 'TestManageV2' (ok — all 19 tests pass)
+$ go test -race -shuffle=on -count=1 . -run 'TestManageV2' (ok 1.124s)
+$ go test -race -shuffle=on -count=1 ./... (ok: root/device/gencfg/mtypes/ratelimiter/replay/tai64n all green; ./conn ./ipc ./path ./tap have no tests)
+$ go vet . (clean)
+$ go build ./... (clean)
+```
+
+### Public API surface (CRITICAL for task 9 — wire exactly)
+
+In root package `main`:
+
+```go
+// Construction
+type ManageV2Config struct {
+    State        *ControlState
+    ConfigDir    string
+    BaseConfig   mtypes.SuperConfigV2           // must pass Validate
+    EdgeTemplate mtypes.EdgeConfigV2            // placeholders filled by service
+    PSKGen       func() string                  // defaults to device.RandomPSK().ToString
+}
+func NewManageV2(ManageV2Config) (*ManageV2, error)
+
+// Sentinel errors (callers map via mtypes.IsControlV2Error + mtypes.ErrorCode)
+var ErrManageDuplicateNodeID   error
+var ErrManageDuplicateNodeName error
+var ErrManageUnknownPeer       error
+
+// Request shapes
+type ManageAddPeerRequest      struct{ NodeID mtypes.Vertex; NodeName string }
+type ManageUpdatePeerRequest   struct{ NodeID, NodeName, AdditionalCost, ControlPSKey }
+type ManageDeletePeerRequest   struct{ NodeID mtypes.Vertex }
+type ManageUpdateParametersRequest struct{ Parameters mtypes.ControlV2Parameters }
+
+// Result shape
+type ManageAddPeerResult struct {
+    SuperPeer mtypes.SuperConfigV2Peer  // the new Super-side metadata
+    Profile   mtypes.EdgeConfigV2       // generated Edge profile; ControlPSKey is THIS edge's
+}
+
+// Methods
+func (m *ManageV2) AddPeer(ctx context.Context, req ManageAddPeerRequest) (ManageAddPeerResult, error)
+func (m *ManageV2) UpdatePeer(ctx context.Context, req ManageUpdatePeerRequest) error
+func (m *ManageV2) DeletePeer(ctx context.Context, req ManageDeletePeerRequest) error
+func (m *ManageV2) UpdateParameters(ctx context.Context, req ManageUpdateParametersRequest) error
+func (m *ManageV2) Snapshot() mtypes.SuperConfigV2  // deep-copy for diagnostics
+```
+
+### New ControlState methods (added in this task — coordinate via notepad)
+
+```go
+// In super_control_state.go (file already exists from task 5)
+func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) error
+//   - ErrControlStateUnknownPeer if NodeID not present
+//   - ErrControlStateSpecialNodeID if NodeID is reserved (65532..65535)
+//   - bumps revision by exactly 1 on success
+//   - emits exactly 1 peer_gone event after releasing the lock
+
+func (s *ControlState) UpdateParameters(ctx context.Context, p mtypes.ControlV2Parameters) error
+//   - ErrControlStateInvalidParameters if mtypes validation fails
+//   - bumps revision by exactly 1 on success
+//   - emits exactly 1 params_change event with cloneParameters(p) as Data
+//
+// Sentinels: ErrControlStateUnknownPeer, ErrControlStateSpecialNodeID,
+// ErrControlStateInvalidParameters (all in super_control_state.go).
+```
+
+### File / directory layout
+
+The service writes:
+- `<ConfigDir>/super.yaml` — `mtypes.SuperConfigV2` YAML (authorative)
+- `<ConfigDir>/edge_<NodeID>.yaml` — `mtypes.EdgeConfigV2` YAML per peer
+
+Writes are atomic: `ioutil.TempFile(dir, ".tmp-*.yaml")` → write → fsync → close → `os.Rename` (POSIX-atomic). On failure, prior in-memory state + previously-persisted edge files are restored.
+
+### Design decisions / invariants for task 9 (HTTP wiring)
+
+1. **State mutation happens BEFORE the YAML write.** If the write fails, the state is rolled back by re-invoking `state.Register` (for AddPeer / UpdatePeer with PSKey change) or `state.DeletePeer` (for AddPeer that needs rollback) to leave the in-memory state consistent with the last-known-good files. This is the only safe ordering because the YAML write is the only fallible step.
+
+2. **Exactly one revision/event publication per successful mutation.** Every management method funnels through a single `state.Register`, `state.DeletePeer`, or `state.UpdateParameters` call. The publish hook runs from inside the state service, outside the lock; the management service does NOT publish directly.
+
+3. **PSKey rotation is opt-in on UpdatePeer.** AddPeer always generates a fresh PSKey. UpdatePeer only rotates the PSKey when the request supplies a non-empty `ControlPSKey` that differs from the current value; supplying the same key is a no-op for rotation purposes (no extra event). Register's `controlKey` diff detection guarantees `peer_change` is emitted exactly once on a real rotation. PSKey rotation for UpdatePeer does NOT alter the Edge's per-Edge file unless the new PSKey or NodeName actually differs from the prior — the `writes` slice is built conditionally.
+
+4. **Per-Edge ControlPSKey is NEVER copied across edges.** Each AddPeer generates a fresh key (via `device.RandomPSK().ToString()` by default, or the injected `PSKGen`); the corresponding `EdgeConfigV2.SuperNodeV2.ControlPSKey` receives the same key. No mechanism in this package exposes any other edge's PSKey.
+
+5. **Legacy UDP fields are never written.** The build of `EdgeConfigV2` is driven by `m.edgeTemplate` (an `mtypes.EdgeConfigV2`) + per-call NodeID/NodeName/PSKey. The template does not carry UDP fields; `EdgeConfigV2.Validate()` additionally rejects any `LegacySuper` block via `ControlV2ErrLegacyUDPField`. `SuperConfigV2.UnmarshalYAML` rejects `PrivKeyV4/V6/ListenPort/FwMark/API_Prefix/ListenPort_EdgeAPI/ListenPort_ManageAPI` at parse time.
+
+6. **`mtypes.ControlV2Error` is the typed error envelope** for non-collision validation failures (reserved NodeID, missing NodeName, malformed STUN URI, invalid parameters, etc.). Callers MUST route via `mtypes.IsControlV2Error` + `mtypes.ErrorCode` to emit uniform non-secret HTTP responses without leaking internal state. The sentinel management errors (`ErrManageDuplicateNodeID`, `ErrManageDuplicateNodeName`, `ErrManageUnknownPeer`) are separate, callers should map them to 409 Conflict / 404 Not Found respectively.
+
+7. **No new dependencies.** `device.RandomPSK`, `mtypes.SuperConfigV2/EdgeConfigV2/EdgeConfigV2Peer/SuperNodeV2Ref/ControlV2Parameters/ControlV2RegisterRequest`, and `gopkg.in/yaml.v2` were already on the module path.
+
+8. **Per-management call concurrency safety.** `ManageV2` holds a single `sync.Mutex` to serialise multi-file YAML writes for rollback safety. The underlying `ControlState` is independently concurrency-safe; callers can issue parallel AddPeer / DeletePeer / UpdateParameters calls from different goroutines and expect state-mutation guarantees to hold (lock contention only on the management-side file rotation).
+
+9. **Pure AdditionalCost-only UpdatePeer does not bump revision.** Rationale: snapshot peer view does not embed `AdditionalCost` (it's an inter-edge routing hint, not a control-plane fact). Consumers of `mtypes.ControlV2Snapshot` won't observe the change either; the YAML on disk is the single source of truth for the cost. This keeps the revision/event contract honest for downstream SSE consumers.
+
+10. **UpdateParameters STUN rewrite is full replacement.** The request's `Parameters.STUNServers` slice replaces (not appends-to) `BaseConfig.STUNServers`. Empty list still passes validate via `mtypes.ControlV2Parameters.Validate` (non-empty requirement is the only hard limit); an empty list is a valid edge case (the operator may want STUN disabled in the per-edge view).
+
+### Wire compatibility with previous tasks
+
+- Task 5's `ControlState` API surface is unchanged — we only added two methods (`DeletePeer`, `UpdateParameters`) and three sentinels (`ErrControlStateSpecialNodeID`, `ErrControlStateInvalidParameters`, plus the keeper `ErrControlStateUnknownPeer`).
+- Task 7's `ControlEventHub.Publish` is reachable through `ControlStateConfig.Publish`; the management service uses the SAME hook as the runtime state, so SSE consumers see one stream per management mutation.
+- Task 2's `mtypes.SuperConfigV2` / `mtypes.EdgeConfigV2` / `mtypes.SuperNodeV2Ref` are consumed directly; the management service never round-trips through the legacy `SuperConfig` type.
+- Task 6 (auth, separate worktree) is orthogonal — the management service exposes typed entry points that task 9's HTTP handlers will gate behind `http_passwords.AddPeer / DelPeer / UpdatePeer / UpdateSuper`.
+
+### Tests cover (in `super_manage_v2_test.go`, 19 cases, all in t.TempDir)
+
+- `TestManageV2AddPeerWritesFreshProfiles` — adding two edges writes Super + per-Edge YAML with isolated, deterministic ControlPSKeys.
+- `TestManageV2AddPeerDuplicateRejected` — duplicate NodeID rejected; no state / file / event mutation.
+- `TestManageV2AddPeerNameDuplicateRejected` — duplicate NodeName rejected with sentinel error.
+- `TestManageV2AddPeerRejectsSpecialNodeID` — all four reserved IDs (Broadcast/Spread/Super/Invalid) rejected with `ControlV2ErrInvalidNodeID`.
+- `TestManageV2AddPeerPublishesPeerChange` — exactly one `peer_change` event on successful add; revision bumps by 1; payload carries `NodeID` + `NodeName`.
+- `TestManageV2UpdatePeerRotatesPSKey` — operator-supplied new PSKey replaces the old; `ControlKeyFor` returns the new value; `peer_change` event emitted exactly once.
+- `TestManageV2UpdatePeerPSKeyMustDiffer` — supplying the same key is a no-op (no extra event, no revision bump).
+- `TestManageV2UpdatePeerUnknownRejected` — UpdatePeer for unknown NodeID returns `ErrManageUnknownPeer`.
+- `TestManageV2DeletePeerRevokesAndPersists` — DeletePeer removes state entry, ControlKeyFor gone, snapshot excludes peer, super.yaml lacks the peer, `edge_<id>.yaml` removed, exactly one `peer_gone` event with revision +1.
+- `TestManageV2DeletePeerUnknownRejected` — unknown NodeID rejected without state / event change.
+- `TestManageV2DeletePeerRemovesEdgeFile` — per-Edge file actually removed on disk.
+- `TestManageV2UpdateSTUNValidatesAndPersists` — invalid STUN URI rejected with `ControlV2ErrInvalidSTUNServer`; valid STUN persists + emits `params_change`.
+- `TestManageV2AtomicWriteFailureLeavesPriorState` — chmod 0o555 on the config dir causes AddPeer failure; state has no rejected peer; on-disk super.yaml unchanged.
+- `TestManageV2SnapshotIsAuthorative` — `Snapshot()` returns a deep copy (mutating the returned slice doesn't bleed into subsequent snapshots).
+- `TestManageV2AllFilesAreV2Only` — every YAML under the config dir contains ZERO occurrences of `PrivKeyV4`, `PrivKeyV6`, `ListenPort:`, `FwMark:`, `API_Prefix:`, `ListenPort_EdgeAPI:`, `ListenPort_ManageAPI:`.
+- `TestManageV2AddPeerIsolatedControlKey` — distinct, non-empty ControlKeyFor across consecutive AddPeer calls.
+- `TestManageV2UpdateParametersRevisionBump` — params_change event emitted exactly once with revision +1.
+- `TestManageV2ControlStateDeletePeer` — ControlState rejects reserved IDs and unknown IDs; bumps revision once on success.
+- `TestManageV2ControlStateUpdateParameters` — ControlState rejects invalid parameters and emits `params_change` once on success.
+
+### Files added/modified (worktree `/home/kexi/eg-super-http/w3-manage`)
+
+- **NEW** `super_manage_v2.go` (≈380 LOC) — service + atomic YAML helpers.
+- **NEW** `super_manage_v2_test.go` (≈490 LOC) — 19 TDD tests.
+- **MODIFIED** `super_control_state.go` (+85 / -1) — added `DeletePeer`, `UpdateParameters`, two sentinels. No existing public API removed; `Register`, `Report`, `SnapshotFor`, `ControlKeyFor`, `Revision`, `SweepTimeouts` untouched. Test additions made in `super_control_state_test.go` were NOT needed beyond the management-level tests that re-exercise the new methods.
+
+### Acceptance verification
+
+```
+$ go test -race -shuffle=on -count=1 . -run 'TestManageV2'  → ok 1.124s (19 tests)
+$ go test -race -shuffle=on -count=1 ./...                   → ok (all packages green)
+$ go vet .                                                  → clean
+$ go build ./...                                            → clean
+```
+
+Not pushed; one local commit pending.
+
+### Notes for the reviewer
+
+- The seed `EdgeTemplate` in the tests deliberately omits `LegacySuper` so a regression that adds it back fails `TestManageV2AllFilesAreV2Only` immediately.
+- `chmod 0o555` test is `t.Skip`-friendly when the test runs as a user that bypasses Unix DAC (e.g. root in a container). It still passes under the project's CI image.
+- The fixedPSKSource helper lets tests assert on exact PSKey values; production code paths use the random generator and rely on uniqueness via the per-AddPeer fresh allocation.

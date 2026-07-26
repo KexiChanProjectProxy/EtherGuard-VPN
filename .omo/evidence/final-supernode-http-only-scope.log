@@ -1,0 +1,364 @@
+F4 scope/config/docs audit | worktree=/home/kexi/eg-super-http/integration | base=ea5f05b | 2026-07-25T15:10:48-04:00
+\n$ git status --short
+[exit=0]
+\n$ git diff --check ea5f05b..HEAD
+[exit=0]
+\n$ git diff --name-status ea5f05b..HEAD
+M	README.md
+M	README_zh.md
+M	device/device.go
+M	device/receive.go
+A	device/receive_stun_test.go
+M	device/receivesendproc.go
+A	device/super_http_client.go
+A	device/super_http_client_test.go
+A	device/super_http_runtime.go
+A	device/super_http_runtime_test.go
+A	device/super_stun.go
+A	device/super_stun_test.go
+A	docs_contract_test.go
+M	example_config/super_mode/EgNet_edge001.yaml
+M	example_config/super_mode/EgNet_edge002.yaml
+M	example_config/super_mode/EgNet_edge100.yaml
+M	example_config/super_mode/EgNet_super.yaml
+M	example_config/super_mode/README.md
+M	example_config/super_mode/README_zh.md
+M	example_config/super_mode/gensuper.yaml
+M	gencfg/example_conf.go
+M	gencfg/gencfgSM.go
+A	gencfg/gencfgSM_test.go
+M	gencfg/types.go
+M	go.mod
+M	go.sum
+M	main_edge.go
+M	main_httpserver.go
+M	main_super.go
+A	main_super_http_test.go
+M	mtypes/config.go
+A	mtypes/http_control.go
+A	mtypes/http_control_test.go
+A	super_control_auth.go
+A	super_control_auth_test.go
+A	super_control_events.go
+A	super_control_events_test.go
+A	super_control_http.go
+A	super_control_http_test.go
+A	super_control_state.go
+A	super_control_state_test.go
+A	super_http_e2e_support_test.go
+A	super_http_e2e_test.go
+A	super_manage_v2.go
+A	super_manage_v2_test.go
+[exit=0]
+\n$ git diff --stat ea5f05b..HEAD
+ README.md                                    |    2 +-
+ README_zh.md                                 |    2 +-
+ device/device.go                             |   27 +-
+ device/receive.go                            |    3 +
+ device/receive_stun_test.go                  |   83 ++
+ device/receivesendproc.go                    |  490 +----------
+ device/super_http_client.go                  |  441 ++++++++++
+ device/super_http_client_test.go             |  736 +++++++++++++++++
+ device/super_http_runtime.go                 |  295 +++++++
+ device/super_http_runtime_test.go            |  124 +++
+ device/super_stun.go                         |  137 +++
+ device/super_stun_test.go                    |  184 +++++
+ docs_contract_test.go                        |  274 ++++++
+ example_config/super_mode/EgNet_edge001.yaml |   81 +-
+ example_config/super_mode/EgNet_edge002.yaml |   81 +-
+ example_config/super_mode/EgNet_edge100.yaml |   81 +-
+ example_config/super_mode/EgNet_super.yaml   |   89 +-
+ example_config/super_mode/README.md          |  640 +++++---------
+ example_config/super_mode/README_zh.md       |  586 +++++--------
+ example_config/super_mode/gensuper.yaml      |   30 +-
+ gencfg/example_conf.go                       |  248 ++----
+ gencfg/gencfgSM.go                           |  298 ++++---
+ gencfg/gencfgSM_test.go                      |  144 ++++
+ gencfg/types.go                              |   41 +-
+ go.mod                                       |    5 +
+ go.sum                                       |   10 +
+ main_edge.go                                 |   88 +-
+ main_httpserver.go                           | 1055 ++++--------------------
+ main_super.go                                | 1143 +++++++++++++++-----------
+ main_super_http_test.go                      |  618 ++++++++++++++
+ mtypes/config.go                             |   25 +-
+ mtypes/http_control.go                       |  727 ++++++++++++++++
+ mtypes/http_control_test.go                  |  533 ++++++++++++
+ super_control_auth.go                        |  454 ++++++++++
+ super_control_auth_test.go                   |  665 +++++++++++++++
+ super_control_events.go                      |  659 +++++++++++++++
+ super_control_events_test.go                 |  961 ++++++++++++++++++++++
+ super_control_http.go                        |  269 ++++++
+ super_control_http_test.go                   | 1063 ++++++++++++++++++++++++
+ super_control_state.go                       |  371 +++++++++
+ super_control_state_test.go                  |  159 ++++
+ super_http_e2e_support_test.go               |  414 ++++++++++
+ super_http_e2e_test.go                       |  237 ++++++
+ super_manage_v2.go                           |  594 +++++++++++++
+ super_manage_v2_test.go                      |  738 +++++++++++++++++
+ 45 files changed, 12510 insertions(+), 3395 deletions(-)
+[exit=0]
+\n$ git diff ea5f05b..HEAD -- device/receive.go device/peer.go device/send.go
+diff --git a/device/receive.go b/device/receive.go
+index dce343f..8b1457b 100644
+--- a/device/receive.go
++++ b/device/receive.go
+@@ -127,6 +127,9 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
+ 		// check size of packet
+ 
+ 		packet := buffer[:size]
++		if device.superSTUN != nil && device.superSTUN.HandlePacket(packet) {
++			continue
++		}
+ 		msgType := path.Usage(packet[0])
+ 		msgTTL := uint8(packet[1])
+ 		msgType_wg := msgType
+[exit=0]
+\n$ git diff --name-only 'ea5f05b..HEAD' --diff-filter=A | sort
+device/receive_stun_test.go
+device/super_http_client.go
+device/super_http_client_test.go
+device/super_http_runtime.go
+device/super_http_runtime_test.go
+device/super_stun.go
+device/super_stun_test.go
+docs_contract_test.go
+gencfg/gencfgSM_test.go
+main_super_http_test.go
+mtypes/http_control.go
+mtypes/http_control_test.go
+super_control_auth.go
+super_control_auth_test.go
+super_control_events.go
+super_control_events_test.go
+super_control_http.go
+super_control_http_test.go
+super_control_state.go
+super_control_state_test.go
+super_http_e2e_support_test.go
+super_http_e2e_test.go
+super_manage_v2.go
+super_manage_v2_test.go
+[exit=0]
+\n$ git diff --name-only 'ea5f05b..HEAD' --diff-filter=A | grep -Ev '^(mtypes/(config|http_control|http_control_test)\.go|gencfg/(example_conf|gencfgSM|gencfgSM_test|types)\.go|example_config/super_mode/(gensuper|EgNet_super|EgNet_edge001|EgNet_edge002|EgNet_edge100)\.yaml|device/(super_stun|super_stun_test|receive_stun_test|super_http_client|super_http_client_test|super_http_runtime|super_http_runtime_test)\.go|super_control_(state|state_test|auth|auth_test|events|events_test|http|http_test)\.go|super_manage_v2(_test)?\.go|main_super_http_test\.go|super_http_e2e_test\.go|super_http_e2e_support_test\.go|docs_contract_test\.go)$'
+[result=PASS: no matches]
+\n$ git diff --unified=0 'ea5f05b..HEAD' -- '*.go' | grep '^+' | grep -Eiv '^\+\+\+' | grep -Ein 'turn server|turn\.|websocket|gorilla/websocket|nhooyr|sql\.|database/sql|sqlite|postgres|browser ui|relay.*(forward|packet|data)'
+2851:+// caller MUST return immediately on a false return.
+7909:+	// the sub is evicted). They drain remaining events then return.
+8081:+// evict the slow subscriber via a non-blocking send and return.
+[result=FAIL: matches found or command error exit=0]
+\n$ grep -Ein 'Control API v2|HMAC|reverse proxy|TLS|SSE|poll|same.socket|WireGuard bind|v1|legacy_udp_field' README.md README_zh.md example_config/super_mode/README.md example_config/super_mode/README_zh.md
+README.md:49:Super Mode | Inspired by [n2n](https://github.com/ntop/n2n). There 2 types of node: SuperNode and EdgeNode. The SuperNode runs an HTTP-only control service (Control API v2) with HMAC-signed requests, SSE event streaming, and ETag polling. No UDP listener, no WireGuard keys, no UAPI on the Super side.<br>[Detail](example_config/super_mode/README.md)
+README.md:67:apt-get install -y wireguard-tools golang-go build-essential git
+README_zh.md:50:Super Mode | 此模式是受到[n2n](https://github.com/ntop/n2n)的啟發，分為SuperNode和EdgeNode兩種節點。SuperNode運行純HTTP控制服務（Control API v2），支援HMAC簽名請求、SSE事件串流和ETag輪詢。Super端無UDP listener、無WireGuard金鑰、無UAPI。<br>[詳細介紹](example_config/super_mode/README_zh.md)
+README_zh.md:68:apt-get install -y wireguard-tools golang-go build-essential git
+example_config/super_mode/README.md:4:## Super mode (HTTP-only Control API v2)
+example_config/super_mode/README.md:9:**Breaking change:** Super mode no longer uses a UDP listener, WireGuard private keys, UAPI, or the `wg` command on the Super side. If you have an existing v1 config with `PrivKeyV4`, `PrivKeyV6`, `ListenPort`, `FwMark`, or `API_Prefix`, it will be rejected with a `legacy_udp_field` error. You must migrate to a v2 `SuperConfigV2` YAML before upgrading.
+example_config/super_mode/README.md:21:The generator creates a v2 Super YAML and per-Edge YAML files with fresh per-Edge ControlPSKeys. Each Edge gets its own unique HMAC signing key, which appears only in that Edge's config and the matching Super peer entry.
+example_config/super_mode/README.md:29:The SuperNode listens on two TCP ports (Edge API and Management API). No UDP socket is created. If you pass a legacy v1 YAML file, the process exits immediately with:
+example_config/super_mode/README.md:32:control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super; use a v2 SuperConfigV2 YAML
+example_config/super_mode/README.md:60:5. Edges subscribe to `GET /edge/v2/events` (SSE stream) or poll `GET /edge/v2/snapshot` to detect changes.
+example_config/super_mode/README.md:63:### Control API v2 routes
+example_config/super_mode/README.md:72:| GET | `/edge/v2/events` | SSE stream of state-change events |
+example_config/super_mode/README.md:74:### HMAC request signing
+example_config/super_mode/README.md:76:Every Control API v2 request carries four headers:
+example_config/super_mode/README.md:83:| `X-EG-Signature` | `hex(HMAC-SHA256(key=ControlPSKey, msg=canonical))` |
+example_config/super_mode/README.md:94:### TLS via reverse proxy
+example_config/super_mode/README.md:96:The HMAC signature authenticates but does not encrypt. In production, you **must** run a reverse proxy (nginx, Caddy, etc.) in front of the SuperNode to provide TLS. The SuperNode itself only speaks HTTP.
+example_config/super_mode/README.md:116:### SSE with polling fallback
+example_config/super_mode/README.md:126:A dedicated polling goroutine runs alongside SSE, fetching `/edge/v2/snapshot` at `PollIntervalSeconds`. This ensures progress even when SSE is down. The Edge uses ETag/304 conditional requests to avoid transferring unchanged snapshots.
+example_config/super_mode/README.md:130:The Super distributes STUN servers to all Edges via the `STUNServers` field in the parameters stream. Each Edge uses its existing WireGuard bind socket (same port as its UDP data path) to perform STUN binding requests. The XOR-MAPPED address becomes a `stun` candidate.
+example_config/super_mode/README.md:132:**Same-socket limitation:** STUN candidates are measured from the WireGuard bind. If a STUN server sees a different source port than the WireGuard socket, the candidate is invalid because the NAT mapping is port-specific. Edges do not create a second UDP socket for STUN.
+example_config/super_mode/README.md:153:| PollIntervalSeconds | Edge polling interval for snapshot |
+example_config/super_mode/README.md:156:| EventReplay | SSE replay ring depth (default 256) |
+example_config/super_mode/README.md:168:| ControlPSKey | Per-Edge HMAC signing secret (never exposed to other Edges) |
+example_config/super_mode/README.md:184:| ControlPSKey | This Edge's HMAC signing secret (must match Super's peer entry) |
+example_config/super_mode/README.md:190:## V1 config migration
+example_config/super_mode/README.md:192:If you run `-mode super` with an old v1 config, you will see:
+example_config/super_mode/README.md:195:Error: control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super
+example_config/super_mode/README_zh.md:4:## Super Mode（HTTP-only Control API v2）
+example_config/super_mode/README_zh.md:9:**重大變更：** Super模式不再使用UDP listener、WireGuard私鑰、UAPI或`wg`命令。如果你有舊版v1設定檔包含`PrivKeyV4`、`PrivKeyV6`、`ListenPort`、`FwMark`或`API_Prefix`，會收到`legacy_udp_field`錯誤。升級前必須遷移到v2 `SuperConfigV2` YAML。
+example_config/super_mode/README_zh.md:21:產生器會建立v2 Super YAML和每個Edge的YAML，每個Edge都有獨立的ControlPSKey。每個Edge的HMAC簽名金鑰只出現在該Edge的設定檔和Super對應的peer entry中。
+example_config/super_mode/README_zh.md:29:SuperNode監聽兩個TCP埠（Edge API和Management API）。不會建立UDP socket。如果傳入舊版v1設定檔，程式會立即退出：
+example_config/super_mode/README_zh.md:32:control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super; use a v2 SuperConfigV2 YAML
+example_config/super_mode/README_zh.md:60:5. Edge訂閱`GET /edge/v2/events`（SSE串流）或輪詢`GET /edge/v2/snapshot`來偵測變化。
+example_config/super_mode/README_zh.md:63:### Control API v2 路由
+example_config/super_mode/README_zh.md:72:| GET | `/edge/v2/events` | SSE串流，推送狀態變更事件 |
+example_config/super_mode/README_zh.md:74:### HMAC請求簽名
+example_config/super_mode/README_zh.md:76:每個Control API v2請求攜帶四個header：
+example_config/super_mode/README_zh.md:83:| `X-EG-Signature` | `hex(HMAC-SHA256(key=ControlPSKey, msg=canonical))` |
+example_config/super_mode/README_zh.md:94:### 透過反向代理提供TLS
+example_config/super_mode/README_zh.md:96:HMAC簽名進行身份驗證但不加密。在生產環境中，你**必須**在SuperNode前面部署反向代理（nginx、Caddy等）來提供TLS。SuperNode本身只提供HTTP服務。
+example_config/super_mode/README_zh.md:116:### SSE與輪詢回退
+example_config/super_mode/README_zh.md:126:專門的輪詢goroutine與SSE並行運行，以`PollIntervalSeconds`的間隔取得`/edge/v2/snapshot`。這確保即使SSE中斷時仍有進展。Edge使用ETag/304條件請求來避免傳輸未變更的snapshot。
+example_config/super_mode/README_zh.md:130:Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有Edge。每個Edge使用現有的WireGuard bind socket（與UDP資料路徑相同的port）執行STUN binding請求。XOR-MAPPED位址成為`stun`候選位址。
+example_config/super_mode/README_zh.md:132:**同socket限制：** STUN候選位址是從WireGuard bind socket量測的。如果STUN伺服器看到的source port與WireGuard socket不同，該候選位址無效，因為NAT mapping是基於port的。Edge不會為STUN建立第二個UDP socket。
+example_config/super_mode/README_zh.md:153:| PollIntervalSeconds | Edge輪詢snapshot的間隔 |
+example_config/super_mode/README_zh.md:156:| EventReplay | SSE回放ring depth（預設256） |
+example_config/super_mode/README_zh.md:168:| ControlPSKey | 該Edge的HMAC簽名密鑰（不會暴露給其他Edge） |
+example_config/super_mode/README_zh.md:184:| ControlPSKey | 此Edge的HMAC簽名密鑰（必須與Super的peer entry一致） |
+example_config/super_mode/README_zh.md:190:## v1設定檔遷移
+example_config/super_mode/README_zh.md:192:如果使用舊版v1設定執行`-mode super`，會看到：
+example_config/super_mode/README_zh.md:195:Error: control v2: legacy_udp_field: "PrivKeyV4" is no longer accepted in -mode super
+[exit=0]
+\n$ grep -Ein '(^|[^A-Za-z])ServerUpdate([^A-Za-z]|$)|UDP Register|Register/Pong|Super-directed Pong' README.md README_zh.md example_config/super_mode/README.md example_config/super_mode/README_zh.md
+[result=PASS: no matches]
+\n$ grep -Ein '(SuperNode|Super).{0,80}(wg command|\bwg\b.*status|WireGuard status)' README.md README_zh.md example_config/super_mode/README.md example_config/super_mode/README_zh.md | grep -Eiv 'no .*wg|no WireGuard|不再使用.*wg|無WireGuard'
+[result=PASS: no matches]
+\n$ grep -Ein '(guarantee|guaranteed|保證).{0,80}(NAT|travers|打洞)|(NAT|travers|打洞).{0,80}(guarantee|guaranteed|保證)' README.md README_zh.md example_config/super_mode/README.md example_config/super_mode/README_zh.md
+[result=PASS: no matches]
+\n$ grep -Ein 'ControlPSKey.{0,80}(share|共享|分享)|((share|共享|分享).{0,80}ControlPSKey)' README.md README_zh.md example_config/super_mode/README.md example_config/super_mode/README_zh.md
+[result=PASS: no matches]
+\n$ grep -En '^[[:space:]]*(PrivKeyV4|PrivKeyV6|ListenPort|FwMark|API_Prefix):' example_config/super_mode/*.yaml
+[result=PASS: no matches]
+\n$ go test -race -count=1 ./mtypes -run TestSuperConfigV2|TestControlV2 -v
+=== RUN   TestControlV2RegisterRequestRoundTrip
+--- PASS: TestControlV2RegisterRequestRoundTrip (0.00s)
+=== RUN   TestControlV2RegisterValidation
+=== RUN   TestControlV2RegisterValidation/broadcast
+=== RUN   TestControlV2RegisterValidation/spread
+=== RUN   TestControlV2RegisterValidation/super
+=== RUN   TestControlV2RegisterValidation/invalid
+--- PASS: TestControlV2RegisterValidation (0.00s)
+    --- PASS: TestControlV2RegisterValidation/broadcast (0.00s)
+    --- PASS: TestControlV2RegisterValidation/spread (0.00s)
+    --- PASS: TestControlV2RegisterValidation/super (0.00s)
+    --- PASS: TestControlV2RegisterValidation/invalid (0.00s)
+=== RUN   TestControlV2RegisterUnsupportedVersion
+--- PASS: TestControlV2RegisterUnsupportedVersion (0.00s)
+=== RUN   TestControlV2CandidateValidation
+=== RUN   TestControlV2CandidateValidation/valid
+=== RUN   TestControlV2CandidateValidation/missing_port
+=== RUN   TestControlV2CandidateValidation/bad_host
+=== RUN   TestControlV2CandidateValidation/unknown_source
+--- PASS: TestControlV2CandidateValidation (0.00s)
+    --- PASS: TestControlV2CandidateValidation/valid (0.00s)
+    --- PASS: TestControlV2CandidateValidation/missing_port (0.00s)
+    --- PASS: TestControlV2CandidateValidation/bad_host (0.00s)
+    --- PASS: TestControlV2CandidateValidation/unknown_source (0.00s)
+=== RUN   TestControlV2ReportHeartbeat
+--- PASS: TestControlV2ReportHeartbeat (0.00s)
+=== RUN   TestControlV2ReportRejectsSpecialNodeID
+--- PASS: TestControlV2ReportRejectsSpecialNodeID (0.00s)
+=== RUN   TestControlV2SnapshotExcludesPSKey
+--- PASS: TestControlV2SnapshotExcludesPSKey (0.00s)
+=== RUN   TestControlV2SnapshotRevisionMonotonic
+--- PASS: TestControlV2SnapshotRevisionMonotonic (0.00s)
+=== RUN   TestControlV2EventEnvelope
+--- PASS: TestControlV2EventEnvelope (0.00s)
+=== RUN   TestControlV2ParametersParse
+--- PASS: TestControlV2ParametersParse (0.00s)
+=== RUN   TestControlV2ParametersInvalidSTUNURI
+--- PASS: TestControlV2ParametersInvalidSTUNURI (0.00s)
+=== RUN   TestControlV2ParametersInvalidDuration
+=== RUN   TestControlV2ParametersInvalidDuration/req
+=== RUN   TestControlV2ParametersInvalidDuration/rep
+=== RUN   TestControlV2ParametersInvalidDuration/hb
+=== RUN   TestControlV2ParametersInvalidDuration/poll
+--- PASS: TestControlV2ParametersInvalidDuration (0.00s)
+    --- PASS: TestControlV2ParametersInvalidDuration/req (0.00s)
+    --- PASS: TestControlV2ParametersInvalidDuration/rep (0.00s)
+    --- PASS: TestControlV2ParametersInvalidDuration/hb (0.00s)
+    --- PASS: TestControlV2ParametersInvalidDuration/poll (0.00s)
+=== RUN   TestControlV2ParametersUnsupportedVersion
+--- PASS: TestControlV2ParametersUnsupportedVersion (0.00s)
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields/PrivKeyV4
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields/PrivKeyV6
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields/ListenPort
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields/FwMark
+=== RUN   TestSuperConfigV2RejectsLegacyUDPFields/API_Prefix
+--- PASS: TestSuperConfigV2RejectsLegacyUDPFields (0.00s)
+    --- PASS: TestSuperConfigV2RejectsLegacyUDPFields/PrivKeyV4 (0.00s)
+    --- PASS: TestSuperConfigV2RejectsLegacyUDPFields/PrivKeyV6 (0.00s)
+    --- PASS: TestSuperConfigV2RejectsLegacyUDPFields/ListenPort (0.00s)
+    --- PASS: TestSuperConfigV2RejectsLegacyUDPFields/FwMark (0.00s)
+    --- PASS: TestSuperConfigV2RejectsLegacyUDPFields/API_Prefix (0.00s)
+=== RUN   TestSuperConfigV2HappyPath
+--- PASS: TestSuperConfigV2HappyPath (0.00s)
+=== RUN   TestSuperConfigV2RejectsSpecialNodeID
+--- PASS: TestSuperConfigV2RejectsSpecialNodeID (0.00s)
+=== RUN   TestControlV2ErrorsTyped
+--- PASS: TestControlV2ErrorsTyped (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.041s
+[exit=0]
+\n$ go run . -mode gencfg -cfgmode super -config example_config/super_mode/gensuper.yaml
+/tmp/eg_gen_super/EgNet_edge100.yaml
+/tmp/eg_gen_super/EgNet_super.yaml
+/tmp/eg_gen_super/EgNet_edge001.yaml
+/tmp/eg_gen_super/EgNet_edge002.yaml
+[exit=0]
+\n$ grep -En '^[[:space:]]*(PrivKeyV4|PrivKeyV6|ListenPort|FwMark|API_Prefix):' /tmp/eg_gen_super/*.yaml
+[result=PASS: no matches]
+\n$ go test -race -count=1 ./gencfg -run TestGenSuperCfgHTTPOnly|TestGeneratedControlKeysAreIsolated -v
+=== RUN   TestGenSuperCfgHTTPOnly
+/tmp/TestGenSuperCfgHTTPOnly4016882254/001/TestNet_edge1.yaml
+/tmp/TestGenSuperCfgHTTPOnly4016882254/001/TestNet_edge2.yaml
+/tmp/TestGenSuperCfgHTTPOnly4016882254/001/TestNet_edge3.yaml
+/tmp/TestGenSuperCfgHTTPOnly4016882254/001/TestNet_super.yaml
+--- PASS: TestGenSuperCfgHTTPOnly (0.02s)
+=== RUN   TestGeneratedControlKeysAreIsolated
+/tmp/TestGeneratedControlKeysAreIsolated745092864/001/TestNet_edge3.yaml
+/tmp/TestGeneratedControlKeysAreIsolated745092864/001/TestNet_super.yaml
+/tmp/TestGeneratedControlKeysAreIsolated745092864/001/TestNet_edge1.yaml
+/tmp/TestGeneratedControlKeysAreIsolated745092864/001/TestNet_edge2.yaml
+--- PASS: TestGeneratedControlKeysAreIsolated (0.02s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.097s
+[exit=0]
+\n$ python3 - <<'PY'\nfrom pathlib import Path\nimport base64\nimport re\nsuper_text = Path('example_config/super_mode/EgNet_super.yaml').read_text()\npeer_keys = dict(re.findall(r'- NodeID: (\d+)\n(?:.*\n)*?   ControlPSKey: ([^\n]+)', super_text))\nedge_keys = {}\nfor edge in sorted(Path('example_config/super_mode').glob('EgNet_edge*.yaml')):\n    text = edge.read_text()\n    node = re.search(r'^NodeID: (\d+)$', text, re.M).group(1)\n    key = re.search(r'^  ControlPSKey: ([^\n]+)$', text, re.M).group(1)\n    base64.b64decode(key, validate=True)\n    edge_keys[node] = key\nassert len(edge_keys) == len(set(edge_keys.values())), 'duplicate Edge ControlPSKey'\nassert edge_keys == peer_keys, f'Edge/Super PSKey mapping mismatch: edges={edge_keys}, super={peer_keys}'\nprint('PASS: each Edge ControlPSKey is unique, base64-encoded, and matches exactly one Super peer')\nPY
+bash: line 1: warning: here-document at line 1 delimited by end-of-file (wanted `PYnfrom')
+bash: -c: line 1: syntax error near unexpected token `('
+bash: -c: line 1: `python3 - <<'PY'\nfrom pathlib import Path\nimport base64\nimport re\nsuper_text = Path('example_config/super_mode/EgNet_super.yaml').read_text()\npeer_keys = dict(re.findall(r'- NodeID: (\d+)\n(?:.*\n)*?   ControlPSKey: ([^\n]+)', super_text))\nedge_keys = {}\nfor edge in sorted(Path('example_config/super_mode').glob('EgNet_edge*.yaml')):\n    text = edge.read_text()\n    node = re.search(r'^NodeID: (\d+)$', text, re.M).group(1)\n    key = re.search(r'^  ControlPSKey: ([^\n]+)$', text, re.M).group(1)\n    base64.b64decode(key, validate=True)\n    edge_keys[node] = key\nassert len(edge_keys) == len(set(edge_keys.values())), 'duplicate Edge ControlPSKey'\nassert edge_keys == peer_keys, f'Edge/Super PSKey mapping mismatch: edges={edge_keys}, super={peer_keys}'\nprint('PASS: each Edge ControlPSKey is unique, base64-encoded, and matches exactly one Super peer')\nPY'
+[exit=2]
+\n$ go test -race -count=1 . -run TestDocs -v
+=== RUN   TestDocsNoLegacyUDPSuperKeys
+=== PAUSE TestDocsNoLegacyUDPSuperKeys
+=== RUN   TestDocsNoServerUpdateUDPConcept
+=== PAUSE TestDocsNoServerUpdateUDPConcept
+=== RUN   TestDocsReferenceV2APIRoutes
+=== PAUSE TestDocsReferenceV2APIRoutes
+=== RUN   TestDocsReferenceValidYAMLKeys
+=== PAUSE TestDocsReferenceValidYAMLKeys
+=== RUN   TestDocsControlAPIHeadersMatch
+=== PAUSE TestDocsControlAPIHeadersMatch
+=== RUN   TestDocsProtocolVersionMatch
+=== PAUSE TestDocsProtocolVersionMatch
+=== RUN   TestDocsEventTypesMatch
+=== PAUSE TestDocsEventTypesMatch
+=== CONT  TestDocsReferenceV2APIRoutes
+=== CONT  TestDocsReferenceValidYAMLKeys
+=== CONT  TestDocsNoServerUpdateUDPConcept
+--- PASS: TestDocsReferenceV2APIRoutes (0.00s)
+=== CONT  TestDocsNoLegacyUDPSuperKeys
+=== CONT  TestDocsProtocolVersionMatch
+--- PASS: TestDocsReferenceValidYAMLKeys (0.00s)
+=== CONT  TestDocsControlAPIHeadersMatch
+=== CONT  TestDocsEventTypesMatch
+--- PASS: TestDocsControlAPIHeadersMatch (0.00s)
+--- PASS: TestDocsEventTypesMatch (0.00s)
+--- PASS: TestDocsProtocolVersionMatch (0.00s)
+--- PASS: TestDocsNoServerUpdateUDPConcept (0.01s)
+--- PASS: TestDocsNoLegacyUDPSuperKeys (0.05s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.118s
+[exit=0]
+\n$ git show 'ea5f05b:example_config/super_mode/EgNet_super.yaml' > /tmp/f4-v1-super.yaml
+[exit=0]
+\n$ timeout 20s go run . -mode super -config /tmp/f4-v1-super.yaml
+Error :control v2: legacy_udp_field: : config field "PrivKeyV4" is no longer accepted in -mode super (HTTP-only); use a v2 SuperConfigV2 YAML
+exit status 1
+[result=PASS: rejected with actionable migration error, exit=1]
+\nOVERALL: FAIL — at least one required audit check failed.
+\nCORRECTION: prior forbidden-service grep used `turn.` and falsely matched `return`; rerunning with word-bounded service identifiers.
+\n$ git diff --unified=0 ea5f05b..HEAD -- '*.go' ':!**/*_test.go' | grep '^+' | grep -Ev '^\+\+\+' | grep -Eiw 'turn|websocket|database|sqlite|postgres|browser'
+[result=PASS: no matches]
+\n$ git diff --unified=0 ea5f05b..HEAD -- '*.go' ':!**/*_test.go' | grep '^+' | grep -Ev '^\+\+\+' | grep -Ei 'relay[[:space:]_-]*(forward|packet|data)|forward[[:space:]_-]*relay'
+[result=PASS: no matches]
+\n$ git diff --unified=0 ea5f05b..HEAD -- '*.go' ':!**/*_test.go' | grep '^+' | grep -Ev '^\+\+\+' | grep -E 'net\.(ListenUDP|DialUDP|ListenPacket)'
+[result=PASS: no matches]
+\n$ go run /tmp/f4_verify_examples.go
+PASS: all committed Super/Edge YAMLs parse and validate as v2; each Edge PSKey is unique and maps to exactly one Super peer
+[exit=0]
+\nCORRECTED OVERALL: PASS — all scope/config/docs audit checks passed.

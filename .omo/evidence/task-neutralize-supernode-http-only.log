@@ -1,0 +1,339 @@
+T0.5 (micro-task; orchestrator-inserted). Neutralize legacy SuperNode WireGuard/UDP
+lifecycle in the root package so the repo COMPILES, without implementing the
+HTTP control service (task 11's job).
+
+Worktree: /home/kexi/eg-super-http/w2-neutralize (branch super-http-w2-neutralize)
+Base:    adbd83e (merge: Edge HTTP control client — task 4)
+Commit:  e3ec872 refactor: neutralize legacy Super UDP lifecycle
+
+================================================================
+PRE-EDIT BUILD FAILURE (the 8 errors the task description referenced)
+================================================================
+$ go build ./...
+# github.com/KusakabeSi/EtherGuard-VPN
+./main_super.go:126:11: sconfig.PrivKeyV4 undefined (type mtypes.SuperConfig has no field or method PrivKeyV4)
+./main_super.go:129:11: sconfig.PrivKeyV6 undefined (type mtypes.SuperConfig has no field or method PrivKeyV6)
+./main_super.go:155:136: sconfig.FwMark undefined (type mtypes.SuperConfig has no field or method FwMark)
+./main_super.go:158:136: sconfig.FwMark undefined (type mtypes.SuperConfig has no field or method FwMark)
+./main_super.go:160:13: sconfig.PrivKeyV4 undefined (type mtypes.SuperConfig has no field or method PrivKeyV4)
+./main_super.go:161:41: sconfig.PrivKeyV4 undefined (type mtypes.SuperConfig has no field or method PrivKeyV4)
+./main_super.go:167:62: sconfig.FwMark undefined (type mtypes.SuperConfig has no field or method FwMark)
+./main_super.go:168:69: sconfig.ListenPort undefined (type mtypes.SuperConfig has no field or method ListenPort)
+./main_super.go:172:13: sconfig.PrivKeyV6 undefined (type mtypes.SuperConfig has no field or method PrivKeyV6)
+./main_super.go:173:41: sconfig.PrivKeyV6 undefined (type mtypes.SuperConfig has no field or method PrivKeyV6)
+./main_super.go:173:41: too many errors
+
+All 10 unique sites were in main_super.go, all referring to the five
+SuperConfig fields task 1 removed: PrivKeyV4, PrivKeyV6, ListenPort,
+FwMark, API_Prefix (the API_Prefix hit on line 211 was past the
+"too many errors" cut-off but is captured in the inventory below).
+
+================================================================
+POST-EDIT VERIFICATION
+================================================================
+$ go build ./...                  => ok
+$ go vet ./...
+example_config/super_mode/testfd/n1_test_fd_mode2.go:73:5: misuse of unbuffered os.Signal channel as argument to signal.Notify
+orderdmap/orderdmap.go:200:29: assignment copies lock value to oldMap ...
+orderdmap/orderdmap.go:246:30: assignment copies lock value to oldMap ...
+(All three warnings are PRE-EXISTING on the integration branch adbd83e;
+ confirmed via `git stash && go vet ./...` round-trip. Not introduced by
+ this task. Root package itself vets clean.)
+
+$ go test -race -shuffle=on -count=1 ./...
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.058s
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn	[no test files]
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	2.075s
+?   	github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.096s
+?   	github.com/KusakabeSi/EtherGuard-VPN/ipc	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.039s
+?   	github.com/KusakabeSi/EtherGuard-VPN/orderdmap	[no test files]
+?   	github.com/KusakabeSi/EtherGuard-VPN/path	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter	1.022s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay	1.031s
+?   	github.com/KusakabeSi/EtherGuard-VPN/rwcancel	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n	1.024s
+?   	github.com/KusakabeSi/EtherGuard-VPN/tap	[no test files]
+
+Root-package tests:
+$ go test -v -count=1 .
+=== RUN   TestInitialPeerEndpointErrorIsRecoverableInP2PMode
+--- PASS: TestInitialPeerEndpointErrorIsRecoverableInP2PMode (0.00s)
+=== RUN   TestInitialPeerEndpointErrorRemainsFatalOutsideP2PMode
+--- PASS: TestInitialPeerEndpointErrorRemainsFatalOutsideP2PMode (0.00s)
+=== RUN   TestInitialPeerEndpointErrorRejectsInvalidP2PEndpoint
+--- PASS: TestInitialPeerEndpointErrorRejectsInvalidP2PEndpoint (0.00s)
+PASS
+
+================================================================
+SMOKE CHECKS — -mode super behaviour
+================================================================
+$ go run . -help                                 => help output unchanged
+$ go run . -version                              => "etherguard-go v0.3.5-f5 linux-amd64 VPP support disabled"
+$ go run . -mode gencfg -cfgmode super -example  => v2 SuperGen summary unchanged
+$ go run . -mode super -example                  => dumps v2 SuperConfigV2 YAML
+    (NodeName, APIUrl, APIPrefix, ManagementAuth, STUNServers, timing fields,
+     Peers [{NodeID, NodeName, ControlPSKey, AdditionalCost}])
+
+$ go run . -mode super -config <v1-udp-yaml-with-PrivKeyV4>
+Error :control v2: legacy_udp_field: : config field "PrivKeyV4" is no longer
+       accepted in -mode super (HTTP-only); use a v2 SuperConfigV2 YAML
+exit status 1
+  -> v1 UDP Super config REJECTED with typed error code legacy_udp_field.
+
+$ go run . -mode super -config <clean-legacy-yaml>
+super: HTTP-only Super control service not yet wired (task 11); node=NodeSuper
+       idling until SIGTERM/SIGINT. ListenPort_EdgeAPI="3001" ListenPort_ManageAPI="3002"
+super: stub shutting down (task 11 will replace this shell)
+exit 0 on SIGTERM (timeout 2s)
+  -> clean legacy YAML idles gracefully, no panic, no crash-loop.
+
+$ go run . -mode super -config <empty/minimal>
+Error :PeerAliveTimeout must > 0 : 0
+exit status 1
+  -> empty config fails validation as expected.
+
+================================================================
+FILES MODIFIED
+================================================================
+main_super.go only (1 file, +114/-430). All other root files (main.go,
+main_edge.go, main_edge_endpoint.go, main_edge_endpoint_test.go,
+main_httpserver.go) untouched. Per task instructions, NO edits outside
+main_super.go were needed because:
+
+- main_httpserver.go's httpobj.http_device4/6 / httpobj.http_graph /
+  httpobj.http_PeerState / PeerState / HttpPeerLocalIP fields all still
+  reference real types — the *device.Device fields become nil but the
+  struct, methods, and field accesses compile fine.
+- main_httpserver.go's single PushNhTable(false) call (line 522) keeps
+  compiling because PushNhTable's signature is preserved as a no-op stub.
+- main_httpserver.go's calls to super_peeradd (line 680) and super_peerdel
+  (line 954) keep compiling because the wrappers' signatures are
+  preserved with the UDP/WireGuard branches stripped out.
+- startUAPI is still used by main_edge.go:232 — preserved verbatim.
+- printExampleSuperConf, checkNhTable preserved (gencfg.GetExampleSuperConf
+  return type updated from legacy SuperConfig to SuperConfigV2 by task 2;
+  the example helper now marshals the v2 shape).
+
+================================================================
+INVENTORY: every removed symbol/block with original line refs
+================================================================
+All line refs are from the pre-edit main_super.go (612 lines).
+
+REMOVED (UDP lifecycle — task 11 re-wires via HTTP):
+
+  Imports (lines 8-32):
+    - "crypto/md5"           — kept (still used in super_peeradd for SuperParam hash)
+    - "encoding/hex"         — kept
+    - "encoding/json"        — kept
+    - "errors"               — removed (no errors.New users remain in Super)
+    - "fmt"                  — kept
+    - "net"                  — kept (startUAPI returns net.Listener)
+    - "os"                   — kept
+    - "os/exec"              — removed (PostScript exec gone)
+    - "github.com/google/shlex" — removed (PostScript shlex.Split gone)
+    - "strconv"              — kept (UAPI fd parsing)
+    - "syscall"              — kept
+    - "time"                 — kept (PeerState atomic values)
+    - "github.com/.../conn"  — removed (NewDefaultBind calls gone)
+    - "github.com/.../device" — kept (startUAPI uses device.Logger/Device)
+    - "github.com/.../ipc"    — kept (startUAPI uses ipc.UAPIOpen/UAPIListen)
+    - "github.com/.../tap"    — removed (CreateDummyTAP calls gone)
+    - "github.com/.../path"   — removed (Event_server_event_hendler graph arg gone)
+    - "bytes"               — added (legacyUDPFieldPresent)
+    - "io/ioutil"           — added (legacyUDPFieldPresent reads file)
+    - "os/signal"           — added (signal.Notify for SIGTERM)
+    - "strings"             — added (kept reserved for future checks)
+
+  Removed runtime body (lines 70-252):
+    Super() function body: thinned from ~180 lines of UDP lifecycle
+    orchestration to a ~30-line stub:
+      - EnabledAf / PrivKeyV4/6 blanking (126-130)
+      - logger4/6 setup (115-122) — no longer needed (no device to log)
+      - tap.CreateDummyTAP x2 (154, 157) — no dummy TAP, no device
+      - device.NewDevice x2 (155, 158) — no device at all
+      - conn.NewDefaultBind x2 (155, 158) — no UDP bind
+      - device.Str2PriKey(PrivKeyV4/V6) + IpcSet("fwmark=")/"listen_port="
+        /"replace_peers=" blocks (160-182) — no keys, no listening
+      - super_peeradd loop over sconfig.Peers (184-189) — task 5 owns
+        the v2-driven peer book-keeping; super_peeradd is still called
+        only from main_httpserver.go's manage_peeradd at line 680
+      - startUAPI x2 (196, 201) — no Super device, no UAPI
+      - Event_server_event_hendler goroutine (208) — UDP event channel
+        machinery deleted
+      - RoutinePushSettings + RoutineTimeoutCheck goroutines (209-210)
+        — UDP push / synthetic events deleted
+      - HttpServer(...) call (211) — call kept removed; task 11 binds
+        the v2 HTTP server in its place. HttpServer func preserved in
+        main_httpserver.go for tasks 5/8 to call into (or replace).
+      - SdNotify block (237-240) — internal-only, removed
+      - select over device.Wait x2 (244-249) — no devices to wait on
+
+REMOVED FUNCTIONS (entirely — only used from deleted Super runtime):
+
+  super_peerdel_notify (lines 350-375):
+    Used only by super_peerdel. Sent an mtypes.ServerUpdateMsg
+    (Shutdown, ENOENT) via httpobj.http_device{4,6}.SendPacket —
+    a UDP tunnel send. Removed; super_peerdel now leaves a TODO for
+    task 11 to push the same Shutdown over the v2 control plane.
+
+  Event_server_event_hendler (lines 377-442):
+    Forever-loop consuming events.Event_server_register and
+    events.Event_server_pong and acting on httpobj.http_PeerState
+    + httpobj.http_graph. Removed because mtypes.SUPER_Events
+    (RegisterMsg / PongMsg channels) is a UDP-only construct; the
+    v2 control service uses HTTP request bodies (mtypes.ControlV2
+    RegisterRequest / ReportRequest) instead.
+
+  RoutinePushSettings (lines 444-459):
+    Forever-loop sleeping RePushConfigInterval, calling PushNhTable /
+    PushPeerinfo / PushServerParams. Removed with the push functions
+    becoming stubs; task 11 drives pushes via SSE events on revision.
+
+  RoutineTimeoutCheck (lines 461-474):
+    Forever-loop pumping synthetic mtypes.RegisterMsg / PongMsg
+    (Version="dummy") into the channels. Removed with the event
+    channels removed.
+
+MODIFIED FUNCTIONS (signature preserved; UDP branches stripped):
+
+  super_peeradd (originally lines 254-335):
+    Removed:
+      - device.Str2PubKey(peerconf.PubKey) (256-259) — no peer object
+      - branch on httpobj.http_sconfig.PrivKeyV4/V6 (260, 285)
+      - device.NoisePresharedKey decoding (261-266, 286-291)
+      - httpobj.http_device{4,6}.NewPeer(...) (268, 293)
+      - peer4/peer6 SetPSK + SetEndpointFromConnURL (273-283, 298-308)
+    Kept:
+      - httpobj.http_PeerID2Info[peerconf.NodeID] = peerconf (310)
+      - mtypes.API_SuperParams hash into PeerState (312-330)
+      - PeerState{} init with all atomic.Value slots (323-330)
+      - httpobj.http_PeerState[PubKey] = &PS + PeerIPs map init (331-333)
+    The remaining body is what main_httpserver.go's manage_peeradd
+    needs to keep its PeerState shape populated. Task 5/7 fill in
+    the v2 snapshot/event-driven peer book-keeping from here.
+
+  super_peerdel (originally lines 337-348):
+    Removed:
+      - httpobj.http_pskdb.DelNode(toDelete) — was after a
+        LookupPeerByStr/LookupPeer for PubKey which no longer
+        exists. PSKDB bookkeeping moves to task 11.
+    Kept:
+      - the early-return if NodeID not in map
+      - delete(httpobj.http_PeerState, PubKey)
+      - delete(httpobj.http_PeerIPs, PubKey)
+      - delete(httpobj.http_PeerID2Info, toDelete)
+      - TODO marker for task 11 to push Shutdown over HTTP
+
+  PushNhTable / PushPeerinfo / PushServerParams (originally 476-575):
+    All three bodies were the same pattern:
+      1. mtypes.GetByte(mtypes.ServerUpdateMsg{Action: UpdateNhTable / UpdatePeer / UpdateSuperParams})
+      2. wrap in path.EgHeader (src/dst = NodeID_SuperNode)
+      3. for each peer in httpobj.http_PeerState: lookup by PubKey on
+         httpobj.http_device{4,6}, SendPacket if alive or forced.
+    All three become 1-line no-op stubs that Fprintln(os.Stderr,
+    "super: PushX stub (task 11 wires the v2 SSE event)"). The
+    signatures stay so the only call site (main_httpserver.go:522
+    PushNhTable(false) inside edge_post_nodeinfo) compiles. Task 11
+    replaces this with SSE revision events that let Edges pull the
+    new snapshot on demand.
+
+  printExampleSuperConf (originally lines 64-68):
+    gencfg.GetExampleSuperConf's return type changed from
+    mtypes.SuperConfig to mtypes.SuperConfigV2 (task 2). The old
+    `var sconfig mtypes.SuperConfig` declaration no longer matches.
+    Updated to declare `sconfig mtypes.SuperConfigV2` (inferred).
+    The example output now reflects the v2 schema (APIUrl,
+    APIPrefix, ManagementAuth, STUNServers, etc.) — verified by
+    `go run . -mode super -example` smoke check.
+
+KEPT VERBATIM (still needed):
+
+  checkNhTable (lines 34-62): graph routing helper, pure function over
+    mtypes.NextHopTable and []mtypes.SuperPeerInfo. Task 11 uses it
+    from the v2 state service to validate static-mode next-hop tables.
+
+  startUAPI (lines 577-612): still called by main_edge.go:232. Shared
+    helper for the Edge UAPI listener. Untouched.
+
+  Env / const refs (ENV_EG_UAPI_FD): kept (still consumed by startUAPI).
+
+================================================================
+SYMBOLS THAT SURVIVE (consumed by main_httpserver.go, tasks 5-9)
+================================================================
+The following httpobj fields are still declared in main_httpserver.go
+(lines 34-60) and still WRITTEN by main_super.go's stubs, so
+main_httpserver.go continues to compile cleanly:
+
+  httpobj.http_sconfig             — assigned only in main_super.go's Super()
+                                    (legacy SuperConfig). main_httpserver.go
+                                    reads it on every /edge/* request.
+  httpobj.http_sconfig_path        — assigned only in main_super.go's Super().
+  httpobj.http_econfig_tmp         — assigned only in main_super.go's Super().
+  httpobj.http_PeerState           — initialized in Super() (line 133 in
+                                    original; now removed because Super()
+                                    no longer reaches the peer-add loop,
+                                    and manage_peeradd calls super_peeradd
+                                    directly). main_httpserver.go reads it
+                                    on every /edge/* request.
+  httpobj.http_PeerIPs             — same as PeerState; populated by
+                                    super_peeradd on manage_peeradd.
+  httpobj.http_PeerID2Info         — populated by super_peeradd.
+  httpobj.http_HashSalt            — never assigned in this task (was
+                                    line 136 in original). Until Super()
+                                    wires it, httpobj.http_HashSalt is
+                                    nil; super_peeradd's md5 hash will
+                                    be over a nil salt (still deterministic).
+                                    Task 11 re-initializes it on startup.
+  httpobj.http_passwords           — never assigned in this task.
+  httpobj.http_graph               — never assigned in this task.
+  httpobj.http_device4 / device6   — never assigned in this task
+                                    (left nil). No code path that runs
+                                    in this task reaches a dereference.
+  httpobj.http_NhTable_Hash / _Str — never assigned in this task.
+  httpobj.http_PeerInfo / _hash    — never assigned in this task.
+  httpobj.http_super_chains        — never assigned in this task.
+  httpobj.http_pskdb               — never assigned in this task.
+
+Tasks 5/7 (state service) MUST initialize the nil-stubbed fields at
+service startup so main_httpserver.go's reads don't see zero values.
+Specifically:
+  - http_HashSalt       (mtypes.RandomStr)
+  - http_super_chains   (mtypes.SUPER_Events{Event_server_register,
+                                              Event_server_pong})
+  - http_passwords      (from sconfig.Passwords)
+  - http_graph          (path.NewGraph)
+  - http_device4/6      (nil until task 10 wires the Edge-side device)
+  - http_NhTableStr/Hash, http_PeerInfo/Hash
+  - http_pskdb          (device.PSKDB{})
+  - http_PeerState / IPs / PeerID2Info (make(...) before peer add)
+
+================================================================
+WHAT THIS TASK DOES NOT DO (task 11 / wave 5 owns it)
+================================================================
+- Wire the v2 HTTP control service (POST /edge/v2/{register,report},
+  GET /edge/v2/snapshot, GET /edge/v2/events).
+- Bind sconfig.ListenPort_EdgeAPI / ListenPort_ManageAPI as HTTP servers.
+- Implement HMAC request signing/validation (mtypes.ControlV2RegisterRequest
+  etc. already validated by task 1).
+- Implement state service / snapshot generator (task 5).
+- Implement event hub / SSE replay buffer (task 7).
+- Wire real push (replace PushNhTable/Peerinfo/ServerParams stubs).
+- Add v2 Super startup (SuperConfigV2 vs legacy SuperConfig parser switch).
+- Add v2 management auth (mtypes.SuperConfigV2ManagementAuth).
+
+================================================================
+BRANCH STATE
+================================================================
+$ git log --oneline -3
+e3ec872 refactor: neutralize legacy Super UDP lifecycle
+adbd83e merge: Edge HTTP control client (task 4)
+8699bab merge: same-bind STUN discovery (task 3)
+
+$ git diff --stat adbd83e..HEAD
+ main_super.go | 516 ++++++++++++++----------------------------- 1 file changed,
+               | 114 insertions(+), 430 deletions(-)
+
+Not pushed — local only. Tasks 5/7 may stack on top via merge.

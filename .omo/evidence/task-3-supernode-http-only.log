@@ -1,0 +1,7 @@
+[2026-07-25] Task 3 verification
+RED: go test -race -shuffle=on -count=1 ./device -run 'TestSuperSTUN|TestReceiveDemultiplexesSTUNBeforeWireGuard' -> exit 1; missing SuperSTUNManager symbols.
+GREEN: go test -race -shuffle=on -count=1 ./device -run 'TestSuperSTUN|TestReceiveDemultiplexesSTUNBeforeWireGuard' -> exit 0.
+GREEN: go build ./device -> exit 0.
+GREEN: go vet ./device -> exit 0.
+GREEN: go test -race -shuffle=on -count=1 ./device -> exit 0.
+Assertions: same-bind fake returned XOR-MAPPED IPv4/IPv6 candidates retaining bind port 43210; deduplication passed; first-server timeout failed over; all-server failure returned no fabricated mapped candidate; unknown transaction, malformed fingerprint, bad magic cookie rejected; valid WireGuard demux test passed.

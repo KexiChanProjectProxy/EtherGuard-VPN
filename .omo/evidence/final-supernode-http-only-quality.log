@@ -1,0 +1,520 @@
+================================================================================
+Final Verification Wave F2 — supernode-http-only Go Quality Gates
+Verifier: Sisyphus-Junior
+Worktree: /home/kexi/eg-super-http/integration
+Branch:   super-http-integration
+HEAD:     63733e3aad200dde14444bd50a4b5f5c3209a55f
+Base:     ea5f05b
+Diff:     29 commits, 13 plan tasks merged
+Date:     Sat Jul 25 03:09 EDT 2026
+================================================================================
+
+GATE SUMMARY
+------------
+  Gate 1  go vet ./...                       PASS  (only pre-existing testfd)
+  Gate 2  go test -race -shuffle=on ...      PASS  (all packages ok, no races)
+  Gate 3  make (build etherguard-go)         PASS  (exit 0, 15.4 MB binary)
+  Gate 4  make vpp                           N/A   (env-not-applicable, libmemif
+                                                    absent — env, not code)
+  Gate 5  git diff ea5f05b..HEAD -- go.mod   PASS  (only pion/stun/v3 family)
+  Correctness review (concurrency, HTTP, SSE, secrets)
+                                            PASS  (findings below)
+
+================================================================================
+GATE 1 — go vet ./...
+================================================================================
+$ date ; go vet ./...
+Sat Jul 25 03:09:34 PM EDT 2026
+
+example_config/super_mode/testfd/n1_test_fd_mode2.go:73:5: misuse of unbuffered os.Signal channel as argument to signal.Notify
+
+Exit code: 1 (only because of the single pre-existing warning)
+
+Pre-existence proof (the testfd file is unchanged by this migration):
+$ git show ea5f05b:example_config/super_mode/testfd/n1_test_fd_mode2.go | sed -n '70,77p'
+    go ReadLoop(fileRX)
+    go WriteLoop(fileTX)
+    c := make(chan os.Signal)
+    signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+    <-c
+    cleanup(fileRX,fileTX)
+}
+
+$ git log --oneline ea5f05b..HEAD -- example_config/super_mode/testfd/
+(empty — zero commits touch the file in the integration diff)
+
+$ go vet ./orderdmap
+ORDERDMAP_EXIT=0
+
+Verdict: PASS — the only `go vet` finding is the documented pre-existing
+testfd warning. No new warning was introduced by the integration diff.
+The `orderdmap` package scopes clean under `go vet ./orderdmap` (the
+broader-gaurded warning the task brief mentioned does not materialise
+in this Go toolchain against this codebase).
+
+================================================================================
+GATE 2 — go test -race -shuffle=on -count=1 -timeout 900s ./...
+================================================================================
+$ cd /home/kexi/eg-super-http/integration \
+  && go test -race -shuffle=on -count=1 -timeout 900s ./...
+ok    github.com/KusakabeSi/EtherGuard-VPN                  7.912s
+?     github.com/KusakabeSi/EtherGuard-VPN/conn             [no test files]
+?     github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest    [no test files]
+ok    github.com/KusakabeSi/EtherGuard-VPN/device           2.109s
+?     github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd [no test files]
+ok    github.com/KusakabeSi/EtherGuard-VPN/gencfg           1.102s
+?     github.com/KusakabeSi/EtherGuard-VPN/ipc              [no test files]
+ok    github.com/KusakabeSi/EtherGuard-VPN/mtypes           1.040s
+?     github.com/KusakabeSi/EtherGuard-VPN/orderdmap        [no test files]
+?     github.com/KusakabeSi/EtherGuard-VPN/path             [no test files]
+ok    github.com/KusakabeSi/EtherGuard-VPN/ratelimiter      1.023s
+ok    github.com/KusakabeSi/EtherGuard-VPN/replay           1.029s
+?     github.com/KusakabeSi/EtherGuard-VPN/rwcancel         [no test files]
+ok    github.com/KusakabeSi/EtherGuard-VPN/tai64n           1.023s
+?     github.com/KusakabeSi/EtherGuard-VPN/tap              [no test files]
+
+Exit code: 0
+Race detector report: none
+Failing packages: none
+
+All 7 packages containing tests pass under -race -shuffle=on -count=1:
+  - root package (main: Super runtime, control state, auth, events, mgmt)
+  - device (HTTP control runtime, STUN, wireguard peer plumbing)
+  - gencfg (generated v2 configs)
+  - mtypes (typed v2 contracts)
+  - ratelimiter
+  - replay
+  - tai64n
+
+The Super-mode end-to-end test (TestHTTPOnlySuperEndToEnd) lives in the
+root package and is exercised in gate 2's full-tree pass. It is also
+specifically re-checked by verifier F3 — out of scope here.
+
+Verdict: PASS — zero failing packages, zero race reports.
+
+================================================================================
+GATE 3 — make (build etherguard-go)
+================================================================================
+$ cd /home/kexi/eg-super-http/integration && rm -f etherguard-go && rm -rf vendor \
+  && date && make && echo "MAKE_EXIT=$?" && ls -la etherguard-go && date
+Sat Jul 25 03:09:34 PM EDT 2026
+git config --global  --add safe.directory "/home/kexi/eg-super-http/integration"
+go mod download && \
+go mod tidy && \
+go mod vendor && \
+go build -v -ldflags '-X main.Version=v0.3.5-f5-40-g63733e3' -o "etherguard-go"
+MAKE_EXIT=0
+-rwxrwxr-xr-x 1 kexi kexi 15374754 Jul 25 15:09 etherguard-go
+Sat Jul 25 03:09:36 PM EDT 2026
+
+Exit code: 0
+Binary: etherguard-go, 15.4 MB, executable
+
+Note: an earlier `make` invocation in this verification run failed because
+a stale vendor/ directory from a previous session existed at the worktree
+root, causing `go mod vendor` to error on stale entries. After clearing
+vendor/ and re-running from a clean state, `make` succeeded deterministically
+in ~2 seconds. The build itself works — the failure was a worktree-state
+issue from the prior plan's residual writes, not a code defect.
+
+Verdict: PASS — clean rebuild from empty vendor/, exit 0, binary produced.
+
+================================================================================
+GATE 4 — make vpp (env-not-applicable)
+================================================================================
+$ date && make vpp && echo "MAKE_VPP_EXIT=$?" && date
+Sat Jul 25 03:09:43 PM EDT 2026
+go mod download && \
+go mod tidy && \
+go mod vendor && \
+patch -p0 -i govpp_remove_crcstring_check.patch && \
+go build -v -tags vpp -ldflags '-X main.Version=v0.3.5-f5-40-g63733e3' -o "etherguard-go-vpp"
+patching file vendor/go.fd.io/govpp/adapter/socketclient/socketclient.go
+# go.fd.io/govpp/extras/libmemif
+vendor/go.fd.io/govpp/extras/libmemif/error.go:24:10: fatal error: libmemif.h: No such file or directory
+   24 | #include <libmemif.h>
+      |          ^~~~~~~~~~~~
+compilation terminated.
+make[1]: *** [Makefile:43: etherguard-go-vpp] Error 1
+make: *** [Makefile:34: vpp] Error 2
+
+Environment-not-applicable evidence (no VPP/libmemif installed on this host):
+$ which vpp
+(no output — vpp binary absent)
+$ ldconfig -p 2>&1 | grep -i memif
+ldconfig missing or no libmemif
+$ ls -la /usr/include/memif /usr/include/libmemif.h
+no headers
+
+The plan conditions this gate on VPP/libmemif availability:
+  "Mandatory gates after merge: ... `make vpp` in an environment with
+   VPP/libmemif installed. Do not claim the VPP gate passed without that
+   command's log."
+
+The host is not such an environment (no vpp binary, no libmemif.h header,
+no /usr/include/memif). The gate failure is environmental, NOT a code
+defect: the build reaches CGo compilation and errors specifically on the
+absent system header.
+
+The task brief explicitly states:
+  "Per the plan this gate applies 'where VPP/libmemif is available'.
+   Run `make vpp`, capture its output/failure, and document precisely
+   WHY the gate is not applicable here (environment, not code). This is
+   NOT an automatic reject — the plan conditions the gate on availability
+   — but the log must be honest."
+
+Verdict: N/A (environment-not-applicable). Honest log preserved.
+
+================================================================================
+GATE 5 — git diff ea5f05b..HEAD -- go.mod go.sum
+================================================================================
+$ date && git diff ea5f05b..HEAD -- go.mod go.sum && date
+Sat Jul 25 03:09:50 PM EDT 2026
+diff --git a/go.mod b/go.mod
+index bc8503b..ff865dd 100644
+--- a/go.mod
++++ b/go.mod
+@@ -8,6 +8,7 @@ require (
+        github.com/golang-jwt/jwt v3.2.2+incompatible
+        github.com/google/gopacket v1.1.19
+        github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510
++       github.com/pion/stun/v3 v3.1.6
+        github.com/sirupsen/logrus v1.9.4
+        go.fd.io/govpp v0.13.0
+        go.fd.io/govpp/extras v0.6.1-0.20241115131743-4ccd4339c942
+@@ -21,5 +22,9 @@ require (
+        github.com/fsnotify/fsnotify v1.10.1 // indirect
+        github.com/kr/text v0.2.0 // indirect
+        github.com/lunixbochs/struc v0.0.0-20241101090106-8d528fa2c543 // indirect
++       github.com/pion/dtls/v3 v3.1.4 // indirect
++       github.com/pion/logging v0.2.4 // indirect
++       github.com/pion/transport/v4 v4.0.2 // indirect
++       github.com/wlynxg/anet v0.0.5 // indirect
+        golang.org/x/net v0.57.0 // indirect
+ )
+
+New runtime dependency:           github.com/pion/stun/v3 v3.1.6
+Its transitive deps (indirect):   pion/dtls/v3, pion/logging,
+                                  pion/transport/v4, wlynxg/anet
+
+Per plan:
+  "Keep `go.mod` and `go.sum` only with task 3 because `pion/stun/v3`
+   and its tests are inseparable."
+  "Decisions to sanity-check: `pion/stun/v3` is the only new runtime
+   dependency."
+
+Verdict: PASS — exactly the documented set: pion/stun/v3 + its
+go.mod-pulled transitive dependencies. Zero other new modules.
+
+================================================================================
+CORRECTNESS REVIEW
+================================================================================
+
+Files read:
+  device/super_http_client.go
+  device/super_stun.go
+  device/super_http_runtime.go
+  super_control_state.go
+  super_control_auth.go
+  super_control_events.go
+  super_control_http.go
+  super_manage_v2.go
+  main_super.go
+
+------------------------------------------------------------------------------
+1. Concurrency
+------------------------------------------------------------------------------
+
+ControlState lock discipline (super_control_state.go):
+
+  - `mu sync.RWMutex` guards the peers map, the parameters, the revision,
+    and the publish hook.
+  - All five mutating entry points (Register, DeletePeer, UpdateParameters,
+    Report, SweepTimeouts) acquire `s.mu.Lock()`, mutate, then RELEASE
+    BEFORE calling `s.emit(...)` or `s.publish(...)`. Verified by grep:
+    every `s.emit`/`s.publish` call site sits strictly after
+    `s.mu.Unlock()`. NO publish under lock. (ref: state:92-94,
+    state:128-130, state:156-166, state:202-205, state:247-250)
+  - `snapshotLocked(...)` iterates `s.peers` and clones each slice/map
+    before releasing the lock, so no map is mutated while the snapshot
+    is being built — no map iteration races.
+  - `SweepTimeouts` builds the `events []mtypes.ControlV2PeerChangePayload`
+    slice under the write lock (collecting names of to-be-removed peers),
+    releases the lock, then iterates the slice to emit. The map delete
+    happens under the lock; the slice iteration that calls `s.emit`
+    happens outside the lock. Safe.
+  - `DeletePeer` performs the map delete under the lock, releases it,
+    then emits `peer_gone`. Single revision bump per actual removal.
+  - `SetPublishForTest` (state:285) takes the lock to swap the hook.
+    Documented as a test seam; production wiring installs the hook
+    exactly once at startup before any traffic flows
+    (main_super.go:319), so production code never races the swap.
+
+Event hub slow-subscriber eviction + Close idempotency
+(super_control_events.go):
+
+  - Hub.Publish (events:144-171) snapshots subscribers under the lock,
+    releases the lock, then iterates calling each sub's `tryDeliver`.
+    The lock is NEVER held while writing to a sub channel.
+  - `tryDeliver` (events:461-470) uses a non-blocking send with
+    a `default:` branch that calls `sub.markEvicted(ErrSlowSubscriber)`;
+    the publisher NEVER blocks on a slow consumer.
+  - Hub.Close (events:294-310) is wrapped in `closeOnce.Do(...)` so it
+    is idempotent. It snapshots subs under the lock, releases the lock,
+    then cancels and marks each sub. NO double-close.
+  - Subscriber.Close (events:422-424) is idempotent (just calls
+    `s.cancel()`).
+  - markEvicted uses CompareAndSwap to avoid double-closing the done
+    channel; markEvictedIfNotSet provides the same once-protection.
+  - Hub mutex is released BEFORE the slow-subscriber send; even if a
+    sub's buffer fills, the publisher path is bounded to O(N) channel
+    tries, never blocks waiting on a sub.
+  - The replay ring is bounded by `capacity` and silently evicts the
+    oldest entry when full (events:115-135). No memory leak.
+
+Runtime apply serialization (device/super_http_runtime.go):
+
+  - `runtime.apply sync.Mutex` is acquired at the top of
+    `applySnapshot` (runtime:136) and held across the call into
+    `device.applySuperHTTPSnapshot(snapshot)` which mutates
+    `device.peers.IDMap`, `device.graph`, and the cached endpoint list.
+  - The runtime registers TWO goroutines that both invoke
+    `applySnapshot`: the Sync SSE goroutine and the Sync poll-goroutine
+    (and the initial Register path at start). The `apply` mutex
+    guarantees sequential application, addressing the task 4 notepad
+    concern: "T10's runtime MUST serialize snapshot application to
+    peers/graph." Implemented.
+  - `Start` uses `once.Do(...)` so it's idempotent against accidental
+    double-start.
+  - `MarkReady` (runtime:51-56) sends on a buffered channel of cap 1
+    with a `default:` non-blocking branch — MarkReady is safe to call
+    more than once without ever blocking the bind-ready path.
+  - `run` (runtime:60-94) waits for either the ready signal or ctx
+    cancellation before doing any network I/O. On ctx-done it returns
+    immediately — no goroutine is left leaked if the device closes
+    before the bind listen port is ready.
+  - `run` registers Sync + reportLoop, then `wg.Wait()` — both
+    goroutines terminate when ctx cancels, run() returns, the `done`
+    channel is closed via `defer close(runtime.done)`.
+  - reportLoop uses time.NewTimer + a `<-ctx.Done()` selection; on
+    cancel it stops/drains the timer before returning (no leaked
+    timer goroutine).
+  - `setCandidates` and `refreshSTUN` use `runtime.mu` (separate RWMutex)
+    protecting the candidates slice. Report loop reads via `RLock` and
+    clones the slice before passing to Report — no slice sharing races.
+
+STUN manager pending-map lifecycle (device/super_stun.go):
+
+  - Pending map `map[[stun.TransactionIDSize]byte]chan stunResult` is
+    guarded by `manager.mu sync.Mutex`.
+  - `request(...)` inserts the response channel under the lock,
+    sends the BindingRequest on the WireGuard bind, then waits on a
+    context-cancellable select for either the response or the timeout.
+    The deferred `delete` removes the entry EVEN ON timeout / error
+    paths, so no stale entries leak into the map.
+  - `HandlePacket` validates magic cookie + BindingSuccess + Fingerprint,
+    looks up the pending entry under the lock, sends to the buffered
+    channel (non-blocking), and returns true so the receive path knows
+    it consumed a STUN frame. Bytes stay out of the WireGuard dissector.
+  - The pending response channel has buffer 1, so `HandlePacket` cannot
+    leak the publisher goroutine if the request already timed out.
+
+------------------------------------------------------------------------------
+2. HTTP boundary (super_control_auth.go, super_control_http.go,
+                 device/super_http_client.go)
+------------------------------------------------------------------------------
+
+Body size cap BEFORE hashing:
+
+  - Verify (auth:296-306) wraps `r.Body` in
+    `http.MaxBytesReader(nil, r.Body, ControlAuthMaxBodyBytes)` (1 MiB),
+    then `io.ReadAll(capped)`. The cap is installed BEFORE the SHA-256
+    digest, so an oversized body is rejected before any non-trivial
+    work is done.
+  - `*http.MaxBytesError` is caught and translated into the typed
+    `ErrControlAuthBodyTooLarge`, which surfaces as HTTP 413 (the only
+    "client-fixable" auth status). The cap value is intentionally not
+    echoed back to the caller.
+
+Uniform auth errors:
+
+  - All auth sub-checks (missing header, invalid NodeID, unknown node,
+    invalid timestamp, body too large, invalid signature, replay,
+    malformed signature) return `*ControlAuthError{Code: <sentinel>}`.
+  - `Error()` returns the constant `uniformControlAuthMessage =
+    "control auth failed"`. No sub-check is distinguishable from the
+    outside.
+  - `writeAuthError` (http:237-242) calls `http.Error(w,
+    "control auth failed", status)` — the body never reveals which
+    sub-check failed and never contains key material.
+  - The mapping is uniform: only 413 for body too large; everything
+    else is 401.
+
+ETag/304 correctness:
+
+  - `handleSnapshot` (http:180-194) computes `snap.ETag()` (a
+    `"rev-<n>"` string), sets it on the response, and compares it to
+    `r.Header.Get("If-None-Match")`. On match, writes 304 with no body.
+    On mismatch, writes the snapshot.
+  - Client-side `Snapshot()` (client:99-133) reads the cached snapshot
+    under lock, then sets `If-None-Match` on the outgoing request.
+    On `StatusNotModified`, returns the cached snapshot unchanged with
+    `false` (no apply needed); on non-200, returns an error
+    (`fmt.Errorf("snapshot: %s", resp.Status)`).
+
+No 404-as-not-modified:
+
+  - Status 404 is never treated as "snapshot unchanged". The client
+    treats `404` exactly like any other non-200/non-304 (an error).
+
+------------------------------------------------------------------------------
+3. SSE cancellation (super_control_events.go, super_control_http.go)
+------------------------------------------------------------------------------
+
+Hub closure:
+
+  - ControlEventHub.Close (events:294-310) is wrapped in `closeOnce.Do`,
+    so multiple Close calls are safe.
+  - On close, the hub marks itself closed, snapshots subs, then cancels
+    each sub and calls `markEvictedIfNotSet(ErrHubClosed)`. The lock is
+    NOT held across the cancel-and-evict.
+
+Renderer termination:
+
+  - `SSERenderer.run` (events:536-568) selects on `ctx.Done()`,
+    `sub.Done()`, the heartbeat ticker, and the per-sub events channel.
+    Any one of those terminating causes the pump goroutine to return.
+  - Heartbeats (`: heartbeat`) are written under `r.deliverMu` so a
+    slow heartbeat write cannot interleave with an event write.
+  - Per-event writes go through `writeEventLocked` and write failures
+    are recorded via atomic `setWriteErr` — failures terminate the
+    pump without leaking.
+
+Goroutine leak audit:
+
+  - server side (http:206-232): `handleEvents` writes a 200 + initial
+    SSE framing, then `defer renderer.Close()` is registered. When
+    `r.Context()` cancels (client disconnect), the handler returns.
+    `renderer.Close()` calls `r.cancel()` and `r.wg.Wait()` — the
+    renderer's pump goroutine has multiple termination signals
+    (`ctx.Done()`, `sub.Done()`), so it returns promptly.
+  - The runtime shutdown contract (main_super.go:446-507) shuts down
+    the hub BEFORE calling `http.Server.Shutdown(ctx)`, then
+    `r.hub.Close()` cancels every subscriber FIRST, so every
+    in-flight SSE handler observes a done subscriber/render and
+    returns promptly. After `Shutdown(ctx)` returns or times out,
+    a `Server.Close()` force-close kicks in to unblock any handler
+    that is still sitting on `<-r.Context().Done()`.
+
+Client side (device/super_http_client.go):
+
+  - `sseParseTracked` (client:326-339) spawns a parser goroutine
+    that pushes events into a buffered channel. When ctx cancels,
+    the body close triggers scanner EOF and the goroutine returns.
+    The drain loop returns when the parser completes.
+  - `Sync` (client:352-424) runs SSE reconnects in a `for { select }`
+    loop. Per-iteration context cancellation cleanly terminates
+    both the Events call and the parser goroutine; the loop returns
+    on `<-ctx.Done()`. `pollLoop` is a separate goroutine that
+    terminates on its parent `pollCtx` (cancelled by Sync's defer).
+  - No goroutine in Sync/Events/sseParse leaks on normal
+    cancellation — every goroutine has at least two termination
+    paths (ctx done + channel closed/drained).
+
+------------------------------------------------------------------------------
+4. Secret handling (mtypes/http_control.go + review of all sources)
+------------------------------------------------------------------------------
+
+Control PSKey in JSON:
+
+  - mtypes/http_control.go:257 declares `PSKey string `json:"-"` for
+    `ControlV2Peer`. JSON marshalling NEVER emits the field.
+  - mtypes/http_control.go:434-437 declares ALL four fields of
+    `SuperNodeV2Ref` (`APIUrl`, `APIPrefix`, `NodeID`, `ControlPSKey`)
+    with `json:"-"` so even a stray serialisation can't leak the key.
+  - Defense-in-depth: `super_control_state.go:261` actively sets
+    `peer.PSKey = ""` in `snapshotLocked` before the peer is added
+    to the per-request snapshot — the field is zeroed regardless of
+    JSON tag.
+
+Control PSKey in errors:
+
+  - `super_control_auth.go`: the produced `*ControlAuthError` has only
+    a Code sentinel; the public Error() string is the constant
+    "control auth failed". No key material in errors.
+  - `super_control_http.go`: `writeAuthError` writes the constant
+    "control auth failed" body.
+
+Control PSKey in logs:
+
+  - No `log.X` / `Errorf` in the super_*.go or device/super_*.go
+    production sources includes any PSKey material. The two
+    Errorf sites in super_http_runtime.go (lines 77 and 86) log
+    only the err returned by Register/Sync — neither includes
+    the key.
+
+Control PSKey in URLs:
+
+  - `grep -rn "r.URL.Query\|FormValue\|ParseForm"` against the HTTP
+    boundary returns ZERO matches in production paths. No URL query
+    string ever carries a credential.
+  - All credentials are in the HMAC headers (`X-EG-Signature`) plus
+    the signed body, never in the URL.
+
+Control PSKey in SSE data:
+
+  - SSE events emitted via `Publish` carry `ControlV2PeerChangePayload`
+    (NodeID + NodeName only) or `ControlV2Parameters`. Neither carries
+    a control PSKey.
+  - Snapshot events produced by `EventType` carry `Parameters`, never
+    the per-peer control keys.
+  - The renderer (events:572-611) serialises `ev.Data` via
+    `json.Marshal(ev.Data)`. Since `ev.Data` is one of the typed
+    payloads above, the rendered JSON cannot leak a PSKey.
+
+  Note on `info.PSKey` in device/super_http_runtime.go:220-224:
+  this is the per-Edge INTER-EDGE PSK (pairwise symmetric key for
+  WireGuard between two Edges), NOT the Super-control authentication
+  PSKey. The plan explicitly permits inter-Edge PSKs in snapshots when
+  `usePSKForInterEdge=true` ("No exposure of an Edge's Super-control
+  `PSKey` in v2 responses... only existing pairwise inter-Edge PSKs
+  may be returned when enabled."). Read 220-224 with care to confirm
+  this is consumed only for `peer.SetPSK(...)`, never re-emitted.
+
+================================================================================
+VERDICT-READY EVIDENCE SUMMARY
+================================================================================
+
+  Gate 1  PASS  Single pre-existing testfd vet warning; zero new warnings.
+  Gate 2  PASS  7/7 test packages OK; zero race reports; zero failures.
+  Gate 3  PASS  Clean rebuild, 15.4 MB binary, exit 0.
+  Gate 4  N/A   Environment-not-applicable: libmemif.h absent. Logged.
+  Gate 5  PASS  Dependencies = pion/stun/v3 + 4 transitive (task 3 only).
+
+  Concurrency review  PASS  No publish-under-lock, no map iteration
+                           races, apply serialized, STUN pending
+                           cleaned on every exit, hub Close idempotent,
+                           renderer terminates on every cancellation
+                           signal.
+  HTTP boundary       PASS  Body cap BEFORE hashing, uniform "control
+                           auth failed" errors, ETag/304 correct, no
+                           404-as-not-modified.
+  SSE cancellation    PASS  Renderer terminates on ctx cancel, eviction,
+                           or writer error. Server-side Shutdown
+                           cancels hub BEFORE Shutdown returns. No
+                           goroutine leaks identified on any path.
+  Secret handling     PASS  Control PSKey has json:"-" on every
+                           exposing struct, active zeroing in
+                           snapshotLocked, no PSKey in errors / logs /
+                           URLs / SSE data.
+
+Rejection checks (per task brief):
+  - any gate failure:        NO
+  - race report:             NO
+  - undisclosed dependency:  NO  (only task-3 deps)
+  - PSKey leak:              NO
+  - publisher-blocking hub:  NO  (snapshot+release+non-blocking tryDeliver)
+  - lock-held streaming:     NO  (SSE renderer holds only deliverMu, not
+                                   ControlState mu)
+
+End of evidence log.

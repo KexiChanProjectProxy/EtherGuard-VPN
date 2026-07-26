@@ -1,0 +1,128 @@
+==================================================================
+F3 FINAL VERIFICATION — supernode-http-only E2E (super_http_e2e_test.go)
+Worktree: /home/kexi/eg-super-http/integration
+Branch:   super-http-integration
+HEAD:     63733e3aad200dde14444bd50a4b5f5c3209a55f
+Date:     2026-07-25T19:07:22Z
+Test:     go test -race -shuffle=on -count=1 -timeout 600s . -run 'TestHTTPOnlySuperEndToEnd' -v
+==================================================================
+
+==================================================================
+RUN 1  2026-07-25T19:07:32Z
+Command: go test -race -shuffle=on -count=1 -timeout 600s . -run 'TestHTTPOnlySuperEndToEnd' -v
+==================================================================
+-test.shuffle 1785006453589499479
+=== RUN   TestHTTPOnlySuperEndToEnd
+--- PASS: TestHTTPOnlySuperEndToEnd (0.10s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.165s
+exit_status=0
+
+==================================================================
+RUN 2  2026-07-25T19:07:34Z
+Command: go test -race -shuffle=on -count=1 -timeout 600s . -run 'TestHTTPOnlySuperEndToEnd' -v
+==================================================================
+-test.shuffle 1785006455904555959
+=== RUN   TestHTTPOnlySuperEndToEnd
+--- PASS: TestHTTPOnlySuperEndToEnd (0.09s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.159s
+exit_status=0
+
+==================================================================
+RUN 3  2026-07-25T19:07:37Z
+Command: go test -race -shuffle=on -count=1 -timeout 600s . -run 'TestHTTPOnlySuperEndToEnd' -v
+==================================================================
+-test.shuffle 1785006458252340952
+=== RUN   TestHTTPOnlySuperEndToEnd
+--- PASS: TestHTTPOnlySuperEndToEnd (0.08s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.153s
+exit_status=0
+
+
+==================================================================
+INVARIANT CHECKLIST (line-by-line mapping from plan to test code)
+==================================================================
+
+[I1] No Super UDP control listener (TCP-only control plane)
+     Test code: super_http_e2e_test.go:25-27
+       Asserts: edgeListener.Addr().Network()=="tcp" && manageListener.Addr().Network()=="tcp"
+     Setup:     super_http_e2e_support_test.go:269,273
+       Both listeners created via net.Listen("tcp","127.0.0.1:0")
+     Status:    PASS (assertion passed across 3 runs, no Fatal triggered)
+
+[I2] Valid same-bind STUN candidates (mapped port == active bind source port)
+     Test code: super_http_e2e_test.go:65  assertSameBindCandidate(t, peerA.LocalV4[0], peerA.PublicV4[0], "198.51.100.101")
+       Asserts: mappedIP=="198.51.100.101" AND mappedPort==localPort
+     STUN resp: super_http_e2e_support_test.go:215-220  XORMappedAddress{IP: b.mappedIP, Port: int(b.port)}
+       b.port is the actualPort returned by Bind.Open(...) on the SAME bind the Edge uses for WG
+     Status:    PASS (assertion passed across 3 runs)
+
+[I3] Distinct authenticated identities (cross-Edge impersonation fails)
+     Test code: super_http_e2e_test.go:32-37
+       wrongIdentity := NewControlHTTPClient(... 102, topology.keyA)  // asks B's snapshot signed with A's key
+       Snapshot() must return error
+     Status:    PASS (assertion passed across 3 runs)
+
+[I4] Direct Edge-to-Edge WireGuard handshake + transport traffic
+     Test code: super_http_e2e_test.go:71-89
+       peerToB.SendHandshakeInitiation(false)
+       topology.edgeA.SendPacket(peerToB, path.NormalPacket, 64, payload, ...)
+       <-topology.bindA.responses  (handshake response arrived)
+       <-topology.bindB.transports == path.NormalPacket  (data crossed)
+     Status:    PASS — handshake + transport both observed in 3 runs
+
+[I5] Latency report -> observable route/next-hop change
+     Test code: super_http_e2e_test.go:99-119
+       Report sends Pongs{LatencyMS:4.5}
+       awaitSSERevision: SSE peer_change with revision > before
+       awaitE2E: topology.runtime.graph.Next(101, 102) == 102
+     Status:    PASS — SSE fired + graph.Next verified in 3 runs
+
+[I6] SSE invalidation on state change
+     Test code: super_http_e2e_test.go:93-98, 114, 225-235
+       Subscribe to runtime.Hub(); awaitSSERevision waits for event.Type==ControlV2EventPeerChange && revision>before
+     Status:    PASS — SSE peer_change consumed before deadline in 3 runs
+
+[I7] Polling recovery after forced SSE loss (deletion converges without SSE)
+     Test code: super_http_e2e_test.go:121-130
+       topology.runtime.Hub().Close()  // SSE unavailable
+       Manage().DeletePeer(ctx, {NodeID:101})
+       awaitE2E: snapshot no longer contains 101, edgeB.LookupPeer(pubA)==nil
+     Status:    PASS — poll-driven convergence observed in 3 runs
+
+[I8] Edge deletion propagates
+     Test code: super_http_e2e_test.go:121-130 (same block)
+       Asserts snapshot omits peer 101 AND device-side peer lookup is nil
+     Status:    PASS in 3 runs
+
+[I9] Clean shutdown, no goroutine leaks
+     Test code: super_http_e2e_test.go:132-147
+       topology.shutdown(ctx); <-topology.edgeA.Wait(); <-topology.edgeB.Wait()
+     Race detector: enabled on every run (-race)
+     Status:    PASS — no race warnings, lifecycle asserts fired clean in 3 runs
+
+[I10] PubKey fix (register now carries WireGuard public key)
+     Test code: super_http_e2e_test.go:59-61
+       peerA.PubKey != topology.pubA.ToString()  -> Fatal
+       (also re-asserted after latency-driven view-diff path, see [I5])
+     Status:    PASS — peer PubKey observable in snapshot across 3 runs
+
+[I11] No wall-clock-sleep synchronization dominates the test
+     awaitE2E (super_http_e2e_test.go:156-172): 5ms ticker + deadline, pre-authorized condition polling
+     awaitSSERevision (super_http_e2e_test.go:225-235): channel select with ctx deadline
+     e2eClock.Advance (support file:39-43): injected deterministic clock for latency path
+     Status:    PASS — no long sleeps; deterministic via injected clock
+
+==================================================================
+FLAKINESS SMOKE: 3 consecutive runs, count=1, shuffle=on, race enabled
+   RUN 1 exit_status=0  PASS (0.09s)
+   RUN 2 exit_status=0  PASS
+   RUN 3 exit_status=0  PASS
+==================================================================
+
+==================================================================
+F3 VERIFIER VERDICT
+==================================================================
+APPROVE

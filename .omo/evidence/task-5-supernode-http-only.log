@@ -1,0 +1,63 @@
+## [2026-07-25 12:15] Task: 5 — Super control-state service (w2-state2)
+
+### Commands run (exit codes in parens)
+```
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (FAIL: build failed — NewControlState/ControlStateConfig undefined)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (FAIL: panic close-of-closed-channel in TestControlStateConcurrentMutation — test bug, fixed to buffered chan + WaitGroup)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (FAIL: removed=0 / self peer in snapshot — Register default timeout 0 disabled sweeps; default PeerAliveTimeout positive for Rev semantics)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (FAIL: removed=0 — captured 'now' value not atomic clock; switched to passing currentTime func)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (ok 1.061s)
+$ go vet . (ok, no diagnostics)
+$ go test -race -shuffle=on -count=1 ./... (ok: root/device/gencfg/mtypes/ratelimiter/replay/tai64n all green)
+```
+
+### Public API (consume these names exactly — CRITICAL for tasks 6/7/8/9)
+- `ControlStateConfig` fields: `Parameters mtypes.ControlV2Parameters`, `PeerAliveTimeout time.Duration`, `UsePSKForInterEdge bool`, `Graph *graphpath.IG`, `Now func() time.Time`, `Publish func(mtypes.ControlV2Event)`.
+- `NewControlState(ControlStateConfig) *ControlState` — Now defaults to `time.Now` when nil.
+- `(s *ControlState).Register(ctx, mtypes.ControlV2RegisterRequest, controlPSKey string) (mtypes.ControlV2Snapshot, error)` — returns the registering Edge's own snapshot (self-peer filtered out); increments revision only on observable state change; emits `peer_change` after lock release; rejected NodeID returns `*ControlV2Error` via `req.Validate()`.
+- `(s *ControlState).Report(ctx, mtypes.ControlV2ReportRequest) error` — heartbeats / candidates / pongs; unknown NodeID → `ErrControlStateUnknownPeer`; identical report leaves revision unchanged; pushes latencies into `Graph` when provided; emits `peer_change` after lock release.
+- `(s *ControlState).SnapshotFor(nodeID mtypes.Vertex) mtypes.ControlV2Snapshot` — peer-safe view: requester's own record excluded, peer `PSKey` cleared, slices/maps deep-copied, requester's `LastSeen` and revision match the service state.
+- `(s *ControlState).ControlKeyFor(nodeID mtypes.Vertex) (string, bool)` — for task 6 HMAC verifier; never exposes key through snapshot/JSON.
+- `(s *ControlState).Revision() uint64` — monotonic; bump only on observable change.
+- `(s *ControlState).SweepTimeouts() int` — removes peers past `PeerAliveTimeout`, bumps revision once if any peer removed; emits `peer_gone` per removed peer after lock release.
+- Emitted event shape: `mtypes.ControlV2Event{Type: ControlV2EventPeerChange|ControlV2EventPeerGone, Revision, Data: mtypes.ControlV2PeerChangePayload{NodeID, NodeName}}` — task 7 event hub receives these via the configured `Publish` hook.
+- Sentinel: `ErrControlStateUnknownPeer` for `Report` of an unregistered NodeID.
+
+### Concurrency contract
+- Single `sync.RWMutex` guards the entire peer map; maps are never iterated under a read lock during mutation.
+- Snapshot construction runs under the write lock (Register) or read lock (SnapshotFor); the returned slice/maps are deep copies so callers can use them without re-locking.
+- `Publish` is invoked OUTSIDE locks; if it panics the service is unaffected (no lock held at call site).
+- `Graph.UpdateLatencyMulti` is invoked while the write lock is held; the graph is internally concurrency-safe and does not call back into the service.
+
+### Wire acceptance
+- `go test -race -shuffle=on -count=1 . -run 'TestControlState'` → ok
+- `go test -race -shuffle=on -count=1 ./...` → all packages green (root/device/gencfg/mtypes/ratelimiter/replay/tai64n)
+- `go vet .` → clean
+
+### Files added in this commit
+- super_control_state.go (221 pure LOC, includes atomic-nanos test clock helpers in package `_test`-visible scope for TDD).
+- super_control_state_test.go (75 pure LOC).
+
+
+## [2026-07-25 12:30] Task 5 — fix round 2: Report() candidates now merge into snapshot view
+
+### Defects addressed
+- DEFECT 1 (functional): Report() now re-derives the peer view's LocalV4/LocalV6/PublicV4/PublicV6 from the freshly reported candidate list (partitioned by IP family + source). A STUN candidate reported via POST /edge/v2/report appears in every other Edge's snapshot. Revision bumps only when an observable field actually changes.
+- DEFECT 2 (slop): test clock helpers (`testClockNanos`, `currentTime`, `advance`) moved into super_control_state_test.go; unused `timeValue` alias deleted from production file.
+
+### New test
+`TestControlStateReportedCandidateReachesOtherEdges` — registers edge A and edge B, has A report local+STUN IPv4 + IPv6 candidates, asserts that B's snapshot (SnapshotFor(2)) shows the new PublicV4/PublicV6 entries, the LocalV4 entry, the revision bumped, and the PSKey remains empty.
+
+### Commands (exit codes in parens)
+```
+$ go test -race -shuffle=on -count=1 . -run 'TestControlState' (ok 1.062s)
+$ go vet . (ok, no diagnostics)
+$ go test -race -shuffle=on -count=1 ./... (ok: root/device/gencfg/mtypes/ratelimiter/replay/tai64n)
+```
+
+### Wire acceptance — STUN candidate end-to-end behavior (task 13 depends on this)
+1. Edge A POSTs /edge/v2/report with a STUN candidate (Source=stun).
+2. `ControlState.Report` stores the candidate slice AND re-derives the peer's view fields by family (LocalV4/LocalV6 from Source=local, PublicV4/PublicV6 from Source=stun) using net.SplitHostPort + net.ParseIP for family detection.
+3. `ControlState.SnapshotFor(otherNodeID)` exposes those fields on the peer record returned in `mtypes.ControlV2Snapshot.Peers`.
+4. A `peer_change` event is emitted OUTSIDE the lock when the view changed.
+5. The revision is bumped only when an observable field changed — identical reports and identical pong sets are silent.

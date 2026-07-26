@@ -1,0 +1,127 @@
+## [2026-07-25 12:45] Task: 7 — bounded SSE event hub + replay contract (w2-events2)
+
+### Commands run (exit codes in parens)
+```
+$ cd /home/kexi/eg-super-http/w2-events2 && go build . (FAIL: undefined NewControlEventHub — RED phase)
+$ go build . (ok after implementation)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: send-on-closed-channel panic — Subscriber.terminate was closing s.events concurrently with Publish.tryDeliver; removed close, termination now signaled via s.Done() only)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: ErrSlowSubscriber race in markEvicted — atomic.Pointer[error] CAS bug; s.err.CompareAndSwap(&nilErr, &err) compared against a pointer-to-local; fixed to CompareAndSwap(nil, &err))
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: SSE framing race on bytes.Buffer — test reader and renderer writer racing; added syncBuffer wrapper, mutex-protected bufio.Writer wrapper)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: real 50ms ticker firing in TestControlEventsServeSSEFraming — injected manualTickerFactory via SSEOptions.TickerFunc)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: TestControlEventsConcurrentSubscribePublish deadlock — wg.Wait before hub.Close; drainers exit only on sub.Done(), so closing sub required before wg.Wait for drainers; split into pubWG + drainWG)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (FAIL: TestControlEventsCtxCancelClosesSubscriber expected Done to close on ctx cancel — design says sub.Close() is the explicit release path; Done closes only on eviction or hub.Close)
+$ go test -race -shuffle=on -count=1 . -run 'TestControlEvents' (ok 1.495s — 23 tests pass)
+$ go test -race -shuffle=on -count=1 ./... (ok: root/device/gencfg/mtypes/ratelimiter/replay/tai64n all green)
+$ go vet . (clean — pre-existing warning in example_config/super_mode/testfd is unrelated)
+```
+
+### Public API surface (consume these names exactly — CRITICAL for task 9)
+
+In root package `main`:
+
+```go
+// Hub
+func NewControlEventHub(capacity uint64) *ControlEventHub
+func (h *ControlEventHub) Publish(ev mtypes.ControlV2Event)
+func (h *ControlEventHub) Subscribe(ctx context.Context, lastEventID string) (*Subscriber, error)
+func (h *ControlEventHub) SubscribeWithBuffer(ctx context.Context, lastEventID string, bufSize int) (*Subscriber, error)
+func (h *ControlEventHub) ServeSSE(ctx context.Context, w interface{ io.Writer; Flush() }, lastEventID string, opts SSEOptions) (*SSERenderer, error)
+func (h *ControlEventHub) Close()
+
+// Subscriber
+func (s *Subscriber) Events()            <-chan mtypes.ControlV2Event
+func (s *Subscriber) ResyncRequired()    <-chan struct{}  // closed when lastEventID older than retention
+func (s *Subscriber) Done()              <-chan struct{}  // closed on eviction or hub.Close
+func (s *Subscriber) Err()               error            // ErrHubClosed | ErrSlowSubscriber | ctx.Err
+func (s *Subscriber) Close()                                  // idempotent; explicit release
+
+// SSE
+type SSEOptions struct {
+    RetryMillis          int
+    Heartbeat            time.Duration  // 0 -> 27s default
+    TickerFunc           func(d time.Duration) *time.Ticker  // nil -> time.NewTicker
+    InitialComment       string
+    SubscriberBufferSize int
+}
+type SSERenderer struct{ ... }
+func (r *SSERenderer) Subscriber() *Subscriber
+func (r *SSERenderer) Close()
+
+// Sentinel errors
+var ErrHubClosed       = errors.New("control event hub closed")
+var ErrSlowSubscriber  = errors.New("control event subscriber evicted (slow consumer)")
+```
+
+### Design decisions
+
+1. **ID format**: `evt-<n>` where `<n>` is a uint64 counter, strictly monotonic across the hub's lifetime. Caller may supply an ID; the hub bumps its counter past the parsed numeric so hub-assigned IDs always stay strictly greater.
+
+2. **Replay ring**: bounded slice with FIFO eviction when full. The ID→numeric map is kept in sync. `bufferFirst` tracks the numeric ID of the oldest retained event so the stale-ID check is O(1).
+
+3. **Replay semantics** (lastEventID):
+   - empty → replay entire buffer
+   - equal to retained → replay events with strictly greater ID
+   - numerically older than bufferFirst → replay all + signal `ResyncRequired()`
+   - unknown format / numerically newer → replay all (safe fallback)
+
+4. **Per-subscriber buffer**: default 64 events. Each subscriber owns its own goroutine-free state (channel + atomic flags). The publisher fills the per-sub queue with a non-blocking send; if the queue is full the publisher calls `markEvicted(ErrSlowSubscriber)` and the sub's `Done()` closes. NO goroutine per subscriber — the consumer (test or renderer) drains `sub.Events()` directly. This eliminates the per-sub pump goroutine leak vector.
+
+5. **Publisher never blocks**: `Publish` releases the hub mutex BEFORE attempting to deliver to subscribers; the `tryDeliver` non-blocking send drops events on a full buffer and evicts.
+
+6. **SSE renderer goroutine**: exactly ONE per `ServeSSE` connection. It selects between `sub.Events()`, heartbeat ticker, `sub.Done()`, and `ctx.Done()`. Writes are serialized under `r.deliverMu`. The renderer `Close()` waits on its `WaitGroup` for clean shutdown.
+
+7. **Wire format** (per WHATWG SSE):
+   - `: ok\n` or custom `InitialComment` as the first line
+   - `retry: <ms>\n\n` (so reconnecting clients know the backoff)
+   - Per event: `id: evt-N\nevent: <type>\ndata: <json>\n\n`
+   - Heartbeat: `: heartbeat\n\n` on the configured cadence (default 27s; SSE spec recommends 25-30s)
+   - Multi-line `data:` split correctly when payload contains newlines.
+
+8. **Termination**: `Subscriber.Done()` is closed via `sync.Once` — fires on eviction or `Hub.Close()`. `Sub.Err()` returns the recorded reason. The `sub.Events()` channel is NEVER closed (publisher can race with termination; closing would cause send-on-closed panic).
+
+9. **Close semantics**: `Hub.Close()` snapshots subs under the lock, releases the lock, then cancels each sub. Idempotent via `sync.Once`.
+
+10. **Atomic.Pointer gotcha (caught by tests)**: `p.CompareAndSwap(&nilErr, &err)` does NOT work — `atomic.Pointer[T]` compares by value (the pointer itself), so you must pass the literal `nil` for the first swap. `s.err.CompareAndSwap(nil, &err)` is correct.
+
+11. **Test runner deadlock (caught by tests)**: when a single WaitGroup spans both publishers AND drainers, and drainers only exit on `sub.Done()` (closed by `hub.Close()`), you have a deadlock: `wg.Wait()` waits for drainers, drainers wait for Close, Close waits for `wg.Wait()`. Fix: split into separate WaitGroups or call Close before Wait.
+
+### Tests cover
+- `TestControlEventsPublishAssignsID` — hub assigns monotonic ID
+- `TestControlEventsPreservesCallerID` — caller-supplied ID preserved verbatim
+- `TestControlEventsSubscribeReplayFromID` — replay from middle of buffer
+- `TestControlEventsSubscribeReplayAll` — empty lastEventID replays all
+- `TestControlEventsStaleIDSignalsResync` — older-than-oldest signals ResyncRequired
+- `TestControlEventsSubscribeUnknownIDReplaysAll` — unknown newer ID replayed safely
+- `TestControlEventsBoundedReplayBuffer` — ring overflow evicts oldest
+- `TestControlEventsOrderedDelivery` — monotonic across replay + live
+- `TestControlEventsSlowSubscriberEvicted` — overflow → ErrSlowSubscriber, publisher never blocks
+- `TestControlEventsSlowSubscriberEvictionPreservesFastSubscriber` — isolation between subs
+- `TestControlEventsCtxCancelClosesSubscriber` — sub.Close + ctx cancel release path
+- `TestControlEventsCloseCancelsAllSubscribers` — hub.Close sets ErrHubClosed
+- `TestControlEventsServeSSEFraming` — `id:`, `event:`, `retry:`, initial comment, multi-line `data:`
+- `TestControlEventsHeartbeatComments` — `: heartbeat` via injected manualTickerFactory (no wall-clock sleep)
+- `TestControlEventsServeSSEReplayFromLastEventID` — replay via ServeSSE + live transition
+- `TestControlEventsSubscribeAfterClose` — returns ErrHubClosed
+- `TestControlEventsServeSSEAfterClose` — returns ErrHubClosed
+- `TestControlEventsPublishAfterClose` — no panic
+- `TestControlEventsConcurrentSubscribePublish` — 4 pubs × 100 events × 4 subs, race-clean
+- `TestControlEventsLastEventIDUnique` — every retained ID unique and monotonic
+- `TestControlEventsReplayFromExactID` — lastEventID = newest → zero replay, live still delivered
+- `TestControlEventsDataJSON` — JSON data round-trips through the SSE wire form
+- `TestControlEventsHub_NoLockDuringEventWrite` — Publish returns even when sub buffer saturated; sub evicted with ErrSlowSubscriber
+
+### Files added (one atomic commit on branch super-http-w2-events2)
+- super_control_events.go (~530 LOC including comments; ~310 LOC pure code)
+- super_control_events_test.go (~970 LOC)
+- commit: `59be3e5 feat: add replayable Super control event hub`
+
+### Wire compatibility note for task 9
+The task-4 SSEParser fails on events with empty `data:` (it tries to JSON.Unmarshal an empty string). For events with nil Data, the hub currently emits `data: \n` which is a valid SSE empty-data frame but the task-4 parser doesn't tolerate it. Task 9 (HTTP wiring) should either:
+- always populate Data when publishing (passing an empty struct), or
+- upgrade the SSEParser in task 4 to skip the JSON unmarshal when data is empty.
+
+### Acceptance verification
+- `go test -race -shuffle=on -count=1 . -run 'TestControlEvents'` → ok (23 tests)
+- `go test -race -shuffle=on -count=1 ./...` → all packages green
+- `go vet .` → clean (only pre-existing unrelated warning in example_config)
+- `go build ./...` → clean

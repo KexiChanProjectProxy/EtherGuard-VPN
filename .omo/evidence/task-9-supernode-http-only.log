@@ -1,0 +1,95 @@
+[TASK 9 — supernode-http-only — Control API v2 HTTP handler + main_httpserver.go rewiring]
+Worktree: /home/kexi/eg-super-http/w4-http (branch super-http-w4-http)
+Integration base: eb56dc9 (includes tasks 1-8, 10, T0.5)
+
+Files written (worktree ONLY):
+  - super_control_http.go       (NEW) — ControlHTTPHandler + NewControlHTTPHandler constructor + manageHandler adapter
+  - super_control_http_test.go  (NEW) — 14 httptest-based tests
+  - main_httpserver.go          (REWRITTEN) — legacy /edge/* removed, /edge/v2/* mounted via NewControlHTTPHandler, /manage/* routed through manageHandler(ManageV2)
+  - super_control_state.go      (PATCH) — added SetPublishForTest seam (test surface)
+
+Out-of-tree writes (allowed):
+  - /home/kexi/EtherGuard-VPN/.omo/evidence/task-9-supernode-http-only.log (this file)
+  - /home/kexi/EtherGuard-VPN/.omo/notepads/supernode-http-only/learnings.md (appended under "## Task: 9")
+
+=== VERIFICATION ===
+1) go vet ./...        → clean (only pre-existing orderdmap warnings, unrelated)
+2) go build ./...      → clean
+3) go test -race -shuffle=on -count=1 . -run 'TestControlHTTPV2' → ok (1.49s, 14/14 PASS)
+4) go test -race -shuffle=on -count=1 .       → ok (2.39s, all root tests)
+5) go test -race -shuffle=on -count=1 ./...   → ok (all packages: root, device, gencfg, mtypes, ratelimiter, replay, tai64n)
+
+=== TESTS COVER (against real ControlState+Authenticator+Hub+ManageV2 over httptest.Server) ===
+TestControlHTTPV2RegisterReturnsSnapshot          — POST /edge/v2/register returns 200 with the initial snapshot; PSKey absent from body.
+TestControlHTTPV2SnapshotConditional304           — ETag set on first /edge/v2/snapshot; same ETag in If-None-Match → 304 (empty body).
+TestControlHTTPV2ReportMutatesState               — POST /edge/v2/report returns 204 on signed body; subsequent snapshot reflects new revision.
+TestControlHTTPV2UnsignedRequestRejected          — missing X-EG-* headers → 401, body is uniform "control auth failed", PSKey absent.
+TestControlHTTPV2CrossEdgeImpersonationRejected   — Edge B signing with its own key but asserting Edge A's NodeID → 401 (key/node binding enforced).
+TestControlHTTPV2InvalidJSONRejected              — non-JSON body → 400, PSKey absent.
+TestControlHTTPV2PublishesOnRegister              — first authenticated Register for a fresh NodeID fires exactly one peer_change through the state publish hook (proves state→hub wiring).
+TestControlHTTPV2SSEHeadersAndInitialFlush        — GET /edge/v2/events sets Content-Type: text/event-stream, Cache-Control: no-cache, Connection: keep-alive, X-Accel-Buffering: no; first bytes are ": ..." comment + "retry: ..." + blank line.
+TestControlHTTPV2SSEReplayFromLastEventID         — reconnect with a stale Last-Event-ID replays only events with strictly greater numeric IDs.
+TestControlHTTPV2SSEStaleIDResync                 — Last-Event-ID older than hub retention → subscriber's ResyncRequired channel closes (client must re-fetch snapshot).
+TestControlHTTPV2NoPSKeyInResponse                — every JSON AND SSE byte stream from /register, /report, /snapshot, /events is byte-scanned for the registered PSKey; none leaks.
+TestControlHTTPV2GracefulCancellation             — cancelling the request context closes the SSE renderer (response body EOFs within 2s).
+TestControlHTTPV2ReplayedNonceRejected            — replaying the exact same (NodeID, nonce) pair → 401 (ControlAuthenticator replay check).
+TestControlHTTPV2ProductionHandler                — production constructor NewControlHTTPHandler mounted via httptest.NewServer; ETag+304, unknown route → 404, wrong method → 405.
+
+=== CONTRACT FOR TASK 11 ===
+Constructor: NewControlHTTPHandler(state *ControlState, auth *ControlAuthenticator, hub *ControlEventHub, prefix string) *ControlHTTPHandler
+  - prefix defaults to mtypes.ControlV2APIPrefix ("/edge/v2") when empty; leading slash auto-prepended.
+  - The returned value satisfies http.Handler (ServeHTTP).
+  - Does NOT start a goroutine; does NOT bind a port; task 11 calls HttpServer(state, auth, hub, manage, ...).
+Route table (under prefix):
+  - POST prefix/register   → ControlState.Register → 200 JSON snapshot + ETag header
+  - POST prefix/report     → ControlState.Report  → 204 (state's publish hook fires peer_change)
+  - GET  prefix/snapshot   → ControlState.SnapshotFor + ETag/304 conditional
+  - GET  prefix/events     → Hub.ServeSSE (text/event-stream + initial comment + retry:3000 + heartbeat)
+
+Publish wiring: task 11 must install hub.Publish into state.publish at startup so every state mutation fans out to SSE subscribers.
+
+Legacy /edge/* removal: edge_get_superparams, edge_get_peerinfo, edge_get_nhtable, edge_post_nodeinfo, and the ServerUpdate UDP fan-out (PushNhTable/PushPeerinfo/PushServerParams) are GONE — replaced by the v2 HTTP control plane.
+Legacy /manage/* removal: manage_peeradd / manage_peerdel / manage_peerupdate / manage_superupdate / manage_get_peerstate bodies were tied to httpobj.{http_PeerID2Info,http_PeerState,http_PeerIPs,http_passwords,http_sconfig} which is task-11 territory. The shell functions now return 410 Gone. The new mux mounts them via manageHandler(ManageV2) which delegates to the typed ManageV2 service (task 8); when ManageV2 is nil the 410 shims remain as a safety net.
+
+Resync wire form (event-IDs older than retention): subscribers see ResyncRequired() close (sub.ResyncRequired() returns <-chan struct{}). The handler does NOT emit a special SSE event — the client must re-fetch /edge/v2/snapshot when this channel fires.
+
+SSE renderer lifecycle: the renderer goroutine is owned by *SSERenderer; the handler blocks on r.Context().Done() and calls renderer.Close() on exit. r.Context() cancellation also cancels the underlying subscriber, so the publisher never blocks on a dead client.
+
+=== FILE DIFFS (high level) ===
+super_control_state.go: +16 lines — SetPublishForTest helper (test seam only).
+super_control_http.go: +215 lines — production handler + constructor + manageHandler adapter.
+super_control_http_test.go: +870 lines — 14 tests with httptest harness + production-handler test.
+main_httpserver.go: rewired — legacy /edge/* gone, v2 handler mounted, manage routes go through ManageV2 (or 410 shim if ManageV2 is nil), HttpServer signature extended to accept (state, auth, hub, manage).
+
+[end of evidence]
+
+## Red-phase reconstruction (post-hoc, F1-ordered)
+
+**Base commit:** eb56dc9 — "merge: Edge HTTP control runtime (task 10)"
+**Test file copied from integration HEAD:** super_control_http_test.go
+
+### RED — scratch worktree at eb56dc9 + copied test file
+
+```
+$ cd /tmp/tdd-red-task9 && go test -count=1 . -run 'TestControlHTTPV2'
+# github.com/KusakabeSi/EtherGuard-VPN [github.com/KusakabeSi/EtherGuard-VPN.test]
+./super_control_http_test.go:97:8: state.SetPublishForTest undefined (type *ControlState has no field or method SetPublishForTest)
+./super_control_http_test.go:103:8: state.SetPublishForTest undefined (type *ControlState has no field or method SetPublishForTest)
+./super_control_http_test.go:197:2: undefined: writeJSON
+./super_control_http_test.go:235:2: undefined: writeJSON
+./super_control_http_test.go:966:8: state.SetPublishForTest undefined (type *ControlState has no field or method SetPublishForTest)
+./super_control_http_test.go:989:13: undefined: NewControlHTTPHandler
+FAIL	github.com/KusakabeSi/EtherGuard-VPN [build failed]
+FAIL
+exit=1
+```
+
+### GREEN — integration HEAD (63733e3)
+
+```
+$ cd /home/kexi/eg-super-http/integration && go test -count=1 . -run 'TestControlHTTPV2'
+ok  	github.com/KusakabeSi/EtherGuard-VPN	0.293s
+exit=0
+```
+
+red reconstructed post-hoc by applying test files onto pre-task base; original worker omitted red capture (process deviation logged in issues.md)
