@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"time"
-
-	"github.com/golang-jwt/jwt"
 )
 
 func GetByte(structIn interface{}) (bb []byte, err error) {
@@ -175,29 +173,4 @@ func ParseBoardcastPeerMsg(bin []byte) (StructPlace BoardcastPeerMsg, err error)
 	d := gob.NewDecoder(&b)
 	err = d.Decode(&StructPlace)
 	return
-}
-
-type API_report_peerinfo struct {
-	Pongs    []PongMsg
-	LocalV4s map[string]float64
-	LocalV6s map[string]float64
-}
-
-func ParseAPI_report_peerinfo(bin []byte) (StructPlace API_report_peerinfo, err error) {
-	var b bytes.Buffer
-	b.Write(bin)
-	d := gob.NewDecoder(&b)
-	err = d.Decode(&StructPlace)
-	return
-}
-
-type API_report_peerinfo_jwt_claims struct {
-	PostCount uint64
-	BodyHash  string
-	jwt.StandardClaims
-}
-
-type SUPER_Events struct {
-	Event_server_pong     chan PongMsg
-	Event_server_register chan RegisterMsg
 }

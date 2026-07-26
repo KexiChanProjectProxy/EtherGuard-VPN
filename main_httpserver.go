@@ -7,88 +7,23 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 	"sync"
-	"sync/atomic"
-	"time"
 
-	"github.com/KusakabeSi/EtherGuard-VPN/device"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
-	"github.com/KusakabeSi/EtherGuard-VPN/path"
-	yaml "gopkg.in/yaml.v2"
 )
 
 type http_shared_objects struct {
-	http_graph         *path.IG
-	http_device4       *device.Device
-	http_device6       *device.Device
-	http_HashSalt      []byte
-	http_NhTable_Hash  string
-	http_PeerInfo_hash string
-	http_NhTableStr    []byte
-	http_PeerInfo      mtypes.API_Peers
-	http_super_chains  *mtypes.SUPER_Events
-	http_pskdb         device.PSKDB
-
-	http_passwords       mtypes.Passwords
-	http_StateExpire     time.Time
-	http_StateString_tmp []byte
-
-	http_PeerID2Info map[mtypes.Vertex]mtypes.SuperPeerInfo
-	http_PeerState   map[string]*PeerState
-	http_PeerIPs     map[string]*HttpPeerLocalIP
-
-	http_sconfig_path string
-	http_econfig_tmp  *mtypes.EdgeConfig
-
+	http_passwords mtypes.Passwords
 	sync.RWMutex
 }
 
-var (
-	httpobj http_shared_objects
-)
-
-type HttpPeerLocalIP struct {
-	LocalIPv4 map[string]float64
-	LocalIPv6 map[string]float64
-}
-
-type HttpState struct {
-	PeerInfo  map[mtypes.Vertex]HttpPeerInfo
-	Infinity  float64
-	Edges     map[mtypes.Vertex]map[mtypes.Vertex]float64
-	Edges_Nh  map[mtypes.Vertex]map[mtypes.Vertex]float64
-	NhTable   mtypes.NextHopTable
-	Dist      mtypes.DistTable
-	Dist_noAC mtypes.DistTable
-}
-
-type HttpPeerInfo struct {
-	Name     string
-	LastSeen string
-}
-
-type PeerState struct {
-	NhTableState          atomic.Value // string
-	PeerInfoState         atomic.Value // string
-	SuperParamState       atomic.Value // string
-	SuperParamStateClient atomic.Value // string
-	httpPostCount         atomic.Value // uint64
-	LastSeen              atomic.Value // time.Time
-}
+var httpobj http_shared_objects
 
 // ---------------------------------------------------------------------------
 // Management HTTP routes
 //
-// The legacy /manage/* handlers (manage_peeradd / manage_peerdel /
-// manage_peerupdate / manage_get_peerstate / manage_superupdate) are kept
-// here as part of task 9's "retain management routes" requirement. Their
-// bodies still mutate httpobj for backward compatibility with operators
-// who use the legacy CLI flow; new operators should use the typed
-// ManageV2 service (task 8) instead. Task 11 wires ManageV2 into the
-// Super startup so the same YAML files written by AddPeer land on disk.
+// The legacy /manage/* handlers remain registered as fail-closed 410 shims.
 // ---------------------------------------------------------------------------
 
 func checkPassword(s1 string, s2 string) bool {
@@ -129,14 +64,6 @@ func manage_peerdel(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "manage_peerdel: legacy password-based peer delete removed with the Super UDP lifecycle (task 9). Use ManageV2.DeletePeer via the Super runtime.", http.StatusGone)
 }
 
-// _ keeps the legacy import surface referenced for future task-11 wiring.
-var (
-	_ = json.Marshal
-	_ = yaml.Marshal
-	_ = fmt.Sprint
-	_ = strings.HasPrefix
-)
-
 // ---------------------------------------------------------------------------
 // HTTP server entry point
 //
@@ -173,23 +100,7 @@ func HttpServer(edgeListen string, manageListen string, apiprefix string, state 
 	// during SSE writes.
 	v2 := NewControlHTTPHandler(state, auth, hub, apiprefix)
 
-	mux := http.NewServeMux()
-	if manage != nil {
-		// Mount the typed ManageV2 service routes for the legacy
-		// paths task 8 owns. They keep the original /manage/* URL
-		// surface so existing tooling continues to work.
-		mux.Handle(apiprefix+"/manage/", manageHandler(manage))
-	} else {
-		mux.HandleFunc(apiprefix+"/manage/peer/add", manage_peeradd)
-		mux.HandleFunc(apiprefix+"/manage/peer/del", manage_peerdel)
-		mux.HandleFunc(apiprefix+"/manage/peer/update", manage_peerupdate)
-		mux.HandleFunc(apiprefix+"/manage/super/state", manage_get_peerstate)
-		mux.HandleFunc(apiprefix+"/manage/super/update", manage_superupdate)
-	}
-
-	// Mount the v2 routes via a sub-mux so the v2 handler owns its
-	// own method routing. /edge/v2/* lives under apiprefix.
-	mux.Handle(apiprefix+"/edge/v2/", v2)
+	mux := newHTTPMux(apiprefix, v2, manage)
 
 	if edgeListen == manageListen {
 		go func() {
@@ -212,6 +123,27 @@ func HttpServer(edgeListen string, manageListen string, apiprefix string, state 
 			}
 		}()
 	}
+}
+
+func newHTTPMux(apiprefix string, v2 http.Handler, manage *ManageV2) *http.ServeMux {
+	mux := http.NewServeMux()
+	if manage != nil {
+		// Mount the typed ManageV2 service routes for the legacy
+		// paths task 8 owns. They keep the original /manage/* URL
+		// surface so existing tooling continues to work.
+		mux.Handle(apiprefix+"/manage/", manageHandler(manage))
+	} else {
+		mux.HandleFunc(apiprefix+"/manage/peer/add", manage_peeradd)
+		mux.HandleFunc(apiprefix+"/manage/peer/del", manage_peerdel)
+		mux.HandleFunc(apiprefix+"/manage/peer/update", manage_peerupdate)
+		mux.HandleFunc(apiprefix+"/manage/super/state", manage_get_peerstate)
+		mux.HandleFunc(apiprefix+"/manage/super/update", manage_superupdate)
+	}
+
+	// Mount the v2 routes via a sub-mux so the v2 handler owns its
+	// own method routing. /edge/v2/* lives under apiprefix.
+	mux.Handle(apiprefix+"/edge/v2/", v2)
+	return mux
 }
 
 // manageHandler adapts *ManageV2 to the legacy /manage/* HTTP surface so

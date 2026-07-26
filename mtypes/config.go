@@ -194,27 +194,11 @@ func (Connurl *API_connurl) GetList(UseLocal bool) (ret map[string]float64) {
 	return
 }
 
-type API_Peerinfo struct {
-	NodeID  Vertex
-	PSKey   string
-	Connurl *API_connurl
-}
-
-type API_SuperParams struct {
-	SendPingInterval    float64
-	HttpPostInterval    float64
-	PeerAliveTimeout    float64
-	DampingFilterRadius uint64
-	AdditionalCost      float64
-}
-
 type StateHash struct {
 	Peer       atomic.Value //[32]byte
 	SuperParam atomic.Value //[32]byte
 	NhTable    atomic.Value //[32]byte
 }
-
-type API_Peers map[string]API_Peerinfo // map[PubKey]API_Peerinfo
 
 type JWTSecret [32]byte
 
