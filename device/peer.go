@@ -26,17 +26,21 @@ const AfPerferVal = 10000
 
 type endpoint_tryitem struct {
 	URL      string
+	source   mtypes.APIConnURLSource
+	cost     int
 	lastTry  time.Time
 	firstTry time.Time
 }
 
 type endpoint_trylist struct {
 	sync.RWMutex
-	timeout      time.Duration
-	enabledAf    conn.EnabledAf
-	peer         *Peer
-	trymap_super map[string]*endpoint_tryitem
-	trymap_p2p   map[string]*endpoint_tryitem
+	timeout            time.Duration
+	enabledAf          conn.EnabledAf
+	peer               *Peer
+	trymap_super       map[string]*endpoint_tryitem
+	trymap_p2p         map[string]*endpoint_tryitem
+	superAttempt       map[string]struct{}
+	superCycleComplete bool
 }
 
 func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.EnabledAf) *endpoint_trylist {
@@ -46,6 +50,7 @@ func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.Enabl
 		enabledAf:    enabledAf,
 		trymap_super: make(map[string]*endpoint_tryitem),
 		trymap_p2p:   make(map[string]*endpoint_tryitem),
+		superAttempt: make(map[string]struct{}),
 	}
 }
 
@@ -53,49 +58,72 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 	et.Lock()
 	defer et.Unlock()
 	newmap_super := make(map[string]*endpoint_tryitem)
+	et.superAttempt = make(map[string]struct{})
+	et.superCycleComplete = false
 	if urls.IsEmpty() {
 		if et.peer.device.LogLevel.LogInternal {
 			fmt.Printf("Internal: Peer %v : Reset trylist(super) %v\n", et.peer.ID.ToString(), "nil")
 		}
 	}
-	for url, it := range urls.GetList(UseLocalIP) {
-		if url == "" {
+	for _, candidate := range urls.GetList(UseLocalIP) {
+		addr, _, err := conn.LookupIP(candidate.URL, et.enabledAf, AfPerfer)
+		if err != nil {
+			if et.peer.device.LogLevel.LogInternal {
+				fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), candidate.URL, err)
+			}
 			continue
 		}
-		addr, _, err := conn.LookupIP(url, et.enabledAf, AfPerfer)
+		cost := superCandidateCost(candidate)
 		switch AfPerfer {
 		case 4:
 			if addr == "udp4" {
-				it = it - AfPerferVal
+				cost -= AfPerferVal
 			}
 		case 6:
 			if addr == "udp6" {
-				it = it - AfPerferVal
+				cost -= AfPerferVal
 			}
 		}
-		if err != nil {
+		if val, ok := et.trymap_super[candidate.URL]; ok && val.source == candidate.Source && val.cost == cost {
 			if et.peer.device.LogLevel.LogInternal {
-				fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), url, err)
+				fmt.Printf("Internal: Peer %v : Update trylist(super) %v\n", et.peer.ID.ToString(), candidate.URL)
 			}
-			continue
-		}
-		if val, ok := et.trymap_super[url]; ok {
-			if et.peer.device.LogLevel.LogInternal {
-				fmt.Printf("Internal: Peer %v : Update trylist(super) %v\n", et.peer.ID.ToString(), url)
-			}
-			newmap_super[url] = val
+			newmap_super[candidate.URL] = val
 		} else {
 			if et.peer.device.LogLevel.LogInternal {
-				fmt.Printf("Internal: Peer %v : New trylist(super) %v\n", et.peer.ID.ToString(), url)
+				fmt.Printf("Internal: Peer %v : New trylist(super) %v\n", et.peer.ID.ToString(), candidate.URL)
 			}
-			newmap_super[url] = &endpoint_tryitem{
-				URL:      url,
-				lastTry:  time.Time{}.Add(mtypes.S2TD(AfPerferVal)).Add(mtypes.S2TD(it)),
-				firstTry: time.Time{},
+			firstTry := time.Time{}
+			if previous, ok := et.trymap_super[candidate.URL]; ok {
+				firstTry = previous.firstTry
+			}
+			newmap_super[candidate.URL] = &endpoint_tryitem{
+				URL:      candidate.URL,
+				source:   candidate.Source,
+				cost:     cost,
+				lastTry:  time.Time{}.Add(mtypes.S2TD(float64(cost))),
+				firstTry: firstTry,
 			}
 		}
 	}
 	et.trymap_super = newmap_super
+}
+
+func superCandidateCost(candidate mtypes.APIConnURLCandidate) int {
+	switch candidate.Source {
+	case mtypes.APIConnURLSourceLocal:
+		return 0
+	case mtypes.APIConnURLSourceSTUN:
+		return 20000
+	case mtypes.APIConnURLSourceObserved:
+		count := candidate.ReporterCount
+		if count > 16 {
+			count = 16
+		}
+		return 40000 - 100*int(count)
+	default:
+		return 40000
+	}
 }
 
 func (et *endpoint_trylist) UpdateP2P(url string) {
@@ -124,13 +152,25 @@ func (et *endpoint_trylist) Delete(url string) {
 	delete(et.trymap_p2p, url)
 }
 
+// ConsumeSuperCycleComplete returns true once after every Super candidate in
+// the latest snapshot has been tried.
+func (et *endpoint_trylist) ConsumeSuperCycleComplete() bool {
+	et.Lock()
+	defer et.Unlock()
+	if !et.superCycleComplete {
+		return false
+	}
+	et.superCycleComplete = false
+	return true
+}
+
 func (et *endpoint_trylist) GetNextTry() (bool, string) {
 	et.Lock()
 	defer et.Unlock()
 	var smallest *endpoint_tryitem
 	FastTry := true
 	for _, v := range et.trymap_super {
-		if smallest == nil || smallest.lastTry.After(v.lastTry) {
+		if tryBefore(v, smallest) {
 			smallest = v
 		}
 	}
@@ -141,7 +181,7 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 			}
 			delete(et.trymap_p2p, url)
 		}
-		if smallest == nil || smallest.lastTry.After(v.lastTry) {
+		if tryBefore(v, smallest) {
 			smallest = v
 		}
 	}
@@ -152,10 +192,23 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 	if !smallest.firstTry.After(time.Time{}) {
 		smallest.firstTry = time.Now()
 	}
+	if superItem, ok := et.trymap_super[smallest.URL]; ok && superItem == smallest {
+		if et.superAttempt == nil {
+			et.superAttempt = make(map[string]struct{})
+		}
+		et.superAttempt[smallest.URL] = struct{}{}
+		if len(et.superAttempt) == len(et.trymap_super) {
+			et.superCycleComplete = true
+		}
+	}
 	if smallest.firstTry.Add(et.timeout).Before(time.Now()) {
 		FastTry = false
 	}
 	return FastTry, smallest.URL
+}
+
+func tryBefore(candidate, current *endpoint_tryitem) bool {
+	return current == nil || candidate.lastTry.Before(current.lastTry) || (candidate.lastTry.Equal(current.lastTry) && candidate.URL < current.URL)
 }
 
 type filterwindow struct {

@@ -2,6 +2,7 @@ package mtypes
 
 import (
 	"math"
+	"sort"
 	"strconv"
 	"sync/atomic"
 
@@ -156,42 +157,78 @@ type GraphRecalculateSetting struct {
 type DistTable map[Vertex]map[Vertex]float64
 type NextHopTable map[Vertex]map[Vertex]Vertex
 
+// APIConnURLSource identifies how Super learned an endpoint candidate.
+// Its order is also the fixed retry class priority.
+type APIConnURLSource uint8
+
+const (
+	APIConnURLSourceLocal APIConnURLSource = iota
+	APIConnURLSourceSTUN
+	APIConnURLSourceObserved
+)
+
+// APIConnURLCandidate carries the endpoint metadata needed to rank Super
+// candidates. ReporterCount applies only to observed candidates.
+type APIConnURLCandidate struct {
+	URL           string
+	Source        APIConnURLSource
+	ReporterCount uint32
+}
+
 type API_connurl struct {
 	ExternalV4 map[string]float64
 	ExternalV6 map[string]float64
 	LocalV4    map[string]float64
 	LocalV6    map[string]float64
+	Candidates []APIConnURLCandidate
 }
 
 func (Connurl *API_connurl) IsEmpty() bool {
-	return len(Connurl.ExternalV4)+len(Connurl.ExternalV6)+len(Connurl.LocalV4)+len(Connurl.LocalV6) == 0
+	return len(Connurl.ExternalV4)+len(Connurl.ExternalV6)+len(Connurl.LocalV4)+len(Connurl.LocalV6)+len(Connurl.Candidates) == 0
 }
 
-func (Connurl *API_connurl) GetList(UseLocal bool) (ret map[string]float64) {
-	ret = make(map[string]float64)
+func (Connurl *API_connurl) GetList(UseLocal bool) []APIConnURLCandidate {
+	byURL := make(map[string]APIConnURLCandidate)
+	add := func(candidate APIConnURLCandidate) {
+		if candidate.URL == "" || (!UseLocal && candidate.Source == APIConnURLSourceLocal) {
+			return
+		}
+		current, exists := byURL[candidate.URL]
+		if !exists || candidate.Source < current.Source || (candidate.Source == current.Source && candidate.Source == APIConnURLSourceObserved && candidate.ReporterCount > current.ReporterCount) {
+			byURL[candidate.URL] = candidate
+		}
+	}
 	if UseLocal {
 		if Connurl.LocalV4 != nil {
-			for k, v := range Connurl.LocalV4 {
-				ret[k] = v
+			for url := range Connurl.LocalV4 {
+				add(APIConnURLCandidate{URL: url, Source: APIConnURLSourceLocal})
 			}
 		}
 		if Connurl.LocalV6 != nil {
-			for k, v := range Connurl.LocalV6 {
-				ret[k] = v
+			for url := range Connurl.LocalV6 {
+				add(APIConnURLCandidate{URL: url, Source: APIConnURLSourceLocal})
 			}
 		}
 	}
 	if Connurl.ExternalV4 != nil {
-		for k, v := range Connurl.ExternalV4 {
-			ret[k] = v
+		for url := range Connurl.ExternalV4 {
+			add(APIConnURLCandidate{URL: url, Source: APIConnURLSourceSTUN})
 		}
 	}
 	if Connurl.ExternalV6 != nil {
-		for k, v := range Connurl.ExternalV6 {
-			ret[k] = v
+		for url := range Connurl.ExternalV6 {
+			add(APIConnURLCandidate{URL: url, Source: APIConnURLSourceSTUN})
 		}
 	}
-	return
+	for _, candidate := range Connurl.Candidates {
+		add(candidate)
+	}
+	ret := make([]APIConnURLCandidate, 0, len(byURL))
+	for _, candidate := range byURL {
+		ret = append(ret, candidate)
+	}
+	sort.Slice(ret, func(i, j int) bool { return ret[i].URL < ret[j].URL })
+	return ret
 }
 
 type StateHash struct {
