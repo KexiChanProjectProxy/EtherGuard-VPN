@@ -149,7 +149,7 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 | ManagementAuth | `{User, PasswordHash}`，用於`/manage/*`端點 |
 | STUNServers | STUN伺服器URI列表（`stun:host:port`或`stun://host:port`）；主機可以是IP literal或DNS主機名 |
 | STUNRequestTimeoutSeconds | 每次STUN請求的超時時間 |
-| STUNRefreshIntervalSeconds | STUN候選位址刷新間隔 |
+| STUNRefreshIntervalSeconds | 保留：存在於設定結構中但目前無效；STUN在註冊時一次性執行（無週期性刷新） |
 | PollIntervalSeconds | Edge輪詢snapshot的間隔 |
 | ReportIntervalSeconds | Edge回報（pong/候選位址）的間隔 |
 | HeartbeatIntervalSeconds | Edge心跳間隔 |

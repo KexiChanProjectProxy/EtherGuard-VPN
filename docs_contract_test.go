@@ -366,3 +366,23 @@ func TestDocsEdgeLegacyRejection(t *testing.T) {
 		}
 	}
 }
+
+// TestDocsSTUNRefreshReserved verifies that STUNRefreshIntervalSeconds is
+// documented as reserved/inert. The field exists in SuperConfigV2 and is
+// validated (> 0) but no runtime code reads it — refreshSTUN is called
+// once at register time only (device/super_http_runtime.go:75).
+func TestDocsSTUNRefreshReserved(t *testing.T) {
+	t.Parallel()
+	for _, doc := range superDocFiles {
+		content := readFile(t, doc)
+		if !strings.Contains(content, "STUNRefreshIntervalSeconds") {
+			t.Errorf("%s: STUNRefreshIntervalSeconds not mentioned in config table", doc)
+		}
+		lower := strings.ToLower(content)
+		// The description must contain a reserved/inert qualifier.
+		if !strings.Contains(lower, "reserved") && !strings.Contains(lower, "保留") &&
+			!strings.Contains(lower, "inert") && !strings.Contains(lower, "無效") {
+			t.Errorf("%s: STUNRefreshIntervalSeconds description must note it is reserved/inert", doc)
+		}
+	}
+}

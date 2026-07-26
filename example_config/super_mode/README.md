@@ -149,7 +149,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 | ManagementAuth | `{User, PasswordHash}` for `/manage/*` endpoints |
 | STUNServers | List of STUN server URIs (`stun:host:port` or `stun://host:port`); hosts may be IP literals or DNS hostnames |
 | STUNRequestTimeoutSeconds | Timeout per STUN request |
-| STUNRefreshIntervalSeconds | How often to refresh STUN candidates |
+| STUNRefreshIntervalSeconds | Reserved: present in config schema but currently inert; STUN is one-shot at register time (no periodic refresh) |
 | PollIntervalSeconds | Edge polling interval for snapshot |
 | ReportIntervalSeconds | Edge report (pong/candidate) interval |
 | HeartbeatIntervalSeconds | Edge heartbeat interval |
