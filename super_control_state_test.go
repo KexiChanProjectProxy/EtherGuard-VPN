@@ -157,3 +157,44 @@ func advance(d time.Duration) {
 
 // Test clock — package-private helpers shared across the TDD tests in
 // this file only; production code passes its own Now function.
+
+func TestControlStateRegisterCandidateSourceLabels(t *testing.T) {
+	svc := NewControlState(ControlStateConfig{})
+	req := mtypes.ControlV2RegisterRequest{
+		NodeID:   1,
+		NodeName: "edge-a",
+		Version:  mtypes.ControlV2ProtocolVersion,
+		LocalV4:  []string{"10.0.0.1:51820"},
+		LocalV6:  []string{"[fd00::1]:51820"},
+		PublicV4: []string{"203.0.113.1:51820"},
+		PublicV6: []string{"[2001:db8::1]:51820"},
+	}
+
+	if _, err := svc.Register(context.Background(), req, "control-a"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	record, ok := svc.peers[req.NodeID]
+	if !ok {
+		t.Fatalf("registered peer %v not found", req.NodeID)
+	}
+	want := map[string]mtypes.ControlV2CandidateSource{
+		"10.0.0.1:51820":      mtypes.ControlV2CandidateLocal,
+		"[fd00::1]:51820":     mtypes.ControlV2CandidateLocal,
+		"203.0.113.1:51820":   mtypes.ControlV2CandidateSTUN,
+		"[2001:db8::1]:51820": mtypes.ControlV2CandidateSTUN,
+	}
+	if len(record.candidates) != len(want) {
+		t.Fatalf("candidate count = %d, want %d: %#v", len(record.candidates), len(want), record.candidates)
+	}
+	for _, candidate := range record.candidates {
+		wantSource, ok := want[candidate.Address]
+		if !ok {
+			t.Errorf("unexpected candidate address %q", candidate.Address)
+			continue
+		}
+		if candidate.Source != wantSource {
+			t.Errorf("candidate %q source = %q, want %q", candidate.Address, candidate.Source, wantSource)
+		}
+	}
+}
