@@ -618,6 +618,13 @@ func loadSuperConfigV2(configPath string) (mtypes.SuperConfigV2, error) {
 // `-mode super` (now HTTP-only) without waiting for the v2 parser's
 // silent drop to mis-route the operator. Returns (true, fieldName) on
 // the first hit; (false, "") if the file is clean.
+//
+// The new v2 wire key `ListenPortPriority:` is accepted by construction:
+// the loop matches the exact 11-byte token `ListenPort:`, which never
+// matches the longer `ListenPortPriority:` (the char after the prefix
+// `ListenPort` is `P`, not `:`). A file carrying BOTH the new priority
+// key AND the bare legacy `ListenPort:` line still trips the match on
+// the bare key alone — the operator likely migrated incompletely.
 func legacyUDPFieldPresent(configPath string) (bool, string) {
 	raw, err := ioutil.ReadFile(configPath)
 	if err != nil {
@@ -628,12 +635,6 @@ func legacyUDPFieldPresent(configPath string) (bool, string) {
 		// under v2 SuperNodeV2 etc. are legitimate.
 		if bytes.HasPrefix(raw, []byte(name+":")) ||
 			bytes.Contains(raw, []byte("\n"+name+":")) {
-			// `ListenPortPriority:` is the new v2 key; only reject the
-			// bare legacy UDP `ListenPort` when NOT immediately followed
-			// by the `Priority:` suffix.
-			if name == "ListenPort" && bytes.Contains(raw, []byte("\nListenPortPriority:")) {
-				continue
-			}
 			return true, name
 		}
 	}
