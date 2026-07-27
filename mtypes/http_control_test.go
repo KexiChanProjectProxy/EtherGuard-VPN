@@ -920,3 +920,51 @@ func TestSuperConfigV2ListenPortPriorityJSONShape(t *testing.T) {
 }
 
 func intPtr(v int) *int { return &v }
+
+// TestSuperConfigV2ListenPortPriorityYAMLDecode (legacy duplicate anchor)
+// that operators actually use: a YAML document with PascalCase keys and
+// the same shape as `ListenPortPriority:\n  - Port: 16386\n  - Range:\n      From: 16387\n      To:   16388`
+// must decode into a typed policy and validate end-to-end.
+func TestSuperConfigV2ListenPortPriorityYAMLDecode(t *testing.T) {
+	body := `
+NodeName: super-1
+APIUrl: https://super.example.com:8443
+APIPrefix: /eg_api
+ManagementAuth:
+  User: admin
+  PasswordHash: deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef
+STUNServers:
+  - stun:1.2.3.4:3478
+STUNRequestTimeoutSeconds: 1.5
+STUNRefreshIntervalSeconds: 60
+PollIntervalSeconds: 15
+ReportIntervalSeconds: 10
+HeartbeatIntervalSeconds: 25
+EventReplay: 128
+PeerAliveTimeoutSeconds: 70
+UsePSKForInterEdge: true
+DampingFilterRadius: 4
+ListenPortPriority:
+  - Port: 16386
+  - Range:
+      From: 16387
+      To:   16388
+`
+	var cfg SuperConfigV2
+	if err := yamlUnmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf("parse v2 super config with ListenPortPriority: %v", err)
+	}
+	if len(cfg.ListenPortPriority) != 2 {
+		t.Fatalf("decoded policy len = %d, want 2", len(cfg.ListenPortPriority))
+	}
+	if cfg.ListenPortPriority[0].Port == nil || *cfg.ListenPortPriority[0].Port != 16386 {
+		t.Fatalf("entry[0] = %#v, want Port=16386", cfg.ListenPortPriority[0])
+	}
+	r := cfg.ListenPortPriority[1].Range
+	if r == nil || r.From != 16387 || r.To != 16388 {
+		t.Fatalf("entry[1] = %#v, want Range{From:16387, To:16388}", cfg.ListenPortPriority[1])
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate v2 super config with ListenPortPriority: %v", err)
+	}
+}

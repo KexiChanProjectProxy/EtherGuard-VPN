@@ -114,16 +114,16 @@ func newControlV2Error(code, field, format string, args ...interface{}) *Control
 // ListenPortRange is an inclusive [From, To] port range. From must be <=
 // To and both endpoints must lie in [1, 65535].
 type ListenPortRange struct {
-	From int `json:"from"`
-	To   int `json:"to"`
+	From int `yaml:"From" json:"from"`
+	To   int `yaml:"To" json:"to"`
 }
 
 // ListenPortEntry is one element of the ordered Super ListenPortPriority.
 // Exactly one of Port (single port) or Range (inclusive range) must be
 // non-nil; mixing the two on the same entry is a typed validation error.
 type ListenPortEntry struct {
-	Port  *int             `json:"port,omitempty"`
-	Range *ListenPortRange `json:"range,omitempty"`
+	Port  *int             `yaml:"Port,omitempty" json:"port,omitempty"`
+	Range *ListenPortRange `yaml:"Range,omitempty" json:"range,omitempty"`
 }
 
 // ListenPortPriority is the ordered Super listen-port priority list. The
