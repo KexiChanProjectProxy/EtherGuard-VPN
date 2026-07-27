@@ -77,6 +77,7 @@ func NewControlHTTPHandler(state *ControlState, auth *ControlAuthenticator, hub 
 //	POST prefix/report     -> handleReport
 //	GET  prefix/snapshot   -> handleSnapshot
 //	GET  prefix/events     -> handleEvents
+//	GET  prefix/bootstrap  -> handleBootstrap
 //
 // Unknown methods or paths return 405 / 404 respectively. Every route
 // requires the four HMAC headers; missing headers → 401 via Verify.
@@ -106,6 +107,12 @@ func (h *ControlHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleEvents(w, r)
+	case h.prefix + "/bootstrap":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleBootstrap(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -232,6 +239,38 @@ func (h *ControlHTTPHandler) handleEvents(w http.ResponseWriter, r *http.Request
 	case <-r.Context().Done():
 	case <-renderer.Subscriber().Done():
 	}
+}
+
+// handleBootstrap authenticates the request and returns the published
+// ListenPortPriority as a typed ControlV2Parameters payload. The endpoint
+// exists so a freshly-provisioned Edge can fetch its bind policy BEFORE it
+// has ever contacted the Super (or after its active peer record has been
+// swept). Authentication resolves via ControlKeyFor, which prefers the
+// active peer map and falls back to the pre-authorized registry (Task 2):
+// bootstrap MUST NOT require an active peer record and MUST NOT create one.
+//
+// The response body is EXACTLY mtypes.ControlV2Parameters — no PSKey,
+// Peers, candidates, observed hints, or management state. An empty
+// ListenPortPriority is a bootstrap error (503): the endpoint exists to
+// deliver the policy, and a Super with no policy is misconfigured for
+// bootstrap purposes. Empty policy remains valid elsewhere (snapshot,
+// SSE) because other endpoints already serve parameters alongside other
+// state.
+func (h *ControlHTTPHandler) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := h.auth.Verify(r); err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	params := h.state.ParametersForBootstrap()
+	if len(params.ListenPortPriority) == 0 {
+		// Bootstrap is policy-only; a Super with no policy is not ready
+		// to onboard Edges. The body intentionally avoids leaking the
+		// configuration state so an attacker cannot infer the Super's
+		// YAML content from the error.
+		http.Error(w, "bootstrap policy not configured", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, http.StatusOK, params)
 }
 
 // writeAuthError translates a *ControlAuthError into the uniform HTTP

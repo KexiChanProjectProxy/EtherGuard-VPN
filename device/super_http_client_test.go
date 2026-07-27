@@ -1092,3 +1092,300 @@ func TestControlHTTPClientMalformedSSENoState(t *testing.T) {
 		t.Fatalf("snapshot state changed by malformed SSE")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Bootstrap endpoint tests (Task 4).
+//
+// ControlHTTPClient.Bootstrap calls GET /edge/v2/bootstrap with the same
+// signing convention as Snapshot/Report. The wire shape is exactly
+// ControlV2Parameters; the ListenPortPriority is the canonical deliverable
+// from the endpoint. Every failure path returns a distinguishable typed
+// error so an Edge can decide whether to retry, fall back, or refuse to
+// bind.
+// ---------------------------------------------------------------------------
+
+// bootstrapServerEnv wires a mock Super at /edge/v2/bootstrap. Tests set
+// status / body / handler-failure knobs to drive the failure paths.
+type bootstrapServerEnv struct {
+	// psKey is shared between verify() (the embedded serverEnv method) and
+	// the bootstrap handler. Tests that don't need nonce/replay tracking
+	// just leave seenNonces / counters at zero.
+	serverEnv
+	// bootstrapStatus is the HTTP status returned by the bootstrap
+	// handler. Default 200.
+	bootstrapStatus int
+	// bootstrapBody is the raw JSON body the bootstrap handler returns.
+	bootstrapBody []byte
+	// hang blocks the bootstrap handler until the channel fires so the
+	// client can observe a context-timeout error.
+	hang chan struct{}
+	// calls counts successful entries into the handler (regardless of
+	// the response). Tests use it to assert the client actually reached
+	// the endpoint.
+	calls atomic.Int32
+}
+
+func bootstrapTestParams() mtypes.ControlV2Parameters {
+	portA := 51820
+	portB := 51821
+	return mtypes.ControlV2Parameters{
+		ProtocolVersion:     mtypes.ControlV2ProtocolVersion,
+		PollInterval:        100 * time.Millisecond,
+		STUNServers:         []string{"stun:127.0.0.1:3478"},
+		STUNRequestTimeout:  500 * time.Millisecond,
+		STUNRefreshInterval: 30 * time.Second,
+		ReportInterval:      500 * time.Millisecond,
+		HeartbeatInterval:   time.Second,
+		EventReplay:         16,
+		ListenPortPriority: mtypes.ListenPortPriority{
+			{Port: &portA},
+			{Port: &portB},
+		},
+	}
+}
+
+// TestControlHTTPClientBootstrapSuccess — GET /edge/v2/bootstrap returns
+// the published parameters with the ListenPortPriority field. The client
+// returns the typed value; the caller binds against ListenPortPriority.
+func TestControlHTTPClientBootstrapSuccess(t *testing.T) {
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, bootstrapStatus: http.StatusOK}
+	want := bootstrapTestParams()
+	wantBody, _ := json.Marshal(&want)
+	env.bootstrapBody = wantBody
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		if env.hang != nil {
+			<-env.hang
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(env.bootstrapStatus)
+		_, _ = w.Write(env.bootstrapBody)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7001), "k")
+	got, err := c.Bootstrap(context.Background())
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if got.ProtocolVersion != want.ProtocolVersion {
+		t.Fatalf("ProtocolVersion=%q want %q", got.ProtocolVersion, want.ProtocolVersion)
+	}
+	if len(got.ListenPortPriority) != len(want.ListenPortPriority) {
+		t.Fatalf("ListenPortPriority len=%d want %d", len(got.ListenPortPriority), len(want.ListenPortPriority))
+	}
+	for i, entry := range got.ListenPortPriority {
+		if entry.Port == nil || want.ListenPortPriority[i].Port == nil {
+			t.Fatalf("policy[%d] Port=nil", i)
+		}
+		if *entry.Port != *want.ListenPortPriority[i].Port {
+			t.Fatalf("policy[%d].Port=%d want %d", i, *entry.Port, *want.ListenPortPriority[i].Port)
+		}
+	}
+	if env.calls.Load() == 0 {
+		t.Fatalf("bootstrap endpoint was never invoked")
+	}
+}
+
+// TestControlHTTPClientBootstrapNon200StatusError — a non-200 status
+// returns a status error. The error carries the status code AND a
+// distinguishable type so the Edge can decide to retry or fail.
+func TestControlHTTPClientBootstrapNon200StatusError(t *testing.T) {
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, bootstrapStatus: http.StatusServiceUnavailable, bootstrapBody: []byte("no policy")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(env.bootstrapStatus)
+		_, _ = w.Write(env.bootstrapBody)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7002), "k")
+	got, err := c.Bootstrap(context.Background())
+	if err == nil {
+		t.Fatalf("expected non-200 status error, got params=%+v", got)
+	}
+	if got != nil {
+		t.Fatalf("expected nil params on non-200, got %+v", got)
+	}
+	var statusErr *BootstrapStatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("error type=%T, want *BootstrapStatusError", err)
+	}
+	if statusErr.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode=%d want %d", statusErr.StatusCode, http.StatusServiceUnavailable)
+	}
+}
+
+// TestControlHTTPClientBootstrapMalformedJSONError — the server returns
+// a 200 with body that does not parse as ControlV2Parameters. The error
+// is a decode error so the Edge can distinguish "the Super is broken"
+// from "the Super said no".
+func TestControlHTTPClientBootstrapMalformedJSONError(t *testing.T) {
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, bootstrapStatus: http.StatusOK, bootstrapBody: []byte("{not-json")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(env.bootstrapStatus)
+		_, _ = w.Write(env.bootstrapBody)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7003), "k")
+	got, err := c.Bootstrap(context.Background())
+	if err == nil {
+		t.Fatalf("expected decode error, got params=%+v", got)
+	}
+	if got != nil {
+		t.Fatalf("expected nil params on decode error, got %+v", got)
+	}
+	var decodeErr *BootstrapDecodeError
+	if !errors.As(err, &decodeErr) {
+		t.Fatalf("error type=%T, want *BootstrapDecodeError", err)
+	}
+}
+
+// TestControlHTTPClientBootstrapEmptyPolicyError — the body parses but
+// has no ListenPortPriority. Expand() returns 0 ports; the client fails
+// the call with a distinguishable policy error so the Edge refuses to
+// bind without a fallback. The error type is BootstrapInvalidPolicyError.
+func TestControlHTTPClientBootstrapEmptyPolicyError(t *testing.T) {
+	empty := bootstrapTestParams()
+	empty.ListenPortPriority = nil
+	body, _ := json.Marshal(&empty)
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, bootstrapStatus: http.StatusOK, bootstrapBody: body}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		bodyR, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, bodyR) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(env.bootstrapStatus)
+		_, _ = w.Write(env.bootstrapBody)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7004), "k")
+	got, err := c.Bootstrap(context.Background())
+	if err == nil {
+		t.Fatalf("expected empty-policy error, got params=%+v", got)
+	}
+	if got != nil {
+		t.Fatalf("expected nil params on policy error, got %+v", got)
+	}
+	var policyErr *BootstrapInvalidPolicyError
+	if !errors.As(err, &policyErr) {
+		t.Fatalf("error type=%T, want *BootstrapInvalidPolicyError", err)
+	}
+}
+
+// TestControlHTTPClientBootstrapInvalidPolicyError — the body carries an
+// invalid ListenPortPriority (entry sets both Port and Range). Expand()
+// fails; the client wraps the typed *mtypes.ControlV2Error and returns
+// a *BootstrapInvalidPolicyError so the Edge can distinguish "config
+// drift" from "policy missing".
+func TestControlHTTPClientBootstrapInvalidPolicyError(t *testing.T) {
+	bad := bootstrapTestParams()
+	portA := 51820
+	rng := mtypes.ListenPortRange{From: 41000, To: 41002}
+	bad.ListenPortPriority = mtypes.ListenPortPriority{
+		{Port: &portA, Range: &rng},
+	}
+	body, _ := json.Marshal(&bad)
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, bootstrapStatus: http.StatusOK, bootstrapBody: body}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		bodyR, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, bodyR) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(env.bootstrapStatus)
+		_, _ = w.Write(env.bootstrapBody)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7005), "k")
+	got, err := c.Bootstrap(context.Background())
+	if err == nil {
+		t.Fatalf("expected invalid-policy error, got params=%+v", got)
+	}
+	if got != nil {
+		t.Fatalf("expected nil params on invalid policy, got %+v", got)
+	}
+	var policyErr *BootstrapInvalidPolicyError
+	if !errors.As(err, &policyErr) {
+		t.Fatalf("error type=%T, want *BootstrapInvalidPolicyError", err)
+	}
+	if !mtypes.IsControlV2Error(policyErr.Cause) {
+		t.Fatalf("cause type=%T, want *mtypes.ControlV2Error", policyErr.Cause)
+	}
+}
+
+// TestControlHTTPClientBootstrapContextTimeout — the bootstrap handler
+// blocks indefinitely; a context with a tight deadline triggers
+// context.DeadlineExceeded. The error is propagated so the caller can
+// distinguish "network slow" from "Super refused".
+func TestControlHTTPClientBootstrapContextTimeout(t *testing.T) {
+	env := &bootstrapServerEnv{serverEnv: serverEnv{psKey: []byte("k")}, hang: make(chan struct{}), bootstrapStatus: http.StatusOK}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		env.calls.Add(1)
+		select {
+		case <-env.hang:
+		case <-r.Context().Done():
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	defer close(env.hang)
+
+	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 7006), "k")
+	c.HTTP.Timeout = 0 // rely on the request context for deadline
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	got, err := c.Bootstrap(ctx)
+	if err == nil {
+		t.Fatalf("expected timeout error, got params=%+v", got)
+	}
+	if got != nil {
+		t.Fatalf("expected nil params on timeout, got %+v", got)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error type=%T, want context.DeadlineExceeded (errors.Is): %v", err, err)
+	}
+}

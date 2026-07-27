@@ -979,6 +979,377 @@ func readFirstEventID(t *testing.T, h *testHarness, nodeID mtypes.Vertex, pskey 
 	return ""
 }
 
+// ---------------------------------------------------------------------------
+// Bootstrap endpoint tests (Task 4).
+//
+// /edge/v2/bootstrap returns the published ListenPortPriority so a freshly
+// provisioned Edge can fetch its bind policy BEFORE it has ever contacted
+// the Super. Auth MUST resolve via the pre-authorized registry (Task 2):
+// the active peer map may be empty (no Register yet) or swept (post-
+// SweepTimeouts), so the credential lookup falls back to preauthorized.
+// The response MUST contain only ControlV2Parameters — no PSKey, no Peers,
+// no candidates, no observed hints, no report/state fields. An empty
+// policy is a non-200 bootstrap error because the bootstrap endpoint's
+// only purpose is to deliver the policy.
+//
+// Test fixtures: bootstrap tests need a non-empty ListenPortPriority so the
+// production handler returns 200. The default validParams() has none, so
+// each bootstrap test builds its own ControlState directly (or calls
+// NewControlState with a custom Parameters).
+// ---------------------------------------------------------------------------
+
+// bootstrapTestParams returns ControlV2Parameters with a non-empty
+// ListenPortPriority so the bootstrap endpoint serves a real policy.
+func bootstrapTestParams() mtypes.ControlV2Parameters {
+	portA := 51820
+	portB := 51821
+	return mtypes.ControlV2Parameters{
+		ProtocolVersion:     mtypes.ControlV2ProtocolVersion,
+		PollInterval:        15 * time.Second,
+		STUNServers:         []string{"stun:203.0.113.10:3478"},
+		STUNRequestTimeout:  3 * time.Second,
+		STUNRefreshInterval: 60 * time.Second,
+		ReportInterval:      15 * time.Second,
+		HeartbeatInterval:   10 * time.Second,
+		EventReplay:         256,
+		ListenPortPriority: mtypes.ListenPortPriority{
+			{Port: &portA},
+			{Port: &portB},
+		},
+	}
+}
+
+// bootstrapHarness wires ControlState + Authenticator + Hub behind the
+// production NewControlHTTPHandler constructor. The harness uses
+// bootstrapTestParams (non-empty ListenPortPriority) so the handler can
+// successfully serve a 200. Tests that need an empty policy build their
+// own state without using this helper.
+type bootstrapHarness struct {
+	t      *testing.T
+	server *httptest.Server
+	state  *ControlState
+}
+
+func newBootstrapHarness(t *testing.T) *bootstrapHarness {
+	t.Helper()
+	hub := NewControlEventHub(8)
+	state := NewControlState(ControlStateConfig{
+		Parameters: bootstrapTestParams(),
+		Publish:    func(mtypes.ControlV2Event) {},
+		Now:        time.Now,
+	})
+	auth := NewControlAuthenticator(state, ControlAuthenticatorConfig{Now: time.Now})
+	handler := NewControlHTTPHandler(state, auth, hub, "")
+	srv := httptest.NewServer(handler)
+	t.Cleanup(func() {
+		hub.Close()
+		srv.Close()
+	})
+	return &bootstrapHarness{t: t, server: srv, state: state}
+}
+
+// TestControlHTTPV2BootstrapReturnsParameters — GET /edge/v2/bootstrap with
+// a valid signed request returns 200 and the published parameters. The
+// response contains the ListenPortPriority but NEVER PSKey, Peers, or any
+// other field outside ControlV2Parameters.
+func TestControlHTTPV2BootstrapReturnsParameters(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-bootstrap-key"
+	const nodeID mtypes.Vertex = 21
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	resp, body := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bootstrap: status=%d body=%s", resp.StatusCode, body)
+	}
+	// Response is exactly ControlV2Parameters (wire shape with PascalCase
+	// keys). Re-decode into the typed struct; sanity-check the policy is
+	// the one we installed.
+	var got mtypes.ControlV2Parameters
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("decode bootstrap body: %v body=%s", err, body)
+	}
+	if got.ProtocolVersion != mtypes.ControlV2ProtocolVersion {
+		t.Fatalf("ProtocolVersion=%q want %q", got.ProtocolVersion, mtypes.ControlV2ProtocolVersion)
+	}
+	if len(got.ListenPortPriority) != 2 {
+		t.Fatalf("ListenPortPriority len=%d want 2: body=%s", len(got.ListenPortPriority), body)
+	}
+	if got.ListenPortPriority[0].Port == nil || *got.ListenPortPriority[0].Port != 51820 {
+		t.Fatalf("policy[0].Port: got %#v want 51820", got.ListenPortPriority[0])
+	}
+	if got.ListenPortPriority[1].Port == nil || *got.ListenPortPriority[1].Port != 51821 {
+		t.Fatalf("policy[1].Port: got %#v want 51821", got.ListenPortPriority[1])
+	}
+	// Body must NOT contain any key outside ControlV2Parameters.
+	forbidden := []string{
+		`"PSKey"`, `"PSKey":`,
+		`"Peers"`, `"Peers":`,
+		`"Candidates"`, `"Candidates":`,
+		`"Observed"`, `"Observed":`,
+		`"Reports"`, `"Reports":`,
+		`"Management"`, `"Management":`,
+		`"PeerID"`,
+	}
+	for _, k := range forbidden {
+		if bytes.Contains(body, []byte(k)) {
+			t.Fatalf("bootstrap response leaked forbidden key %q in body: %s", k, body)
+		}
+	}
+	if bytes.Contains(body, []byte(pskey)) {
+		t.Fatalf("bootstrap response leaked PSKey: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapEmptyPolicyRejected — when the Super is
+// misconfigured for bootstrap (no ListenPortPriority), the bootstrap
+// endpoint returns a non-200 status. The other endpoints (snapshot,
+// register, report) MUST still work because the policy is bootstrap-only.
+func TestControlHTTPV2BootstrapEmptyPolicyRejected(t *testing.T) {
+	hub := NewControlEventHub(8)
+	state := NewControlState(ControlStateConfig{
+		Parameters: validParams(), // empty ListenPortPriority
+		Publish:    func(mtypes.ControlV2Event) {},
+		Now:        time.Now,
+	})
+	auth := NewControlAuthenticator(state, ControlAuthenticatorConfig{Now: time.Now})
+	handler := NewControlHTTPHandler(state, auth, hub, "")
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	defer hub.Close()
+
+	const pskey = "edge-empty-policy-key"
+	const nodeID mtypes.Vertex = 22
+	state.SetPreAuthorized(nodeID, pskey)
+
+	resp, body := signedRequest(t, srv, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("empty policy: status=200 body=%s, want non-200", body)
+	}
+	if resp.StatusCode < 400 {
+		t.Fatalf("empty policy: status=%d body=%s, want a non-2xx error code", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte(pskey)) {
+		t.Fatalf("empty-policy error leaked PSKey: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapNonGETRejected — POST/PUT/DELETE on /bootstrap
+// return 405 (the production handler enforces the method in its switch).
+func TestControlHTTPV2BootstrapNonGETRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-method-key"
+	const nodeID mtypes.Vertex = 23
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		resp, body := signedRequest(t, h.server, method, "/edge/v2/bootstrap", []byte(`{}`), nodeID, pskey, nil)
+		if resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s bootstrap: status=%d body=%s want 405", method, resp.StatusCode, body)
+		}
+		if bytes.Contains(body, []byte(pskey)) {
+			t.Fatalf("%s bootstrap leaked PSKey: %s", method, body)
+		}
+	}
+}
+
+// TestControlHTTPV2BootstrapUnsignedRejected — a request with NO X-EG-* headers
+// fails the same way as on every other endpoint: uniform 401 body, no PSKey
+// in the response.
+func TestControlHTTPV2BootstrapUnsignedRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-unsigned-bs"
+	const nodeID mtypes.Vertex = 24
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	req, _ := http.NewRequest(http.MethodGet, h.server.URL+"/edge/v2/bootstrap", nil)
+	resp, err := h.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned: status=%d body=%s want 401", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte(pskey)) {
+		t.Fatalf("unsigned bootstrap leaked PSKey: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapWrongKeyRejected — signing with a key that does
+// NOT match the configured registry entry fails the HMAC check. The
+// response is uniform 401 and never reveals the registered key.
+func TestControlHTTPV2BootstrapWrongKeyRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-correct-key"
+	const wrong = "edge-attacker-key"
+	const nodeID mtypes.Vertex = 25
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	resp, body := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, wrong, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong key: status=%d body=%s want 401", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte(pskey)) || bytes.Contains(body, []byte(wrong)) {
+		t.Fatalf("wrong-key response leaked key material: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapUnknownNodeRejected — an authenticated request
+// for a NodeID that has no registry entry and no active peer record fails
+// the ControlKeyFor lookup and returns uniform 401. The bootstrap endpoint
+// must NOT resurrect peer records (Task 2 invariant).
+func TestControlHTTPV2BootstrapUnknownNodeRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-unknown-key"
+	const nodeID mtypes.Vertex = 26
+	// Intentionally do NOT call SetPreAuthorized — the NodeID is unknown.
+
+	resp, body := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unknown node: status=%d body=%s want 401", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte(pskey)) {
+		t.Fatalf("unknown-node response leaked PSKey: %s", body)
+	}
+	// Task 2 invariant: bootstrap MUST NOT create an active peer record.
+	if _, ok := h.state.ControlKeyFor(nodeID); ok {
+		t.Fatalf("bootstrap resurrected peer record for unknown NodeID")
+	}
+}
+
+// TestControlHTTPV2BootstrapReplayedNonceRejected — replaying the same nonce
+// within the TTL window is rejected with uniform 401 (Task 9 invariant).
+func TestControlHTTPV2BootstrapReplayedNonceRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-replay-bs"
+	var nodeID mtypes.Vertex = 27
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	// Build a single request with a fixed nonce and timestamp, send it
+	// twice. The verifier stores the (NodeID, nonce) pair on success and
+	// rejects the replay.
+	req, _ := http.NewRequest(http.MethodGet, h.server.URL+"/edge/v2/bootstrap", nil)
+	ts := time.Now().Unix()
+	nonce := randHex(16)
+	digest := sha256.Sum256(nil)
+	canonical := http.MethodGet + "\n" + req.URL.EscapedPath() + "\n" + fmt.Sprintf("%d", ts) + "\n" + nonce + "\n" + hex.EncodeToString(digest[:])
+	mac := hmac.New(sha256.New, []byte(pskey))
+	_, _ = mac.Write([]byte(canonical))
+	req.Header.Set(ControlAuthHeaderNodeID, nodeID.ToString())
+	req.Header.Set(ControlAuthHeaderTimestamp, fmt.Sprintf("%d", ts))
+	req.Header.Set(ControlAuthHeaderNonce, nonce)
+	req.Header.Set(ControlAuthHeaderSignature, hex.EncodeToString(mac.Sum(nil)))
+
+	resp1, err := h.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do first: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first bootstrap: status=%d body=%s", resp1.StatusCode, body1)
+	}
+
+	resp2, err := h.server.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do replay: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("replayed bootstrap: status=%d body=%s want 401", resp2.StatusCode, body2)
+	}
+	if bytes.Contains(body2, []byte(pskey)) {
+		t.Fatalf("replay response leaked PSKey: %s", body2)
+	}
+}
+
+// TestControlHTTPV2BootstrapDeletedNodeRejected — DeletePeer scrubs both
+// the active record AND the registry entry. A subsequent bootstrap MUST
+// fail with 401 (the credential is gone).
+func TestControlHTTPV2BootstrapDeletedNodeRejected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-deleted-bs"
+	const nodeID mtypes.Vertex = 28
+	h.state.SetPreAuthorized(nodeID, pskey)
+	// Populate the active peer record so DeletePeer finds the entry.
+	h.state.setControlKeyForTest(nodeID, pskey)
+
+	if err := h.state.DeletePeer(context.Background(), nodeID); err != nil {
+		t.Fatalf("DeletePeer: %v", err)
+	}
+
+	resp, body := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deleted node: status=%d body=%s want 401", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte(pskey)) {
+		t.Fatalf("deleted-node response leaked PSKey: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapSweptActiveRecordAuthenticatesViaRegistry — the
+// central Task 4 invariant: a provisioned-but-swept Edge can still fetch
+// the bootstrap policy because the pre-authorized registry survives
+// SweepTimeouts. The test installs the credential ONLY in the registry
+// (the active peer map is populated and then immediately removed to
+// simulate a post-sweep state without depending on time).
+func TestControlHTTPV2BootstrapSweptActiveRecordAuthenticatesViaRegistry(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-swept-registry-key"
+	const nodeID mtypes.Vertex = 29
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	// Populate the active record (with a different key so the active
+	// path would fail), then remove the active record directly. The
+	// registry fallback is the only way bootstrap can succeed.
+	const wrongActiveKey = "transient-active-key"
+	h.state.setControlKeyForTest(nodeID, wrongActiveKey)
+	h.state.mu.Lock()
+	delete(h.state.peers, nodeID)
+	h.state.mu.Unlock()
+
+	resp, body := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("swept active record: status=%d body=%s want 200", resp.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"ListenPortPriority"`)) {
+		t.Fatalf("swept-record bootstrap response missing ListenPortPriority: %s", body)
+	}
+	if bytes.Contains(body, []byte(pskey)) || bytes.Contains(body, []byte(wrongActiveKey)) {
+		t.Fatalf("swept-record bootstrap leaked key material: %s", body)
+	}
+}
+
+// TestControlHTTPV2BootstrapDoesNotMutateState — fetching bootstrap MUST
+// NOT bump the revision or create an active peer record. The endpoint is
+// a read-only path that only consults ParametersForBootstrap and the
+// pre-authorized registry.
+func TestControlHTTPV2BootstrapDoesNotMutateState(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const pskey = "edge-readonly-key"
+	const nodeID mtypes.Vertex = 30
+	h.state.SetPreAuthorized(nodeID, pskey)
+
+	beforeRev := h.state.Revision()
+	resp, _ := signedRequest(t, h.server, http.MethodGet, "/edge/v2/bootstrap", nil, nodeID, pskey, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bootstrap: status=%d", resp.StatusCode)
+	}
+	if got := h.state.Revision(); got != beforeRev {
+		t.Fatalf("revision bumped on bootstrap: before=%d after=%d", beforeRev, got)
+	}
+	// Bootstrap must NOT create an active peer record.
+	h.state.mu.RLock()
+	_, exists := h.state.peers[nodeID]
+	h.state.mu.RUnlock()
+	if exists {
+		t.Fatalf("bootstrap created an active peer record for NodeID %d", nodeID)
+	}
+}
+
 // Compile-time guard against unused imports.
 var (
 	_ = errors.New

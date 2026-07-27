@@ -180,6 +180,94 @@ func (c *ControlHTTPClient) Register(ctx context.Context, x *mtypes.ControlV2Reg
 	return &s, e
 }
 
+// BootstrapStatusError reports a non-200 status from the bootstrap
+// endpoint. The Edge distinguishes this from a decode or policy error so
+// it can retry transient failures (502/503/504) without aborting startup.
+type BootstrapStatusError struct {
+	StatusCode int
+	Status     string
+}
+
+func (e *BootstrapStatusError) Error() string {
+	return fmt.Sprintf("bootstrap: %s", e.Status)
+}
+
+// BootstrapDecodeError reports a 200 response whose body did not parse as
+// mtypes.ControlV2Parameters. The underlying JSON error is wrapped so the
+// caller can inspect the cause.
+type BootstrapDecodeError struct {
+	Cause error
+}
+
+func (e *BootstrapDecodeError) Error() string {
+	return fmt.Sprintf("bootstrap: decode parameters: %v", e.Cause)
+}
+
+func (e *BootstrapDecodeError) Unwrap() error { return e.Cause }
+
+// BootstrapInvalidPolicyError reports a 200 response whose body parsed
+// but whose ListenPortPriority is empty or fails Expand(). The underlying
+// *mtypes.ControlV2Error is wrapped; if no v2 error is present (e.g.
+// empty slice), Cause is nil and the field is nil.
+type BootstrapInvalidPolicyError struct {
+	Cause error
+}
+
+func (e *BootstrapInvalidPolicyError) Error() string {
+	if e.Cause == nil {
+		return "bootstrap: ListenPortPriority is empty"
+	}
+	return fmt.Sprintf("bootstrap: invalid ListenPortPriority: %v", e.Cause)
+}
+
+func (e *BootstrapInvalidPolicyError) Unwrap() error { return e.Cause }
+
+// Bootstrap fetches the Super-published control parameters via the
+// protected pre-bind endpoint. The wire body is exactly
+// mtypes.ControlV2Parameters and the caller receives a deep-copied
+// typed value. Distinct failure modes:
+//
+//   - non-200 status   -> *BootstrapStatusError (caller can retry transient codes)
+//   - malformed JSON   -> *BootstrapDecodeError (Super is broken; refuse to bind)
+//   - empty / invalid  -> *BootstrapInvalidPolicyError (config drift; refuse to bind)
+//   - context timeout  -> context.DeadlineExceeded (caller can retry)
+//   - transport        -> wrapped net/url error (caller can retry)
+//
+// Bootstrap is the FIRST call an Edge makes after it learns its Super
+// URL: the resulting ListenPortPriority drives the bind policy. There
+// is no local fallback — an Edge that cannot fetch the policy refuses to
+// start rather than bind a port the Super does not know about.
+func (c *ControlHTTPClient) Bootstrap(ctx context.Context) (*mtypes.ControlV2Parameters, error) {
+	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint("bootstrap"), nil)
+	if e != nil {
+		return nil, e
+	}
+	c.sign(r, nil)
+	resp, e := c.HTTP.Do(r)
+	if e != nil {
+		return nil, e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &BootstrapStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
+	}
+	var params mtypes.ControlV2Parameters
+	if err := json.NewDecoder(resp.Body).Decode(&params); err != nil {
+		return nil, &BootstrapDecodeError{Cause: err}
+	}
+	if len(params.ListenPortPriority) == 0 {
+		// Empty policy is a bootstrap error: the Edge MUST NOT bind
+		// without a Super-declared policy. Expand() accepts an empty
+		// slice and returns an empty port set, so the empty check has
+		// to come first.
+		return nil, &BootstrapInvalidPolicyError{}
+	}
+	if _, err := params.ListenPortPriority.Expand(); err != nil {
+		return nil, &BootstrapInvalidPolicyError{Cause: err}
+	}
+	return &params, nil
+}
+
 func (c *ControlHTTPClient) Current() *mtypes.ControlV2Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
