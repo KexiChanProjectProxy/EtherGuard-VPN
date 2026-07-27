@@ -57,6 +57,9 @@ const (
 	controlV2MaxObservedHints          = 16
 	controlV2MaxObservedHintsPerFamily = 14
 	controlV2MaxDirectConnectivitySecs = 24 * 60 * 60
+	controlV2MaxListenPortCandidates   = 256
+	controlV2MinPort                   = 1
+	controlV2MaxPort                   = 65535
 )
 
 // ControlV2Error is the typed error every v2 validator returns. It carries
@@ -106,6 +109,83 @@ func newControlV2Error(code, field, format string, args ...interface{}) *Control
 		Field:   field,
 		Message: fmt.Sprintf(format, args...),
 	}
+}
+
+// ListenPortRange is an inclusive [From, To] port range. From must be <=
+// To and both endpoints must lie in [1, 65535].
+type ListenPortRange struct {
+	From int `json:"from"`
+	To   int `json:"to"`
+}
+
+// ListenPortEntry is one element of the ordered Super ListenPortPriority.
+// Exactly one of Port (single port) or Range (inclusive range) must be
+// non-nil; mixing the two on the same entry is a typed validation error.
+type ListenPortEntry struct {
+	Port  *int             `json:"port,omitempty"`
+	Range *ListenPortRange `json:"range,omitempty"`
+}
+
+// ListenPortPriority is the ordered Super listen-port priority list. The
+// expansion walks the entries in declared order, deduplicates later
+// repetitions, and caps the candidate set at 256 unique ports so an Edge
+// can exhaustively probe a bounded working set without flooding the
+// network.
+type ListenPortPriority []ListenPortEntry
+
+// Expand validates the policy and returns the unique port list in declared
+// order. Validation rejects zero, negative, or out-of-range ports, reversed
+// ranges, mixed port+range entries, fully empty entries, and any policy
+// that would yield more than 256 unique candidates.
+func (p ListenPortPriority) Expand() ([]int, error) {
+	seen := make(map[int]struct{}, len(p))
+	ports := make([]int, 0, len(p))
+	for i, entry := range p {
+		field := fmt.Sprintf("ListenPortPriority[%d]", i)
+		switch {
+		case entry.Port != nil && entry.Range != nil:
+			return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field, "entry sets both Port and Range; exactly one is allowed")
+		case entry.Port == nil && entry.Range == nil:
+			return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field, "entry has neither Port nor Range")
+		case entry.Port != nil:
+			if !validPort(*entry.Port) {
+				return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field+".Port", "port out of range [1,65535]: %d", *entry.Port)
+			}
+			if _, dup := seen[*entry.Port]; !dup {
+				seen[*entry.Port] = struct{}{}
+				ports = append(ports, *entry.Port)
+			}
+		default:
+			r := *entry.Range
+			if !validPort(r.From) {
+				return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field+".Range.From", "port out of range [1,65535]: %d", r.From)
+			}
+			if !validPort(r.To) {
+				return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field+".Range.To", "port out of range [1,65535]: %d", r.To)
+			}
+			if r.From > r.To {
+				return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field+".Range", "From %d > To %d", r.From, r.To)
+			}
+			for port := r.From; port <= r.To; port++ {
+				if _, dup := seen[port]; dup {
+					continue
+				}
+				if len(seen) >= controlV2MaxListenPortCandidates {
+					return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field, "expansion exceeds %d unique ports", controlV2MaxListenPortCandidates)
+				}
+				seen[port] = struct{}{}
+				ports = append(ports, port)
+			}
+		}
+		if len(seen) > controlV2MaxListenPortCandidates {
+			return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field, "expansion exceeds %d unique ports", controlV2MaxListenPortCandidates)
+		}
+	}
+	return ports, nil
+}
+
+func validPort(p int) bool {
+	return p >= controlV2MinPort && p <= controlV2MaxPort
 }
 
 // ControlV2CandidateSource enumerates where a candidate address was
@@ -419,14 +499,15 @@ func (s *ControlV2Snapshot) Accepts(incoming *ControlV2Snapshot) bool {
 // ControlV2Parameters is the typed view of the Super-published control
 // parameters stream. Every Edge receives an identical copy via snapshot.
 type ControlV2Parameters struct {
-	ProtocolVersion     string        `json:"protocol_version"`
-	PollInterval        time.Duration `json:"poll_interval"`
-	STUNServers         []string      `json:"stun_servers"`
-	STUNRequestTimeout  time.Duration `json:"stun_request_timeout"`
-	STUNRefreshInterval time.Duration `json:"stun_refresh_interval"`
-	ReportInterval      time.Duration `json:"report_interval"`
-	HeartbeatInterval   time.Duration `json:"heartbeat_interval"`
-	EventReplay         uint64        `json:"event_replay"`
+	ProtocolVersion     string             `json:"protocol_version"`
+	PollInterval        time.Duration      `json:"poll_interval"`
+	STUNServers         []string           `json:"stun_servers"`
+	STUNRequestTimeout  time.Duration      `json:"stun_request_timeout"`
+	STUNRefreshInterval time.Duration      `json:"stun_refresh_interval"`
+	ReportInterval      time.Duration      `json:"report_interval"`
+	HeartbeatInterval   time.Duration      `json:"heartbeat_interval"`
+	EventReplay         uint64             `json:"event_replay"`
+	ListenPortPriority  ListenPortPriority `json:"listen_port_priority,omitempty"`
 }
 
 // Validate enforces positive durations, a known protocol version, and a
@@ -461,14 +542,15 @@ func (p *ControlV2Parameters) Validate() error {
 // MarshalJSON renders durations as seconds (the wire form for v2).
 func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		ProtocolVersion          string   `json:"ProtocolVersion"`
-		PollIntervalSeconds      float64  `json:"PollIntervalSeconds"`
-		STUNServers              []string `json:"STUNServers"`
-		STUNRequestTimeoutMS     float64  `json:"STUNRequestTimeoutMS"`
-		STUNRefreshSeconds       float64  `json:"STUNRefreshIntervalSeconds"`
-		ReportIntervalSeconds    float64  `json:"ReportIntervalSeconds"`
-		HeartbeatIntervalSeconds float64  `json:"HeartbeatIntervalSeconds"`
-		EventReplay              uint64   `json:"EventReplay"`
+		ProtocolVersion          string             `json:"ProtocolVersion"`
+		PollIntervalSeconds      float64            `json:"PollIntervalSeconds"`
+		STUNServers              []string           `json:"STUNServers"`
+		STUNRequestTimeoutMS     float64            `json:"STUNRequestTimeoutMS"`
+		STUNRefreshSeconds       float64            `json:"STUNRefreshIntervalSeconds"`
+		ReportIntervalSeconds    float64            `json:"ReportIntervalSeconds"`
+		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
+		EventReplay              uint64             `json:"EventReplay"`
+		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
 	}
 	w := wire{
 		ProtocolVersion:          p.ProtocolVersion,
@@ -479,6 +561,7 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 		ReportIntervalSeconds:    p.ReportInterval.Seconds(),
 		HeartbeatIntervalSeconds: p.HeartbeatInterval.Seconds(),
 		EventReplay:              p.EventReplay,
+		ListenPortPriority:       p.ListenPortPriority,
 	}
 	return json.Marshal(w)
 }
@@ -486,14 +569,15 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON parses the wire form (seconds/ms) into typed durations.
 func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 	type wire struct {
-		ProtocolVersion          string   `json:"ProtocolVersion"`
-		PollIntervalSeconds      float64  `json:"PollIntervalSeconds"`
-		STUNServers              []string `json:"STUNServers"`
-		STUNRequestTimeoutMS     float64  `json:"STUNRequestTimeoutMS"`
-		STUNRefreshSeconds       float64  `json:"STUNRefreshIntervalSeconds"`
-		ReportIntervalSeconds    float64  `json:"ReportIntervalSeconds"`
-		HeartbeatIntervalSeconds float64  `json:"HeartbeatIntervalSeconds"`
-		EventReplay              uint64   `json:"EventReplay"`
+		ProtocolVersion          string             `json:"ProtocolVersion"`
+		PollIntervalSeconds      float64            `json:"PollIntervalSeconds"`
+		STUNServers              []string           `json:"STUNServers"`
+		STUNRequestTimeoutMS     float64            `json:"STUNRequestTimeoutMS"`
+		STUNRefreshSeconds       float64            `json:"STUNRefreshIntervalSeconds"`
+		ReportIntervalSeconds    float64            `json:"ReportIntervalSeconds"`
+		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
+		EventReplay              uint64             `json:"EventReplay"`
+		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -507,6 +591,7 @@ func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 	p.ReportInterval = durationFromSeconds(w.ReportIntervalSeconds)
 	p.HeartbeatInterval = durationFromSeconds(w.HeartbeatIntervalSeconds)
 	p.EventReplay = w.EventReplay
+	p.ListenPortPriority = w.ListenPortPriority
 	return nil
 }
 
@@ -613,6 +698,7 @@ type SuperConfigV2 struct {
 	PeerAliveTimeoutSeconds    float64                     `yaml:"PeerAliveTimeoutSeconds"`
 	UsePSKForInterEdge         bool                        `yaml:"UsePSKForInterEdge"`
 	DampingFilterRadius        uint64                      `yaml:"DampingFilterRadius"`
+	ListenPortPriority         ListenPortPriority          `yaml:"ListenPortPriority,omitempty"`
 	Peers                      []SuperConfigV2Peer         `yaml:"Peers"`
 }
 
@@ -655,6 +741,9 @@ func (c *SuperConfigV2) Validate() error {
 		if err := c.Peers[i].Validate(); err != nil {
 			return err
 		}
+	}
+	if _, err := c.ListenPortPriority.Expand(); err != nil {
+		return err
 	}
 	return nil
 }

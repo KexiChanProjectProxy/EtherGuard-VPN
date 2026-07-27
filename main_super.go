@@ -632,6 +632,12 @@ func legacyUDPFieldPresent(configPath string) (bool, string) {
 		// under v2 SuperNodeV2 etc. are legitimate.
 		if bytes.HasPrefix(raw, []byte(name+":")) ||
 			bytes.Contains(raw, []byte("\n"+name+":")) {
+			// `ListenPortPriority:` is the new v2 key; only reject the
+			// bare legacy UDP `ListenPort` when NOT immediately followed
+			// by the `Priority:` suffix.
+			if name == "ListenPort" && bytes.Contains(raw, []byte("\nListenPortPriority:")) {
+				continue
+			}
 			return true, name
 		}
 	}

@@ -3,6 +3,7 @@ package mtypes
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -802,3 +803,120 @@ func validControlV2Parameters(t *testing.T) ControlV2Parameters {
 func yamlUnmarshal(data []byte, out interface{}) error {
 	return yamlUnmarshalImpl(data, out)
 }
+
+// TestListenPortPriorityExpandsInOrderAndDeduplicates proves Expand honors
+// first-occurrence order, dedupes later repetitions, and walks a range
+// inclusive in the order declared on the wire.
+func TestListenPortPriorityExpandsInOrderAndDeduplicates(t *testing.T) {
+	policy := ListenPortPriority{
+		{Port: intPtr(16386)},
+		{Range: &ListenPortRange{From: 16386, To: 16388}},
+		{Port: intPtr(16387)},
+	}
+	ports, err := policy.Expand()
+	if err != nil {
+		t.Fatalf("Expand() error = %v", err)
+	}
+	want := []int{16386, 16387, 16388}
+	if !reflect.DeepEqual(ports, want) {
+		t.Fatalf("Expand() = %v, want %v", ports, want)
+	}
+}
+
+// TestListenPortPriorityRejectsMalformedEntries locks the typed validation
+// surface: zero/out-of-range ports, reversed ranges, mixed port+range, and
+// empty entries must each surface as Expand errors rather than silently
+// producing a partial candidate set.
+func TestListenPortPriorityRejectsMalformedEntries(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy ListenPortPriority
+	}{
+		{name: "zero port", policy: ListenPortPriority{{Port: intPtr(0)}}},
+		{name: "out of range", policy: ListenPortPriority{{Port: intPtr(65536)}}},
+		{name: "reversed range", policy: ListenPortPriority{{Range: &ListenPortRange{From: 10, To: 9}}}},
+		{name: "mixed entry", policy: ListenPortPriority{{Port: intPtr(10), Range: &ListenPortRange{From: 10, To: 11}}}},
+		{name: "empty entry", policy: ListenPortPriority{{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.policy.Expand(); err == nil {
+				t.Fatalf("Expand() error = nil, want typed validation error for %s", tc.name)
+			}
+		})
+	}
+}
+
+// TestListenPortPriorityRejectsExpansionOver256 pins the 256-candidate cap.
+// A range covering 257 ports must be rejected even though each individual
+// port is in [1, 65535].
+func TestListenPortPriorityRejectsExpansionOver256(t *testing.T) {
+	policy := ListenPortPriority{{Range: &ListenPortRange{From: 1, To: 257}}}
+	if _, err := policy.Expand(); err == nil {
+		t.Fatal("Expand() error = nil, want expansion-cap error")
+	}
+}
+
+// TestControlV2ParametersListenPortPriorityWireKey pins the PascalCase wire
+// key, the round-trip shape, and the absent-field backward-compatibility
+// contract: a snapshot missing ListenPortPriority must decode to an empty
+// policy without error.
+func TestControlV2ParametersListenPortPriorityWireKey(t *testing.T) {
+	parameters := ControlV2Parameters{
+		ProtocolVersion: ControlV2ProtocolVersion,
+		ListenPortPriority: ListenPortPriority{
+			{Port: intPtr(16386)},
+			{Range: &ListenPortRange{From: 16387, To: 16388}},
+		},
+	}
+	data, err := json.Marshal(parameters)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !strings.Contains(string(data), `"ListenPortPriority"`) {
+		t.Fatalf("wire JSON = %s, missing PascalCase key", data)
+	}
+	var decoded ControlV2Parameters
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if !reflect.DeepEqual(decoded.ListenPortPriority, parameters.ListenPortPriority) {
+		t.Fatalf("decoded policy = %#v, want %#v", decoded.ListenPortPriority, parameters.ListenPortPriority)
+	}
+	var old ControlV2Parameters
+	if err := json.Unmarshal([]byte(`{"ProtocolVersion":"v2"}`), &old); err != nil {
+		t.Fatalf("old JSON Unmarshal() error = %v", err)
+	}
+	if len(old.ListenPortPriority) != 0 {
+		t.Fatalf("old JSON policy = %#v, want empty", old.ListenPortPriority)
+	}
+}
+
+// TestSuperConfigV2ListenPortPriorityJSONShape exercises the Super-side
+// config decode path so a future YAML like
+//
+//	ListenPortPriority:
+//	  - Port: 16386
+//	  - Range:
+//	      From: 16387
+//	      To:   16388
+//
+// round-trips with both port and range entries preserved in declared order.
+func TestSuperConfigV2ListenPortPriorityJSONShape(t *testing.T) {
+	data := []byte(`{"ListenPortPriority":[{"Port":16386},{"Range":{"From":16387,"To":16388}}]}`)
+	var config SuperConfigV2
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(config.ListenPortPriority) != 2 {
+		t.Fatalf("decoded policy len = %d, want 2", len(config.ListenPortPriority))
+	}
+	if got := config.ListenPortPriority[0]; got.Port == nil || *got.Port != 16386 {
+		t.Fatalf("entry[0] = %#v, want Port=16386", got)
+	}
+	if got := config.ListenPortPriority[1]; got.Range == nil || got.Range.From != 16387 || got.Range.To != 16388 {
+		t.Fatalf("entry[1] = %#v, want Range{From:16387, To:16388}", got)
+	}
+}
+
+func intPtr(v int) *int { return &v }
