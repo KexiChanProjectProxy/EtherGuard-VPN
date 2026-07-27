@@ -44,6 +44,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -213,21 +214,33 @@ func RunWithServers(cfg *superConfig) (*superRuntime, error) {
 	if cfg.ManageListenAddr == "" {
 		return nil, errors.New("super: ManageListenAddr is required when ManageListen is nil")
 	}
+	if reflect.ValueOf(cfg.EdgeTemplate).IsZero() {
+		edgeTemplate, err := gencfg.GetExampleEdgeConfV2("")
+		if err != nil {
+			return nil, fmt.Errorf("super: build default edge template: %w", err)
+		}
+		cfg.EdgeTemplate = edgeTemplate
+	}
 	edgeLn, err := net.Listen("tcp", cfg.EdgeListenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("super: bind edge listener %q: %w", cfg.EdgeListenAddr, err)
 	}
-	mgmtLn, err := net.Listen("tcp", cfg.ManageListenAddr)
-	if err != nil {
-		_ = edgeLn.Close()
-		return nil, fmt.Errorf("super: bind manage listener %q: %w", cfg.ManageListenAddr, err)
+	mgmtLn := edgeLn
+	if cfg.ManageListenAddr != cfg.EdgeListenAddr {
+		mgmtLn, err = net.Listen("tcp", cfg.ManageListenAddr)
+		if err != nil {
+			_ = edgeLn.Close()
+			return nil, fmt.Errorf("super: bind manage listener %q: %w", cfg.ManageListenAddr, err)
+		}
 	}
 	cfg.EdgeListen = edgeLn
 	cfg.ManageListen = mgmtLn
 	rt, err := RunWithListeners(cfg)
 	if err != nil {
 		_ = edgeLn.Close()
-		_ = mgmtLn.Close()
+		if mgmtLn != edgeLn {
+			_ = mgmtLn.Close()
+		}
 		return nil, err
 	}
 	// Mark ownership so Shutdown closes the bound listeners.
@@ -360,7 +373,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if apiprefix[0] != '/' {
 		apiprefix = "/" + apiprefix
 	}
-	mux.Handle(apiprefix+"/manage/", manageHandler(manage))
+	mux.Handle(apiprefix+"/manage/", http.StripPrefix(apiprefix, manageHandler(manage)))
 	// The v2 handler owns its full path table; mount at apiprefix so a
 	// request for /edge/v2/snapshot reaches the handler with
 	// r.URL.Path == "/edge/v2/snapshot" (which is what the handler's

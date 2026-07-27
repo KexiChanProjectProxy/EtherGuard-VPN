@@ -542,28 +542,21 @@ func TestSuperTickerSweepRemovesInactivePeer(t *testing.T) {
 	fx.assertNoGoroutineLeak(before, 3*time.Second)
 }
 
-// TestSuperRunWithServersBindsFromStringAddresses proves the production
-// string-address entry point binds both listeners and serves the snapshot
-// endpoint over the returned addresses. Uses a temp ConfigDir so no real
-// YAML file is required.
-func TestSuperRunWithServersBindsFromStringAddresses(t *testing.T) {
+// TestSuperRunWithServersSharesListenerWhenAddressesMatch proves the production
+// string-address entry point binds once when both APIs use the same address,
+// supplies its default Edge template, and serves both path families.
+func TestSuperRunWithServersSharesListenerWhenAddressesMatch(t *testing.T) {
 	edgeAddr, err := freeTCPAddr(t)
 	if err != nil {
 		t.Fatalf("freeTCPAddr edge: %v", err)
 	}
-	mgmtAddr, err := freeTCPAddr(t)
-	if err != nil {
-		t.Fatalf("freeTCPAddr mgmt: %v", err)
-	}
-	_ = edgeAddr
-	_ = mgmtAddr
 
 	cfg := &superConfig{
 		BaseConfig:       validBaseConfig(),
-		EdgeTemplate:     validEdgeTemplate(),
+		EdgeTemplate:     mtypes.EdgeConfigV2{},
 		ConfigDir:        t.TempDir(),
 		EdgeListenAddr:   edgeAddr,
-		ManageListenAddr: mgmtAddr,
+		ManageListenAddr: edgeAddr,
 		ShutdownTimeout:  2 * time.Second,
 		TickInterval:     200 * time.Millisecond,
 	}
@@ -580,6 +573,14 @@ func TestSuperRunWithServersBindsFromStringAddresses(t *testing.T) {
 	status, body := signedGetURL(t, "http://"+edgeAddr+"/edge/v2/snapshot", 1, "servers-key-1")
 	if status != http.StatusOK {
 		t.Fatalf("snapshot status=%d body=%s", status, body)
+	}
+	resp, err := http.Get("http://" + edgeAddr + "/edge/v2/manage/super/state")
+	if err != nil {
+		t.Fatalf("manage state: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("manage state status=%d", resp.StatusCode)
 	}
 }
 
