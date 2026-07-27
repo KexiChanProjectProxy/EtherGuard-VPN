@@ -16,6 +16,8 @@ EventReplay: 256
 PeerAliveTimeoutSeconds: 70
 UsePSKForInterEdge: true
 DampingFilterRadius: 4
+ListenPortPriority:
+- Port: 16386
 Peers:
 - NodeID: 1
   NodeName: EgNet001

@@ -151,6 +151,77 @@ An Edge may report at most 256 observed target endpoints per report. The Super p
 
 Candidate classes always remain ordered local < STUN < observed. Reporter counts rank observed candidates only; they never let an observed candidate outrank local or STUN candidates.
 
+## Super-owned listen port policy
+
+`ListenPortPriority` is a **Super-only** ordered candidate list. It is the
+single source of truth for which UDP listen port an Edge should bind first.
+The Super publishes the list inside `ControlV2Parameters`; every Edge that
+registers against that Super sees the same ordered set in its snapshot.
+
+### Bootstrap-required startup
+
+An Edge MUST fetch the policy from the Super's protected endpoint before
+it binds any UDP socket. The first snapshot returned by
+`POST /edge/v2/register` carries the `ListenPortPriority` field of the
+current `ControlV2Parameters`; the Edge walks the list in declared order
+and binds the first free port. If the Edge ever receives an updated
+parameters stream (`event: params_change`), it rebinds to the new
+candidate set without losing registered state.
+
+If the Edge cannot reach the Super at startup (network down, certificate
+error, etc.) it MUST NOT bind a port from a stale local policy — it has
+no local policy. The Edge retries `register` with the configured
+`PollIntervalSeconds` until a snapshot is delivered.
+
+### Ordered candidate semantics
+
+Entries are walked in the order they appear in YAML:
+
+- A `Port:` entry is a single literal port.
+- A `Range:` entry is an inclusive `[From, To]` range walked left-to-right.
+- Later entries that repeat an already-claimed port are silently dropped
+  (first-occurrence wins, deduped by integer value).
+- The expansion cap is 256 unique ports; an entry that would push the
+  candidate set past 256 fails at YAML parse with a typed
+  `invalid_candidate` error rather than silently truncating.
+
+Validation rejects: ports outside `[1, 65535]`, reversed ranges
+(`From > To`), entries that set both `Port:` and `Range:`, empty entries,
+and any policy whose unique expansion exceeds 256. All of these surface
+as `SuperConfigV2.Validate()` errors so a malformed Super YAML fails
+fast at startup.
+
+### Port-zero fallback
+
+If every candidate in `ListenPortPriority` is already in use on the host
+(or all are denied by the OS / firewall), the Edge falls back to
+`listen_port = 0` (kernel-assigned ephemeral port) and continues running.
+The chosen ephemeral port is reported back to the Super in the next
+`POST /edge/v2/report` so peers learn the actual bind even though the
+policy itself was exhausted.
+
+The fallback is **last-resort only**: the Edge does not skip candidates
+in the declared order to reach port zero faster, and it does not abort
+on a full miss. Falling back is logged at WARN so operators can tell a
+"policy exhausted" Edge from a normal one.
+
+### What Edge / client profiles MUST NOT carry
+
+`ListenPortPriority` is exclusively a Super-side YAML key. The 100 Edge
+profiles in this repo (`logs.yaml` and `ngsdn_edge002.yaml` …
+`ngsdn_edge100.yaml`) MUST NOT carry:
+
+- `ListenPortPriority` (the ordered candidate list)
+- `ListenPort` (the bare v1 single-port field)
+- `BootstrapListenPortPriority` or any similar local-port-policy key
+
+Edges inherit the Super's policy through the parameters stream at every
+`register` / `snapshot` fetch. Hardcoding a local port in an Edge
+profile would silently override the Super's authoritative policy and
+defeat the bootstrap-required startup contract. The corpus audit in
+`docs_contract_test.go` enumerates every Edge file and fails if any of
+those keys reappear.
+
 ### No relay / TURN
 
 Unlike n2n, the SuperNode does not relay any packets. If UDP hole-punching between two Edges fails and no alternative route exists, those Edges cannot communicate. There is no fallback forwarding.
@@ -175,6 +246,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 | PeerAliveTimeoutSeconds | Seconds of inactivity before a peer is removed |
 | UsePSKForInterEdge | Generate pairwise WireGuard PSKs for inter-Edge traffic |
 | DampingFilterRadius | Low-pass filter window radius for latency smoothing |
+| ListenPortPriority | Ordered, Super-owned UDP listen-port candidate list (see [Super-owned listen port policy](#super-owned-listen-port-policy)); Edges MUST NOT carry a local copy |
 | Peers | List of pre-authorized Edge peers |
 
 ### Peers (Super-side)

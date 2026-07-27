@@ -136,6 +136,7 @@ func GetExampleSuperConf(templatePath string, getDemo bool) (mtypes.SuperConfigV
 		PeerAliveTimeoutSeconds:    70,
 		UsePSKForInterEdge:         true,
 		DampingFilterRadius:        4,
+		ListenPortPriority:         mtypes.ListenPortPriority{{Port: intPtr(16386)}},
 		Peers:                      []mtypes.SuperConfigV2Peer{},
 	}
 	if getDemo {
@@ -191,3 +192,8 @@ func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {
 		Peers: []mtypes.PeerInfo{},
 	}, nil
 }
+
+// intPtr returns &v. Local to this package so example_conf.go can build a
+// typed *int literal for mtypes.ListenPortEntry.Port without exporting the
+// helper from mtypes (which keeps the helper a test-only utility there).
+func intPtr(v int) *int { return &v }

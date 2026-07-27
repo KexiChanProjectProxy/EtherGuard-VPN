@@ -151,6 +151,43 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 候選位址類別的順序固定為local < STUN < observed。reporter count只在observed候選位址內排序；它不會使observed候選位址超過local或STUN。
 
+## Super獨佔的listen port策略
+
+`ListenPortPriority`是**僅屬於Super**的有序候選清單，是Edge應該優先綁定哪個UDP listen port的唯一真實來源。Super在`ControlV2Parameters`中發布這個清單；每個對該Super註冊的Edge，都會在snapshot中看到同一份有序集合。
+
+### 啟動時必須經過bootstrap
+
+Edge**必須**在綁定任何UDP socket之前，從Super的受保護端點取得策略。`POST /edge/v2/register`回傳的第一份snapshot攜帶當前`ControlV2Parameters`的`ListenPortPriority`欄位；Edge依宣告順序走訪清單，綁定第一個空閒的port。當Edge收到更新的參數串流（`event: params_change`）時，它會切換到新的候選集合重新綁定，不會遺失已註冊狀態。
+
+如果Edge在啟動時無法連到Super（網路斷線、憑證錯誤等），它**不應該**從過期的本機策略綁定port——因為它根本沒有本機策略。Edge會以設定的`PollIntervalSeconds`週期重試`register`，直到收到snapshot。
+
+### 有序候選語義
+
+條目依照它們在YAML中出現的順序走訪：
+
+- `Port:`條目是單一字面port。
+- `Range:`條目是左閉右閉的`[From, To]`範圍，依序走訪。
+- 後面重複已佔用port的條目會被靜默丟棄（先到者優先，依整數值去重）。
+- 展開上限是256個唯一port；任何會把候選集合推過256的條目，會在YAML解析時以類型化的`invalid_candidate`錯誤失敗，而不是靜默截斷。
+
+驗證會拒絕：[1, 65535]以外的port、反轉範圍（`From > To`）、同時設定`Port:`和`Range:`的條目、空條目，以及任何唯一展開超過256的策略。這些都會以`SuperConfigV2.Validate()`錯誤呈現，因此格式錯誤的Super YAML會在啟動時快速失敗。
+
+### Port-zero回退
+
+如果`ListenPortPriority`中的所有候選在主機上都已被佔用（或被OS／防火牆拒絕），Edge會回退到`listen_port = 0`（kernel指派的臨時port）並繼續運行。選擇到的臨時port會在下一次`POST /edge/v2/report`中回報給Super，讓peer即使在策略耗盡時也能知道實際綁定。
+
+回退**僅作為最後手段**：Edge不會為了更快達到port zero而跳過宣告順序中的候選，也不會在完全失敗時中止。回退會以WARN等級記錄，讓操作者能區分「策略耗盡」的Edge和正常Edge。
+
+### Edge / client profile不應攜帶什麼
+
+`ListenPortPriority`是純粹的Super端YAML鍵。本repo中的100個Edge profile（`logs.yaml`和`ngsdn_edge002.yaml`…`ngsdn_edge100.yaml`）**不應**攜帶：
+
+- `ListenPortPriority`（有序候選清單）
+- `ListenPort`（v1的裸port欄位）
+- `BootstrapListenPortPriority`或任何類似的本機port策略鍵
+
+Edge透過每次`register`／`snapshot`抓取，從Super繼承策略。在Edge profile中硬編碼本機port會靜默覆蓋Super的權威策略，破壞啟動時必須bootstrap的合約。`docs_contract_test.go`中的corpus稽核會列舉每個Edge檔案，只要任何上述鍵重新出現就會失敗。
+
 ### 無relay/TURN
 
 與n2n不同，SuperNode不會轉發任何封包。如果兩個Edge之間的UDP打洞失敗且沒有其他可用路徑，這些Edge無法通訊。沒有回退轉發。
@@ -175,6 +212,7 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 | PeerAliveTimeoutSeconds | 節點無反應多久後被移除（秒） |
 | UsePSKForInterEdge | 是否為Edge之間的WireGuard流量產生成對PSK |
 | DampingFilterRadius | 延遲平滑的低通濾波器window半徑 |
+| ListenPortPriority | 僅屬於Super的有序UDP listen-port候選清單（參見[Super獨佔的listen port策略](#super獨佔的listen-port策略)）；Edge不應攜帶本機複本 |
 | Peers | 預授權的Edge peer列表 |
 
 ### Peers（Super端）
