@@ -434,6 +434,195 @@ func TestControlStateObservedVotesClearWhenObserverDeletes(t *testing.T) {
 	}
 }
 
+// TestControlStatePreAuthorizedRegistryRetainsKeysAcrossSweep proves the
+// liveness-independent configured-key registry: a pre-authorized NodeID
+// whose active peer record is swept (LastSeen expired) keeps its control
+// PSKey so the Edge can re-authenticate after going offline longer than
+// PeerAliveTimeout. Auth resolution must fall back to the registry when
+// the active peer map no longer has the record.
+func TestControlStatePreAuthorizedRegistryRetainsKeysAcrossSweep(t *testing.T) {
+	// Given a configurable clock, a peer alive timeout, and a pre-authorized
+	// key installed independently from any Register call.
+	svc := NewControlState(ControlStateConfig{Now: currentTime, PeerAliveTimeout: 0})
+	svc.SetPreAuthorized(42, "configured-key-42")
+
+	// Sanity: the key is resolvable immediately, without an active peer record.
+	if key, ok := svc.ControlKeyFor(42); !ok || key != "configured-key-42" {
+		t.Fatalf("ControlKeyFor(42) before sweep: (%q, %v), want (\"configured-key-42\", true)", key, ok)
+	}
+
+	// When peer alive timeout becomes 1 minute and the clock advances past it.
+	svc.peerAliveTimeout = time.Minute
+	advance(2 * time.Minute)
+	advance(0) // ensure atomic publish visibility
+	svc.SweepTimeouts()
+
+	// Then the registry STILL resolves the same key even though the
+	// peer map had nothing to sweep (no active record was ever created).
+	if key, ok := svc.ControlKeyFor(42); !ok || key != "configured-key-42" {
+		t.Fatalf("ControlKeyFor(42) after sweep: (%q, %v), want (\"configured-key-42\", true)", key, ok)
+	}
+}
+
+// TestControlStateSeededPeersAbsentFromSnapshots proves configured (not
+// registered) NodeIDs do NOT appear as peers in any snapshot. Snapshots
+// only reflect active, recently-observed peers.
+func TestControlStateSeededPeersAbsentFromSnapshots(t *testing.T) {
+	// Given pre-authorized keys for two IDs and one actively registered peer.
+	svc := NewControlState(ControlStateConfig{PeerAliveTimeout: time.Hour})
+	svc.SetPreAuthorized(7, "seed-key-7")
+	svc.SetPreAuthorized(8, "seed-key-8")
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(9, "registered"), "reg-key-9"); err != nil {
+		t.Fatalf("register 9: %v", err)
+	}
+	// The registered peer is required so the snapshot for it has SOMETHING
+	// to read; the seeded NodeIDs must NOT appear.
+	snap := svc.SnapshotFor(9)
+	for _, peer := range snap.Peers {
+		if peer.NodeID == 7 || peer.NodeID == 8 {
+			t.Fatalf("seeded peer %d appeared in snapshot: %+v", peer.NodeID, peer)
+		}
+	}
+}
+
+// TestControlStateSweepRemovesActiveButRetainsConfigured proves that a
+// peer which has BOTH an active record AND a pre-authorized key is
+// subject to normal sweep semantics on the active record, while the
+// configured key survives the sweep so the Edge can re-register.
+func TestControlStateSweepRemovesActiveButRetainsConfigured(t *testing.T) {
+	// Given a single clock and a registered + configured peer.
+	svc := NewControlState(ControlStateConfig{Now: currentTime, PeerAliveTimeout: 0})
+	svc.SetPreAuthorized(1, "configured-key-1")
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "active-key-1"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// When the clock advances past the alive timeout and we sweep.
+	svc.peerAliveTimeout = time.Minute
+	advance(2 * time.Minute)
+	advance(0)
+	if removed := svc.SweepTimeouts(); removed != 1 {
+		t.Fatalf("removed=%d, want 1", removed)
+	}
+
+	// Then the active peer record is gone, but the configured PSKey is
+	// still resolvable (this is the central bug-fix invariant).
+	if _, ok := svc.peers[1]; ok {
+		t.Fatalf("active peer 1 still present after sweep")
+	}
+	if key, ok := svc.ControlKeyFor(1); !ok || key != "configured-key-1" {
+		t.Fatalf("ControlKeyFor(1) post-sweep: (%q, %v), want (\"configured-key-1\", true)", key, ok)
+	}
+}
+
+// TestControlStateReRegistrationAfterSweepWorks proves that after a peer
+// is swept and its active record is gone, the Edge can still authenticate
+// and re-register using its configured key.
+func TestControlStateReRegistrationAfterSweepWorks(t *testing.T) {
+	// Given a peer that registered once and is configured.
+	svc := NewControlState(ControlStateConfig{Now: currentTime, PeerAliveTimeout: 0})
+	svc.SetPreAuthorized(1, "configured-key-1")
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "configured-key-1"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// When the clock advances past the alive timeout (peer falls silent)
+	// and then the Edge re-registers using its configured PSKey.
+	svc.peerAliveTimeout = time.Minute
+	advance(2 * time.Minute)
+	advance(0)
+	svc.SweepTimeouts()
+	if _, ok := svc.peers[1]; ok {
+		t.Fatalf("active record should be gone")
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "configured-key-1"); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+
+	// Then the new active record is populated and visible.
+	if _, ok := svc.peers[1]; !ok {
+		t.Fatalf("re-register did not install active record")
+	}
+	if key, ok := svc.ControlKeyFor(1); !ok || key != "configured-key-1" {
+		t.Fatalf("ControlKeyFor(1) after re-register: (%q, %v)", key, ok)
+	}
+}
+
+// TestControlStateDeleteRemovesPreAuthorized proves DeletePeer removes the
+// active record AND the configured key in lock-step (so a deleted Edge
+// cannot re-authenticate with stale credentials).
+func TestControlStateDeleteRemovesPreAuthorized(t *testing.T) {
+	svc := NewControlState(ControlStateConfig{})
+	svc.SetPreAuthorized(7, "config-7")
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(7, "edge-7"), "config-7"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := svc.DeletePeer(context.Background(), 7); err != nil {
+		t.Fatalf("DeletePeer: %v", err)
+	}
+	if _, ok := svc.peers[7]; ok {
+		t.Fatalf("active peer still present")
+	}
+	if key, ok := svc.ControlKeyFor(7); ok {
+		t.Fatalf("ControlKeyFor(7) after DeletePeer: (%q, true), want ('', false)", key)
+	}
+}
+
+// TestControlStateSetPreAuthorizedInvalidatesOldKeyImmediately proves the
+// configured-key registry holds AT MOST ONE key per NodeID — installing a
+// new key immediately invalidates any prior key for the same NodeID, with
+// no observable difference to "deleted then added".
+func TestControlStateSetPreAuthorizedInvalidatesOldKeyImmediately(t *testing.T) {
+	svc := NewControlState(ControlStateConfig{})
+	svc.SetPreAuthorized(5, "old-key")
+	if key, ok := svc.ControlKeyFor(5); !ok || key != "old-key" {
+		t.Fatalf("first install: (%q, %v)", key, ok)
+	}
+	svc.SetPreAuthorized(5, "new-key")
+	if key, ok := svc.ControlKeyFor(5); !ok || key != "new-key" {
+		t.Fatalf("rotate: (%q, %v), want (\"new-key\", true)", key, ok)
+	}
+	// Old key must NOT be resolvable through any secondary lookup.
+	if _, ok := svc.preauthorized[5]; !ok || svc.preauthorized[5] != "new-key" {
+		t.Fatalf("preauthorized[5]=%q ok=%v, want \"new-key\" true", svc.preauthorized[5], ok)
+	}
+}
+
+// TestControlStateRemovePreAuthorizedDropsLookup proves RemovePreAuthorized
+// (used by ManageV2 rollback paths) removes the entry entirely so a
+// generic authentication failure is returned for that NodeID afterwards.
+func TestControlStateRemovePreAuthorizedDropsLookup(t *testing.T) {
+	svc := NewControlState(ControlStateConfig{})
+	svc.SetPreAuthorized(11, "k11")
+	if _, ok := svc.ControlKeyFor(11); !ok {
+		t.Fatalf("install failed")
+	}
+	svc.RemovePreAuthorized(11)
+	if key, ok := svc.ControlKeyFor(11); ok {
+		t.Fatalf("ControlKeyFor(11) after remove: (%q, true), want ('', false)", key)
+	}
+}
+
+// TestControlStateControlKeyForDoesNotResurrectPeer proves authentication
+// against the configured key does NOT install a peer record as a side
+// effect — only explicit Register / Report may create an active record.
+// An Edge must always follow up with Register after authenticating; the
+// registry is purely a credential store.
+func TestControlStateControlKeyForDoesNotResurrectPeer(t *testing.T) {
+	svc := NewControlState(ControlStateConfig{})
+	svc.SetPreAuthorized(13, "config-13")
+	if _, ok := svc.ControlKeyFor(13); !ok {
+		t.Fatalf("ControlKeyFor must resolve the configured key")
+	}
+	if _, ok := svc.peers[13]; ok {
+		t.Fatalf("ControlKeyFor side-effected an active peer record")
+	}
+	snap := svc.SnapshotFor(13)
+	if len(snap.Peers) != 0 {
+		t.Fatalf("snapshot for the requester contains other peers before any active registration: %+v", snap.Peers)
+	}
+}
+
 func TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps(t *testing.T) {
 	// Given a shared state with one target, readers, and live observers
 	svc := NewControlState(ControlStateConfig{PeerAliveTimeout: time.Hour})

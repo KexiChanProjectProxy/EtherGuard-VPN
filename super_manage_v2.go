@@ -238,9 +238,20 @@ func (m *ManageV2) AddPeer(ctx context.Context, req ManageAddPeerRequest) (Manag
 		return ManageAddPeerResult{}, fmt.Errorf("manage v2: state register: %w", err)
 	}
 
+	// Install the credential into the pre-authorized registry BEFORE the
+	// YAML write so a failed persist cleanly rolls back BOTH the active
+	// peer record AND the registry entry. ManageV2 holds its own mutex,
+	// the registry mutation is in-place, and no other goroutine races
+	// AddPeer for the same NodeID (duplicate checks above reject this).
+	m.state.SetPreAuthorized(req.NodeID, pskey)
+
 	// Persist to disk atomically. On any failure, roll back the state.
 	if err := m.atomicWriteConfigs(newBase, []*mtypes.EdgeConfigV2{&edgeProfile}); err != nil {
-		_ = m.state.DeletePeer(ctx, req.NodeID) // best-effort rollback
+		// Best-effort rollback: undo the registry install and the active
+		// peer record so the system never carries a configured key for a
+		// peer whose YAML did not survive.
+		m.state.RemovePreAuthorized(req.NodeID)
+		_ = m.state.DeletePeer(ctx, req.NodeID)
 		return ManageAddPeerResult{}, fmt.Errorf("manage v2: yaml write: %w", err)
 	}
 
@@ -321,6 +332,13 @@ func (m *ManageV2) UpdatePeer(ctx context.Context, req ManageUpdatePeerRequest) 
 		return fmt.Errorf("manage v2: state reregister: %w", err)
 	}
 
+	// Update the pre-authorized registry. A new ControlPSKey (rotation)
+	// MUST take effect immediately so the old key is invalidated even
+	// before the YAML write lands; pure AdditionalCost/NodeName-only
+	// updates reuse the existing key. The state mutation above already
+	// carried the new key into the active peer record when applicable.
+	m.state.SetPreAuthorized(req.NodeID, newPSKey)
+
 	// Decide whether the per-Edge YAML must be rewritten. If neither the
 	// control PSKey nor the NodeName changed, we only need to update the
 	// Super YAML (in case AdditionalCost changed).
@@ -330,8 +348,9 @@ func (m *ManageV2) UpdatePeer(ctx context.Context, req ManageUpdatePeerRequest) 
 		writes = append(writes, &edge)
 	}
 	if err := m.atomicWriteConfigs(newBase, writes); err != nil {
-		// Roll back: re-register the previous peer metadata, then
-		// re-write the prior Super YAML.
+		// Roll back: restore the prior registry key AND re-register the
+		// previous peer metadata, then re-write the prior Super YAML.
+		m.state.SetPreAuthorized(req.NodeID, cur.ControlPSKey)
 		if _, rerr := m.state.Register(ctx, mtypes.ControlV2RegisterRequest{
 			NodeID:   req.NodeID,
 			NodeName: cur.NodeName,
@@ -376,14 +395,18 @@ func (m *ManageV2) DeletePeer(ctx context.Context, req ManageDeletePeerRequest) 
 	newBase := cloneSuperConfigV2(m.baseConfig)
 	newBase.Peers = append(newBase.Peers[:idx], newBase.Peers[idx+1:]...)
 
-	// State mutation first (emits peer_gone once).
+	// State mutation first (emits peer_gone once AND clears the
+	// pre-authorized registry entry so the deleted Edge can no longer
+	// re-authenticate with its old credentials).
 	if err := m.state.DeletePeer(ctx, req.NodeID); err != nil {
 		return fmt.Errorf("manage v2: state delete: %w", err)
 	}
 
 	// Persist updated Super YAML atomically.
 	if err := m.atomicWriteConfigs(newBase, nil); err != nil {
-		// Roll back: re-register the peer (revives the entry point).
+		// Roll back: re-register the peer (revives the entry point) AND
+		// restore the registry key so a successful retry is consistent.
+		m.state.SetPreAuthorized(cur.NodeID, cur.ControlPSKey)
 		if _, rerr := m.state.Register(ctx, mtypes.ControlV2RegisterRequest{
 			NodeID:   cur.NodeID,
 			NodeName: cur.NodeName,

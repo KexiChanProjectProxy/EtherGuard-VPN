@@ -300,6 +300,23 @@ func TestHTTPOnlySuperEndToEndForcedRefreshCap(t *testing.T) {
 	defer cancel()
 	reporterC := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 103, topology.keyC)
 	reporterC.Now = topology.clock.Now
+	// C's runtime may not have completed its initial Register before this
+	// test sends a direct Report — the runtime registers asynchronously in
+	// super_http_runtime.go. Register C explicitly so the active peer
+	// record exists before the Report below; otherwise the new
+	// liveness-independent configured-key registry (Task 2) leaves no
+	// active record for seeded-but-unregistered peers.
+	if _, err := reporterC.Register(ctx, &mtypes.ControlV2RegisterRequest{
+		NodeID:         103,
+		NodeName:       "edge-c",
+		Version:        mtypes.ControlV2ProtocolVersion,
+		ListenPort:     103,
+		DesiredTTL:     64,
+		RequestedAt:    topology.clock.Now(),
+		Implementation: "etherguard",
+	}); err != nil {
+		t.Fatalf("register C before direct report: %v", err)
+	}
 	if err := reporterC.Report(ctx, &mtypes.ControlV2ReportRequest{
 		NodeID: 103,
 		Candidates: []mtypes.ControlV2Candidate{

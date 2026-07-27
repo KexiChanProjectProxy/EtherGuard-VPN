@@ -338,7 +338,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	// Edge actually reports.
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer seedCancel()
-	if err := seedConfiguredPeers(seedCtx, state, cfg.BaseConfig.Peers, now); err != nil {
+	if err := seedConfiguredPeers(seedCtx, state, cfg.BaseConfig.Peers); err != nil {
 		hub.Close()
 		return nil, err
 	}
@@ -565,24 +565,20 @@ func (r *superRuntime) runTicker(ctx context.Context) {
 // ---------------------------------------------------------------------------
 
 // seedConfiguredPeers installs each pre-authorized peer's control PSKey
-// into the ControlState by issuing a synthesized ControlV2Register request.
-// The synthesized request carries the configured NodeID/NodeName plus an
-// empty candidate list so the PeerAliveTimeout sweep eventually removes
-// peers that never report.
-func seedConfiguredPeers(ctx context.Context, state *ControlState, peers []mtypes.SuperConfigV2Peer, now func() time.Time) error {
+// directly into the ControlState's pre-authorized registry, bypassing the
+// active peer map. The registry is liveness-independent so SweepTimeouts
+// cannot strip the credential of an Edge that has not yet registered or
+// that has gone offline longer than PeerAliveTimeout; the Edge must call
+// Register explicitly to materialise an active peer record.
+func seedConfiguredPeers(ctx context.Context, state *ControlState, peers []mtypes.SuperConfigV2Peer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	for _, peer := range peers {
 		if err := peer.Validate(); err != nil {
 			return fmt.Errorf("super: invalid seed peer %d: %w", peer.NodeID, err)
 		}
-		req := mtypes.ControlV2RegisterRequest{
-			NodeID:      peer.NodeID,
-			NodeName:    peer.NodeName,
-			Version:     mtypes.ControlV2ProtocolVersion,
-			RequestedAt: now(),
-		}
-		if _, err := state.Register(ctx, req, peer.ControlPSKey); err != nil {
-			return fmt.Errorf("super: seed peer %d: %w", peer.NodeID, err)
-		}
+		state.SetPreAuthorized(peer.NodeID, peer.ControlPSKey)
 	}
 	return nil
 }

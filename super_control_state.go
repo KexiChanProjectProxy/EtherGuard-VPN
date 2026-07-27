@@ -48,8 +48,15 @@ type controlObservedVote struct {
 }
 
 type ControlState struct {
-	mu                 sync.RWMutex
-	peers              map[mtypes.Vertex]*controlPeerRecord
+	mu    sync.RWMutex
+	peers map[mtypes.Vertex]*controlPeerRecord
+	// preauthorized is the liveness-independent configured-key registry:
+	// each NodeID holds AT MOST ONE control PSKey, installed directly from
+	// SuperConfigV2.Peers at startup or via the ManageV2 service. The
+	// registry exists so authentication can resolve credentials for an
+	// Edge whose active peer record has been swept by SweepTimeouts (or
+	// has never registered at all). SweepTimeouts MUST NOT mutate it.
+	preauthorized      map[mtypes.Vertex]string
 	observedVotes      map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote
 	parameters         mtypes.ControlV2Parameters
 	graph              *graphpath.IG
@@ -65,7 +72,17 @@ func NewControlState(config ControlStateConfig) *ControlState {
 	if now == nil {
 		now = time.Now
 	}
-	return &ControlState{peers: make(map[mtypes.Vertex]*controlPeerRecord), observedVotes: make(map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote), parameters: cloneParameters(config.Parameters), graph: config.Graph, peerAliveTimeout: config.PeerAliveTimeout, usePSKForInterEdge: config.UsePSKForInterEdge, now: now, publish: config.Publish}
+	return &ControlState{
+		peers:              make(map[mtypes.Vertex]*controlPeerRecord),
+		preauthorized:      make(map[mtypes.Vertex]string),
+		observedVotes:      make(map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote),
+		parameters:         cloneParameters(config.Parameters),
+		graph:              config.Graph,
+		peerAliveTimeout:   config.PeerAliveTimeout,
+		usePSKForInterEdge: config.UsePSKForInterEdge,
+		now:                now,
+		publish:            config.Publish,
+	}
 }
 
 func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2RegisterRequest, controlPSKey string) (mtypes.ControlV2Snapshot, error) {
@@ -135,6 +152,7 @@ func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) err
 		return ErrControlStateUnknownPeer
 	}
 	delete(s.peers, nodeID)
+	delete(s.preauthorized, nodeID)
 	s.clearObservedVotesForObserverLocked(nodeID)
 	delete(s.observedVotes, nodeID)
 	name := peer.view.NodeName
@@ -254,11 +272,50 @@ func (s *ControlState) SnapshotFor(nodeID mtypes.Vertex) mtypes.ControlV2Snapsho
 func (s *ControlState) ControlKeyFor(nodeID mtypes.Vertex) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	peer, ok := s.peers[nodeID]
-	if !ok {
-		return "", false
+	// The pre-authorized registry is the liveness-independent source of
+	// truth for credentials — it survives SweepTimeouts and lets an Edge
+	// re-authenticate after being offline longer than PeerAliveTimeout.
+	// The active peer map may carry a fresher copy while the Edge is
+	// online; prefer it when present so key rotation in the registry has
+	// already propagated by the time auth runs.
+	if peer, ok := s.peers[nodeID]; ok {
+		return peer.controlKey, true
 	}
-	return peer.controlKey, true
+	if key, ok := s.preauthorized[nodeID]; ok && key != "" {
+		return key, true
+	}
+	return "", false
+}
+
+// SetPreAuthorized installs or replaces the configured control PSKey for
+// the given NodeID. It holds the write lock; callers MUST NOT be holding
+// any ControlState lock already. An empty pskey removes the entry (so
+// deletion and rollback paths share the same seam). The operation never
+// touches the active peer record — the Edge's own Register call is the
+// only way to publish an active record.
+func (s *ControlState) SetPreAuthorized(nodeID mtypes.Vertex, pskey string) {
+	if s == nil || nodeID.IsSpecial() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pskey == "" {
+		delete(s.preauthorized, nodeID)
+		return
+	}
+	s.preauthorized[nodeID] = pskey
+}
+
+// RemovePreAuthorized drops any configured key for the given NodeID. It
+// is a no-op when the NodeID is absent, so ManageV2 delete/rollback
+// paths can call it unconditionally.
+func (s *ControlState) RemovePreAuthorized(nodeID mtypes.Vertex) {
+	if s == nil || nodeID.IsSpecial() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.preauthorized, nodeID)
 }
 
 func (s *ControlState) Revision() uint64 {

@@ -418,10 +418,11 @@ func TestSuperRejectsInvalidV2Config(t *testing.T) {
 }
 
 // TestSuperSeededPeersHaveControlKeys proves that the initial Peers block
-// from the v2 YAML populates the ControlState with control PSKeys BEFORE
+// from the v2 YAML populates the Super's pre-authorized key registry BEFORE
 // the HTTP server accepts requests. A subsequent signed /edge/v2/snapshot
-// request from a seeded peer succeeds (proving the key is wired into the
-// auth verifier).
+// request from a seeded peer authenticates successfully (proving the key
+// is wired into the auth verifier) and receives an EMPTY peer list
+// because seeded-but-not-registered peers MUST NOT appear in snapshots.
 func TestSuperSeededPeersHaveControlKeys(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.Peers = []mtypes.SuperConfigV2Peer{
@@ -434,7 +435,10 @@ func TestSuperSeededPeersHaveControlKeys(t *testing.T) {
 	})
 	defer fx.Shutdown(context.Background())
 
-	// Both seeded peers must be able to fetch their snapshot.
+	// Both seeded peers authenticate successfully. Each snapshot is
+	// empty because the OTHER seeded peer has not actively registered
+	// either — snapshots only carry actively-registered, recently-observed
+	// peers.
 	for _, p := range cfg.Peers {
 		status, body := fx.signedGet(t, "/edge/v2/snapshot", p.NodeID, p.ControlPSKey)
 		if status != http.StatusOK {
@@ -444,11 +448,29 @@ func TestSuperSeededPeersHaveControlKeys(t *testing.T) {
 		if err := json.Unmarshal(body, &snap); err != nil {
 			t.Fatalf("peer %d decode snapshot: %v", p.NodeID, err)
 		}
-		// Self is filtered out; each peer sees the OTHER peer in its
-		// snapshot view (1 entry).
-		if len(snap.Peers) != 1 {
-			t.Fatalf("peer %d expected 1 other peer, got %d (%+v)", p.NodeID, len(snap.Peers), snap.Peers)
+		if len(snap.Peers) != 0 {
+			t.Fatalf("peer %d expected 0 other peers in snapshot, got %d (%+v)", p.NodeID, len(snap.Peers), snap.Peers)
 		}
+	}
+}
+
+// TestSuperSeededPeerWrongKeyRejected proves that a wrong/unknown
+// control key against a seeded NodeID yields a generic auth failure
+// (no oracle distinguishing "unknown NodeID" vs "wrong key").
+func TestSuperSeededPeerWrongKeyRejected(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+
+	fx := newRuntimeTestFixture(t, func(c *superConfig) {
+		c.BaseConfig = cfg
+	})
+	defer fx.Shutdown(context.Background())
+
+	status, _ := fx.signedGet(t, "/edge/v2/snapshot", 7, "totally-wrong-key")
+	if status != http.StatusUnauthorized && status != http.StatusForbidden {
+		t.Fatalf("wrong-key request status=%d, want 401 or 403", status)
 	}
 }
 

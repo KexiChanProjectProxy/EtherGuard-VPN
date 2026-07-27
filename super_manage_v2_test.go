@@ -692,6 +692,155 @@ func TestManageV2ControlStateUpdateParameters(t *testing.T) {
 	}
 }
 
+// TestManageV2AddPeerInstallsPreAuthorizedKeyOnRegistry proves that
+// AddPeer seeds the configured-key registry with the freshly generated
+// PSKey so the Edge can authenticate before its first Register round-trip.
+func TestManageV2AddPeerInstallsPreAuthorizedKeyOnRegistry(t *testing.T) {
+	mgr, state, _, _ := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("registry-key-1")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	key, ok := state.ControlKeyFor(1)
+	if !ok || key != "registry-key-1" {
+		t.Fatalf("ControlKeyFor(1): (%q, %v), want (\"registry-key-1\", true)", key, ok)
+	}
+	if _, exists := state.preauthorized[1]; !exists {
+		t.Fatalf("registry entry for peer 1 missing")
+	}
+}
+
+// TestManageV2UpdatePeerRotationReplacesRegistryKey proves that
+// ControlPSKey rotation immediately invalidates the previous configured
+// key — the registry holds AT MOST ONE key per NodeID.
+func TestManageV2UpdatePeerRotationReplacesRegistryKey(t *testing.T) {
+	mgr, state, _, _ := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("initial-key")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := mgr.UpdatePeer(context.Background(), ManageUpdatePeerRequest{NodeID: 1, ControlPSKey: "rotated-key"}); err != nil {
+		t.Fatalf("UpdatePeer: %v", err)
+	}
+	key, ok := state.ControlKeyFor(1)
+	if !ok || key != "rotated-key" {
+		t.Fatalf("ControlKeyFor(1) post-rotation: (%q, %v), want (\"rotated-key\", true)", key, ok)
+	}
+	if state.preauthorized[1] != "rotated-key" {
+		t.Fatalf("registry key: %q, want \"rotated-key\"", state.preauthorized[1])
+	}
+}
+
+// TestManageV2DeletePeerRemovesRegistryKey proves DeletePeer removes
+// both the active record and the registry entry in lock-step — a deleted
+// Edge cannot re-authenticate with its prior credentials.
+func TestManageV2DeletePeerRemovesRegistryKey(t *testing.T) {
+	mgr, state, _, _ := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("doomed-key")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	if err := mgr.DeletePeer(context.Background(), ManageDeletePeerRequest{NodeID: 1}); err != nil {
+		t.Fatalf("DeletePeer: %v", err)
+	}
+	if _, exists := state.preauthorized[1]; exists {
+		t.Fatalf("registry entry for deleted peer 1 still present: %q", state.preauthorized[1])
+	}
+	if key, ok := state.ControlKeyFor(1); ok {
+		t.Fatalf("ControlKeyFor(1) after delete: (%q, true), want ('', false)", key)
+	}
+}
+
+// TestManageV2YamlWriteFailureRollsBackRegistryKeyAdd proves that when a
+// freshly-AddedPeer's YAML write fails, the registry entry inserted by
+// AddPeer is removed in lock-step with the state rollback so the system
+// never holds a configured key for a peer that does not exist on disk.
+func TestManageV2YamlWriteFailureRollsBackRegistryKeyAdd(t *testing.T) {
+	mgr, state, _, dir := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("doomed-add-key")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("seed AddPeer: %v", err)
+	}
+	// Force subsequent YAML writes to fail.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Skipf("chmod failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	mgr.pskGen = fixedPSKSource("doomed-rollback-key")
+	_, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 2, NodeName: "beta"})
+	if err == nil {
+		t.Fatalf("AddPeer under read-only dir must fail")
+	}
+	// The registry must NOT carry an entry for the rolled-back peer.
+	if _, exists := state.preauthorized[2]; exists {
+		t.Fatalf("rolled-back AddPeer still in registry: %q", state.preauthorized[2])
+	}
+	if key, ok := state.ControlKeyFor(2); ok {
+		t.Fatalf("ControlKeyFor(2) after rollback: (%q, true), want ('', false)", key)
+	}
+}
+
+// TestManageV2YamlWriteFailureRollsBackRegistryKeyRotation proves the
+// rotation rollback path: when YAML write fails after ControlPSKey
+// rotation, the registry must be restored to the prior key so the
+// operator can retry.
+func TestManageV2YamlWriteFailureRollsBackRegistryKeyRotation(t *testing.T) {
+	mgr, state, _, dir := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("original-key")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("seed AddPeer: %v", err)
+	}
+	originalKey, _ := state.ControlKeyFor(1)
+	if originalKey != "original-key" {
+		t.Fatalf("setup ControlKeyFor(1): %q", originalKey)
+	}
+	// Rotate, then force YAML write to fail on subsequent change.
+	if err := mgr.UpdatePeer(context.Background(), ManageUpdatePeerRequest{NodeID: 1, ControlPSKey: "intermediate-key"}); err != nil {
+		t.Fatalf("UpdatePeer: %v", err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Skipf("chmod failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := mgr.UpdatePeer(context.Background(), ManageUpdatePeerRequest{NodeID: 1, ControlPSKey: "final-key"}); err == nil {
+		t.Fatalf("UpdatePeer under read-only dir must fail")
+	}
+	// The registry must be restored to the prior (intermediate) key.
+	got, ok := state.ControlKeyFor(1)
+	if !ok || got != "intermediate-key" {
+		t.Fatalf("ControlKeyFor(1) after rotation rollback: (%q, %v), want (\"intermediate-key\", true)", got, ok)
+	}
+}
+
+// TestManageV2YamlWriteFailureRollsBackRegistryKeyDelete proves the
+// delete rollback path: when YAML write fails after DeletePeer, the
+// registry entry is restored in lock-step with the active peer so the
+// subsequent retry is consistent.
+func TestManageV2YamlWriteFailureRollsBackRegistryKeyDelete(t *testing.T) {
+	mgr, state, _, dir := newManageV2UnderTest(t)
+	mgr.pskGen = fixedPSKSource("delete-rollback-key")
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 1, NodeName: "alpha"}); err != nil {
+		t.Fatalf("seed AddPeer: %v", err)
+	}
+	// Force the delete-time YAML write to fail.
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Skipf("chmod failed: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := mgr.DeletePeer(context.Background(), ManageDeletePeerRequest{NodeID: 1}); err == nil {
+		t.Fatalf("DeletePeer under read-only dir must fail")
+	}
+	if _, exists := state.preauthorized[1]; !exists {
+		t.Fatalf("rolled-back DeletePeer missing registry entry")
+	}
+	if key, ok := state.ControlKeyFor(1); !ok || key != "delete-rollback-key" {
+		t.Fatalf("ControlKeyFor(1) after delete rollback: (%q, %v), want (\"delete-rollback-key\", true)", key, ok)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
