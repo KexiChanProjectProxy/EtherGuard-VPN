@@ -623,6 +623,98 @@ func TestControlStateControlKeyForDoesNotResurrectPeer(t *testing.T) {
 	}
 }
 
+// TestControlStateParametersCloneIsolationPointeeMutation proves the
+// clone semantics of every projection path (construction via
+// NewControlState, UpdateParameters, SnapshotFor, and the
+// ParametersForBootstrap accessor) are deep: mutating the pointee of
+// a cloned entry's *int Port or *ListenPortRange Range must NOT
+// change the authoritative state. A shallow slice copy that aliases
+// the pointer fields would mutate the same backing memory, and this
+// test would fail at the assert-current step.
+func TestControlStateParametersCloneIsolationPointeeMutation(t *testing.T) {
+	port8080 := 8080
+	port9090 := 9090
+	cfg := validBaseConfig()
+	cfg.ListenPortPriority = mtypes.ListenPortPriority{
+		{Port: &port8080},
+		{Range: &mtypes.ListenPortRange{From: 41000, To: 41002}},
+		{Port: &port9090},
+	}
+	svc := NewControlState(ControlStateConfig{Parameters: buildControlV2Parameters(cfg)})
+
+	// Helper: read the current authoritative policy via the accessor,
+	// then mutate every pointee in the returned copy and assert the
+	// accessor still returns the original values.
+	assertUnchanged := func(stage string) {
+		t.Helper()
+		current := svc.ParametersForBootstrap()
+		if len(current.ListenPortPriority) != 3 {
+			t.Fatalf("%s: policy length=%d want 3", stage, len(current.ListenPortPriority))
+		}
+		if current.ListenPortPriority[0].Port == nil || *current.ListenPortPriority[0].Port != 8080 {
+			t.Fatalf("%s: entry[0] Port = %v, want 8080", stage, current.ListenPortPriority[0].Port)
+		}
+		if current.ListenPortPriority[1].Range == nil || current.ListenPortPriority[1].Range.From != 41000 || current.ListenPortPriority[1].Range.To != 41002 {
+			t.Fatalf("%s: entry[1] Range = %+v, want {41000,41002}", stage, current.ListenPortPriority[1].Range)
+		}
+		if current.ListenPortPriority[2].Port == nil || *current.ListenPortPriority[2].Port != 9090 {
+			t.Fatalf("%s: entry[2] Port = %v, want 9090", stage, current.ListenPortPriority[2].Port)
+		}
+	}
+
+	// 1. Accessor (ParametersForBootstrap) clones the stored parameters.
+	mutBootstrap := svc.ParametersForBootstrap()
+	*mutBootstrap.ListenPortPriority[0].Port = 1
+	mutBootstrap.ListenPortPriority[1].Range.From = 1
+	mutBootstrap.ListenPortPriority[1].Range.To = 2
+	*mutBootstrap.ListenPortPriority[2].Port = 3
+	assertUnchanged("accessor clone")
+
+	// 2. Snapshot projection (SnapshotFor) clones the stored parameters.
+	mutSnap := svc.SnapshotFor(1)
+	*mutSnap.Parameters.ListenPortPriority[0].Port = 10
+	mutSnap.Parameters.ListenPortPriority[1].Range.From = 11
+	mutSnap.Parameters.ListenPortPriority[1].Range.To = 12
+	*mutSnap.Parameters.ListenPortPriority[2].Port = 13
+	assertUnchanged("snapshot clone")
+
+	// 3. UpdateParameters path: install a fresh policy, mutate the SSE
+	// payload + accessor return, then mutate the next UpdateParameters
+	// input to a new policy and assert the prior update's pointee
+	// mutations never bled into stored state.
+	port7000 := 7000
+	updated := mtypes.ControlV2Parameters{
+		ProtocolVersion:     mtypes.ControlV2ProtocolVersion,
+		STUNServers:         []string{"stun:203.0.113.10:3478"},
+		PollInterval:        15 * time.Second,
+		STUNRequestTimeout:  3 * time.Second,
+		STUNRefreshInterval: 60 * time.Second,
+		ReportInterval:      15 * time.Second,
+		HeartbeatInterval:   10 * time.Second,
+		EventReplay:         256,
+		ListenPortPriority:  mtypes.ListenPortPriority{{Port: &port7000}},
+	}
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) {
+		events = append(events, event)
+	})
+	if err := svc.UpdateParameters(context.Background(), updated); err != nil {
+		t.Fatalf("UpdateParameters: %v", err)
+	}
+	payload, ok := events[0].Data.(mtypes.ControlV2Parameters)
+	if !ok || len(payload.ListenPortPriority) != 1 {
+		t.Fatalf("SSE payload=%#v", events[0].Data)
+	}
+	*payload.ListenPortPriority[0].Port = 9999
+	if cur := svc.ParametersForBootstrap(); cur.ListenPortPriority[0].Port == nil || *cur.ListenPortPriority[0].Port != 7000 {
+		t.Fatalf("SSE payload mutation bled into stored policy: %+v", cur.ListenPortPriority)
+	}
+	port7000 = 55555 // mutate the caller's pointer AFTER UpdateParameters; stored copy must remain 7000
+	if cur := svc.ParametersForBootstrap(); cur.ListenPortPriority[0].Port == nil || *cur.ListenPortPriority[0].Port != 7000 {
+		t.Fatalf("call-site pointer mutation bled into stored copy: %+v", cur.ListenPortPriority)
+	}
+}
+
 func TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps(t *testing.T) {
 	// Given a shared state with one target, readers, and live observers
 	svc := NewControlState(ControlStateConfig{PeerAliveTimeout: time.Hour})
