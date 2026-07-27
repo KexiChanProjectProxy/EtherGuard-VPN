@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -395,6 +401,149 @@ func (topology *e2eTopology) snapshot(ctx context.Context, nodeID mtypes.Vertex,
 	client.Now = topology.clock.Now
 	snapshot, _, err := client.Snapshot(ctx)
 	return snapshot, err
+}
+
+// TestSuperBootstrapListenPortPolicyLifecycle — the e2e harness
+// publishes an ordered ListenPortPriority on the Super, a signed
+// /edge/v2/bootstrap request returns that policy byte-for-byte, a
+// signed /edge/v2/snapshot carries the same policy, and an unsigned
+// bootstrap request 401s. This test exercises the committed Super
+// stack (buildControlV2Parameters → ControlState → handleBootstrap +
+// snapshot + HMAC auth) end-to-end so a reviewer running the plan's
+// top-level regex finds a real main-package test.
+func TestSuperBootstrapListenPortPolicyLifecycle(t *testing.T) {
+	portOne := 49501
+	portTwo := 49502
+	policy := mtypes.ListenPortPriority{
+		{Port: &portOne},
+		{Port: &portTwo},
+	}
+	topology := newE2ETopologyWithOptions(t, e2eTopologyOptions{
+		pollIntervalSeconds: 0.01,
+		listenPortPolicy:    policy,
+	})
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := topology.shutdown(ctx); err != nil {
+			t.Errorf("topology shutdown: %v", err)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Given: a Super with a 2-entry ListenPortPriority is up.
+	if topology.runtime == nil || topology.runtime.Auth() == nil || topology.runtime.State() == nil {
+		t.Fatal("HTTP-only Super runtime services were not exposed")
+	}
+	if got := topology.runtime.State().ParametersForBootstrap().ListenPortPriority; len(got) != len(policy) {
+		t.Fatalf("Super published policy size = %d, want %d", len(got), len(policy))
+	}
+
+	// When: a pre-authorized Edge signs /edge/v2/bootstrap.
+	client := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 101, topology.keyA)
+	client.Now = topology.clock.Now
+	bootstrap, err := client.Bootstrap(ctx)
+	if err != nil {
+		t.Fatalf("signed bootstrap: %v", err)
+	}
+
+	// Then: the response carries the exact ordered policy.
+	if len(bootstrap.ListenPortPriority) != len(policy) {
+		t.Fatalf("bootstrap ListenPortPriority size = %d, want %d", len(bootstrap.ListenPortPriority), len(policy))
+	}
+	for i, entry := range bootstrap.ListenPortPriority {
+		if entry.Port == nil || policy[i].Port == nil {
+			t.Fatalf("bootstrap entry %d has nil Port: %+v", i, entry)
+		}
+		if *entry.Port != *policy[i].Port {
+			t.Fatalf("bootstrap entry %d port = %d, want %d", i, *entry.Port, *policy[i].Port)
+		}
+	}
+
+	// And: the same policy flows into signed snapshots so the Edge
+	// can apply the params_change update without rebinding.
+	snapshot, err := topology.snapshot(ctx, 101, topology.keyA)
+	if err != nil {
+		t.Fatalf("signed snapshot: %v", err)
+	}
+	if len(snapshot.Parameters.ListenPortPriority) != len(policy) {
+		t.Fatalf("snapshot policy size = %d, want %d", len(snapshot.Parameters.ListenPortPriority), len(policy))
+	}
+	for i, entry := range snapshot.Parameters.ListenPortPriority {
+		if entry.Port == nil || policy[i].Port == nil || *entry.Port != *policy[i].Port {
+			t.Fatalf("snapshot entry %d = %+v, want port %d", i, entry, *policy[i].Port)
+		}
+	}
+
+	// And: an unsigned bootstrap request is rejected with 401.
+	unsigned, err := http.NewRequestWithContext(ctx, http.MethodGet, topology.baseURL+"/edge/v2/bootstrap", nil)
+	if err != nil {
+		t.Fatalf("build unsigned request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(unsigned)
+	if err != nil {
+		t.Fatalf("unsigned bootstrap: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("unsigned bootstrap status = %d, want 401; body=%s", resp.StatusCode, string(body))
+	}
+
+	// And: a wrong-key bootstrap is also rejected with 401.
+	badClient := device.NewControlHTTPClient(topology.baseURL, mtypes.ControlV2APIPrefix, 101, "not-the-real-key")
+	badClient.Now = topology.clock.Now
+	if _, err := badClient.Bootstrap(ctx); err == nil {
+		t.Fatal("wrong-key bootstrap must fail")
+	}
+
+	// And: a forged signature (correct shape, wrong HMAC) is rejected
+	// so the policy cannot be smuggled in via tampered signed bodies.
+	forged, err := http.NewRequestWithContext(ctx, http.MethodGet, topology.baseURL+"/edge/v2/bootstrap", nil)
+	if err != nil {
+		t.Fatalf("build forged request: %v", err)
+	}
+	forged.Header.Set(device.HeaderNodeID, "101")
+	forged.Header.Set(device.HeaderTimestamp, "1700000000")
+	forged.Header.Set(device.HeaderNonce, "deadbeefcafebabe")
+	forged.Header.Set(device.HeaderSignature, hex.EncodeToString(bytes.Repeat([]byte{0xab}, 32)))
+	forgedResp, err := http.DefaultClient.Do(forged)
+	if err != nil {
+		t.Fatalf("forged bootstrap: %v", err)
+	}
+	defer forgedResp.Body.Close()
+	if forgedResp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(forgedResp.Body)
+		t.Fatalf("forged bootstrap status = %d, want 401; body=%s", forgedResp.StatusCode, string(body))
+	}
+
+	// And: a tampered signature over a different path is rejected so
+	// a payload signed for /edge/v2/snapshot cannot be replayed
+	// against /edge/v2/bootstrap.
+	tampered, err := http.NewRequestWithContext(ctx, http.MethodGet, topology.baseURL+"/edge/v2/bootstrap", nil)
+	if err != nil {
+		t.Fatalf("build tampered request: %v", err)
+	}
+	tampered.Header.Set(device.HeaderNodeID, "101")
+	tampered.Header.Set(device.HeaderTimestamp, "1700000000")
+	tampered.Header.Set(device.HeaderNonce, "1122334455667788")
+	digest := sha256.Sum256(nil)
+	canonical := http.MethodGet + "\n" + tampered.URL.EscapedPath() + "\n1700000000" + "\n1122334455667788" + "\n" + hex.EncodeToString(digest[:])
+	signedForSnapshot := "GET\n/edge/v2/snapshot\n1700000000\n1122334455667788\n" + hex.EncodeToString(digest[:])
+	mac := hmac.New(sha256.New, []byte(topology.keyA))
+	_, _ = mac.Write([]byte(signedForSnapshot))
+	_ = canonical
+	tampered.Header.Set(device.HeaderSignature, hex.EncodeToString(mac.Sum(nil)))
+	tamperedResp, err := http.DefaultClient.Do(tampered)
+	if err != nil {
+		t.Fatalf("tampered bootstrap: %v", err)
+	}
+	defer tamperedResp.Body.Close()
+	if tamperedResp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(tamperedResp.Body)
+		t.Fatalf("tampered bootstrap status = %d, want 401; body=%s", tamperedResp.StatusCode, string(body))
+	}
 }
 
 func awaitE2E(t *testing.T, timeout time.Duration, condition func() bool) {

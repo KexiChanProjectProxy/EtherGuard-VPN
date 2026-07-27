@@ -345,6 +345,10 @@ type e2eTopologyOptions struct {
 	allowBInitiation    bool
 	twoEdges            bool
 	blockCEvents        bool
+	// listenPortPolicy, when non-nil, sets the Super's published
+	// ListenPortPriority. Used by the bootstrap-listening-port
+	// integration test; leave nil for the default empty policy.
+	listenPortPolicy mtypes.ListenPortPriority
 }
 
 type e2eRetryConfig struct {
@@ -413,6 +417,9 @@ func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTop
 	base.HeartbeatIntervalSeconds = 1
 	base.PeerAliveTimeoutSeconds = 3600
 	base.UsePSKForInterEdge = false
+	if options.listenPortPolicy != nil {
+		base.ListenPortPriority = options.listenPortPolicy
+	}
 
 	keyA := "edge-a-control-key"
 	keyB := "edge-b-control-key"
