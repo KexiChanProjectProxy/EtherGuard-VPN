@@ -105,6 +105,34 @@ func TestGeneratedControlKeysAreIsolated(t *testing.T) {
 	}
 }
 
+// TestGetExampleSuperConfListenPortPriority pins the example Super
+// generator output to carry the Super-owned ordered listen-port policy
+// exactly as documented. The generated candidate set must expand to
+// [16386] so any downstream Edge that registers against an example
+// Super sees a single, predictable bind. If this test fails, an
+// operator removed the policy from the example config — restore it or
+// update the docs contract test that pins the YAML grammar.
+//
+// GetExampleSuperConf returns a non-nil fs.PathError even when the
+// empty template path is requested (the example path is the canonical
+// "no template" case). The returned config is the source of truth; we
+// assert on cfg.ListenPortPriority directly and ignore the trailing
+// sentinel error.
+func TestGetExampleSuperConfListenPortPriority(t *testing.T) {
+	// Given
+	cfg, _ := GetExampleSuperConf("", false)
+	// When
+	ports, err := cfg.ListenPortPriority.Expand()
+	// Then
+	if err != nil {
+		t.Fatalf("ListenPortPriority.Expand() error = %v", err)
+	}
+	want := []int{16386}
+	if len(ports) != len(want) || ports[0] != want[0] {
+		t.Fatalf("example Super policy = %v, want %v", ports, want)
+	}
+}
+
 func writeSuperGeneratorInput(t *testing.T, outputDir string) string {
 	t.Helper()
 	input := "Config output dir: " + outputDir + `
