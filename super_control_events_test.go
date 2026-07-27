@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -829,6 +830,102 @@ func TestControlEventsReplayFromExactID(t *testing.T) {
 // TestControlEventsDataJSON verifies that arbitrary Data payloads
 // round-trip through the SSE renderer as JSON. This is what the
 // task-4 SSEParser decodes.
+func TestControlEventsParamsChangeCarriesListenPortPolicy(t *testing.T) {
+	hub := NewControlEventHub(4)
+	defer hub.Close()
+
+	port := 51820
+	policy := mtypes.ListenPortPriority{{Port: &port}, {Range: &mtypes.ListenPortRange{From: 41000, To: 41002}}}
+	payload := mtypes.ControlV2Parameters{
+		ProtocolVersion:     mtypes.ControlV2ProtocolVersion,
+		STUNServers:         []string{"stun:203.0.113.10:3478"},
+		PollInterval:        15 * time.Second,
+		STUNRequestTimeout:  3 * time.Second,
+		STUNRefreshInterval: 60 * time.Second,
+		ReportInterval:      15 * time.Second,
+		HeartbeatInterval:   10 * time.Second,
+		EventReplay:         256,
+		ListenPortPriority:  policy,
+	}
+	hub.Publish(mtypes.ControlV2Event{Type: mtypes.ControlV2EventParamsChange, Revision: 1, Data: payload})
+
+	var buf syncBuffer
+	bw := newFlushWriter(&buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := hub.ServeSSE(ctx, bw, "", SSEOptions{Heartbeat: 1 * time.Hour}); err != nil {
+		t.Fatalf("ServeSSE: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bw.Flush()
+		if bytes.Contains(buf.Bytes(), []byte(`"ListenPortPriority":`)) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	wire := buf.Bytes()
+	if !bytes.Contains(wire, []byte(`"ListenPortPriority":`)) {
+		t.Fatalf("SSE frame missing ListenPortPriority: %s", wire)
+	}
+	if !bytes.Contains(wire, []byte(`"port":51820`)) {
+		t.Fatalf("SSE frame missing ordered port entry: %s", wire)
+	}
+	if !bytes.Contains(wire, []byte(`"from":41000`)) || !bytes.Contains(wire, []byte(`"to":41002`)) {
+		t.Fatalf("SSE frame missing range entry: %s", wire)
+	}
+	idxPort := bytes.Index(wire, []byte(`"port":51820`))
+	idxRange := bytes.Index(wire, []byte(`"from":41000`))
+	if idxPort < 0 || idxRange < 0 || idxPort > idxRange {
+		t.Fatalf("SSE frame order port=%d range=%d want port<range: %s", idxPort, idxRange, wire)
+	}
+}
+
+func TestControlEventsAbsentListenPortPolicyDecodesForOldConsumers(t *testing.T) {
+	hub := NewControlEventHub(4)
+	defer hub.Close()
+
+	hub.Publish(mtypes.ControlV2Event{Type: mtypes.ControlV2EventParamsChange, Revision: 1, Data: mtypes.ControlV2Parameters{
+		ProtocolVersion:     mtypes.ControlV2ProtocolVersion,
+		PollInterval:        15 * time.Second,
+		STUNRequestTimeout:  3 * time.Second,
+		STUNRefreshInterval: 60 * time.Second,
+		ReportInterval:      15 * time.Second,
+		HeartbeatInterval:   10 * time.Second,
+		EventReplay:         256,
+	}})
+
+	var buf syncBuffer
+	bw := newFlushWriter(&buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := hub.ServeSSE(ctx, bw, "", SSEOptions{Heartbeat: 1 * time.Hour}); err != nil {
+		t.Fatalf("ServeSSE: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bw.Flush()
+		if bytes.Contains(buf.Bytes(), []byte("event: params_change")) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	wire := buf.Bytes()
+	var decoded struct {
+		ListenPortPriority mtypes.ListenPortPriority `json:"ListenPortPriority"`
+	}
+	for _, line := range bytes.Split(wire, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			if err := json.Unmarshal(line[6:], &decoded); err != nil {
+				t.Fatalf("decode: %v on %s", err, line)
+			}
+		}
+	}
+	if len(decoded.ListenPortPriority) != 0 {
+		t.Fatalf("absent policy decoded as %d entries, want 0: %#v", len(decoded.ListenPortPriority), decoded.ListenPortPriority)
+	}
+}
+
 func TestControlEventsDataJSON(t *testing.T) {
 	hub := NewControlEventHub(4)
 	defer hub.Close()

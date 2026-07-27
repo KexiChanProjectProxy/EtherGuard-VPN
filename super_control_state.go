@@ -529,6 +529,17 @@ func (s *ControlState) emit(kind mtypes.ControlV2EventType, id mtypes.Vertex, na
 // production use is obvious at the call site. Caller MUST serialise with
 // concurrent Register / Report / SweepTimeouts calls (the test harness
 // calls it before any traffic flows).
+// ParametersForBootstrap returns a deep copy of the currently-published
+// control parameters. Bootstrap handlers (introduced in a later task)
+// hand this value to an Edge so the Edge receives an isolated snapshot
+// that cannot mutate the authoritative state when mutated locally.
+// Reads are concurrent-safe with UpdateParameters / SnapshotFor.
+func (s *ControlState) ParametersForBootstrap() mtypes.ControlV2Parameters {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneParameters(s.parameters)
+}
+
 func (s *ControlState) SetPublishForTest(fn func(mtypes.ControlV2Event)) {
 	if s == nil {
 		return
@@ -549,7 +560,27 @@ func cloneCandidates(in []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate
 }
 func cloneParameters(in mtypes.ControlV2Parameters) mtypes.ControlV2Parameters {
 	in.STUNServers = append([]string{}, in.STUNServers...)
+	in.ListenPortPriority = cloneListenPortPriority(in.ListenPortPriority)
 	return in
+}
+
+func cloneListenPortPriority(in mtypes.ListenPortPriority) mtypes.ListenPortPriority {
+	if in == nil {
+		return nil
+	}
+	out := make(mtypes.ListenPortPriority, len(in))
+	for i, entry := range in {
+		out[i] = entry
+		if entry.Port != nil {
+			p := *entry.Port
+			out[i].Port = &p
+		}
+		if entry.Range != nil {
+			r := *entry.Range
+			out[i].Range = &r
+		}
+	}
+	return out
 }
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {

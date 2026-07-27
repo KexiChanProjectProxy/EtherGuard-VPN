@@ -47,6 +47,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -451,6 +452,79 @@ func TestSuperSeededPeersHaveControlKeys(t *testing.T) {
 		if len(snap.Peers) != 0 {
 			t.Fatalf("peer %d expected 0 other peers in snapshot, got %d (%+v)", p.NodeID, len(snap.Peers), snap.Peers)
 		}
+	}
+}
+
+// TestSuperStartupPublishesListenPortPolicy proves the Super YAML
+// ListenPortPriority is projected into the published control parameter
+// stream during startup, BEFORE the HTTP listener accepts requests. An
+// invalid policy must fail the config validation step before the
+// listener binds.
+func TestSuperStartupPublishesListenPortPolicy(t *testing.T) {
+	port := 51820
+	policy := mtypes.ListenPortPriority{{Port: &port}, {Range: &mtypes.ListenPortRange{From: 41000, To: 41002}}}
+	cfg := validBaseConfig()
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+	cfg.ListenPortPriority = policy
+
+	fx := newRuntimeTestFixture(t, func(c *superConfig) { c.BaseConfig = cfg })
+	defer fx.Shutdown(context.Background())
+
+	status, body := fx.signedGet(t, "/edge/v2/snapshot", 7, "seed-key-7")
+	if status != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", status, body)
+	}
+	var snap mtypes.ControlV2Snapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Parameters.ListenPortPriority, policy) {
+		t.Fatalf("snapshot policy=%#v want %#v", snap.Parameters.ListenPortPriority, policy)
+	}
+	if &snap.Parameters.ListenPortPriority[0] == &policy[0] {
+		t.Fatal("snapshot policy aliases config slice")
+	}
+}
+
+// TestSuperStartupRejectsInvalidListenPortPolicy proves an invalid policy
+// fails config validation BEFORE the HTTP listener accepts requests.
+func TestSuperStartupRejectsInvalidListenPortPolicy(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+	cfg.ListenPortPriority = mtypes.ListenPortPriority{{}} // neither Port nor Range
+
+	edgeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	manageLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer edgeLn.Close()
+	defer manageLn.Close()
+
+	_, err = RunWithListeners(&superConfig{
+		BaseConfig:      cfg,
+		EdgeTemplate:    validEdgeTemplate(),
+		ConfigDir:       t.TempDir(),
+		EdgeListen:      edgeLn,
+		ManageListen:    manageLn,
+		ShutdownTimeout: 5 * time.Second,
+		TickInterval:    200 * time.Millisecond,
+	})
+	if err == nil {
+		t.Fatal("RunWithListeners accepted invalid policy")
+	}
+	if !mtypes.IsControlV2Error(err) {
+		t.Fatalf("expected *mtypes.ControlV2Error, got %T: %v", err, err)
+	}
+	if code := mtypes.ErrorCode(err); code != mtypes.ControlV2ErrInvalidCandidate {
+		t.Fatalf("error code=%q want %q", code, mtypes.ControlV2ErrInvalidCandidate)
 	}
 }
 
