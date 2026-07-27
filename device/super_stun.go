@@ -65,36 +65,44 @@ func (manager *SuperSTUNManager) Discover(ctx context.Context, servers []string,
 	if timeout <= 0 {
 		timeout = time.Second
 	}
-	candidates := make([]mtypes.ControlV2Candidate, 0, len(servers))
-	seen := make(map[string]struct{})
+	candidates := make([]mtypes.ControlV2Candidate, 0)
+	seenIPs := make(map[string]struct{})
+	var mappedPort int
+	var portSet bool
 	for _, raw := range servers {
-		requestContext, cancel := manager.withTimeout(ctx, timeout)
-		addresses, err := manager.resolveAddresses(requestContext, raw)
+		resolveCtx, cancel := manager.withTimeout(ctx, timeout)
+		addresses, err := manager.resolveAddresses(resolveCtx, raw)
+		cancel()
 		if err != nil {
-			if requestContext.Err() != nil {
-				cancel()
+			if ctx.Err() != nil {
 				return candidates
 			}
-			cancel()
 			continue
 		}
 		for _, address := range addresses {
-			mapped, requestErr := manager.request(requestContext, address, timeout)
+			mapped, requestErr := manager.request(ctx, address, timeout)
 			if requestErr != nil {
-				if requestContext.Err() != nil {
-					break
+				if ctx.Err() != nil || manager.isClosed() {
+					return candidates
 				}
 				continue
 			}
-			candidateAddress := net.JoinHostPort(mapped.IP.String(), strconv.Itoa(mapped.Port))
-			if _, ok := seen[candidateAddress]; ok {
+			if !portSet {
+				mappedPort = mapped.Port
+				portSet = true
+			} else if mapped.Port != mappedPort {
+				if manager.device != nil && manager.device.log != nil {
+					manager.device.log.Errorf("STUN mapped port mismatch: expected %d, got %d from %s", mappedPort, mapped.Port, address)
+				}
+			}
+			ipStr := mapped.IP.String()
+			if _, ok := seenIPs[ipStr]; ok {
 				continue
 			}
-			seen[candidateAddress] = struct{}{}
+			seenIPs[ipStr] = struct{}{}
+			candidateAddress := net.JoinHostPort(ipStr, strconv.Itoa(mapped.Port))
 			candidates = append(candidates, mtypes.ControlV2Candidate{Address: candidateAddress, Source: mtypes.ControlV2CandidateSTUN})
-			break
 		}
-		cancel()
 		if ctx.Err() != nil || manager.isClosed() {
 			return candidates
 		}

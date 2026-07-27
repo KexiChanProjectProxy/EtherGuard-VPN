@@ -3,7 +3,9 @@ package device
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -26,23 +28,25 @@ func (e stunTestEndpoint) DstIP() net.IP {
 func (e stunTestEndpoint) SrcIP() net.IP { return nil }
 
 type sameBindSTUNFake struct {
-	port      uint16
-	responses map[string]net.IP
-	delay     map[string]time.Duration
-	incoming  chan []byte
-	sent      chan string
-	closed    chan struct{}
-	closeOnce sync.Once
+	port          uint16
+	responses     map[string]net.IP
+	responsePorts map[string]uint16
+	delay         map[string]time.Duration
+	incoming      chan []byte
+	sent          chan string
+	closed        chan struct{}
+	closeOnce     sync.Once
 }
 
 func newSameBindSTUNFake(port uint16) *sameBindSTUNFake {
 	return &sameBindSTUNFake{
-		port:      port,
-		responses: make(map[string]net.IP),
-		delay:     make(map[string]time.Duration),
-		incoming:  make(chan []byte, 8),
-		sent:      make(chan string, 8),
-		closed:    make(chan struct{}),
+		port:          port,
+		responses:     make(map[string]net.IP),
+		responsePorts: make(map[string]uint16),
+		delay:         make(map[string]time.Duration),
+		incoming:      make(chan []byte, 8),
+		sent:          make(chan string, 8),
+		closed:        make(chan struct{}),
 	}
 }
 
@@ -76,7 +80,11 @@ func (b *sameBindSTUNFake) Send(packet []byte, endpoint conn.Endpoint) error {
 	if !ok {
 		return nil
 	}
-	response, err := stun.Build(stun.BindingSuccess, stun.NewTransactionIDSetter(tx), &stun.XORMappedAddress{IP: mappedIP, Port: int(b.port)}, stun.Fingerprint)
+	mappedPort := b.port
+	if override, hasOverride := b.responsePorts[endpoint.DstToString()]; hasOverride {
+		mappedPort = override
+	}
+	response, err := stun.Build(stun.BindingSuccess, stun.NewTransactionIDSetter(tx), &stun.XORMappedAddress{IP: mappedIP, Port: int(mappedPort)}, stun.Fingerprint)
 	if err != nil {
 		return err
 	}
@@ -341,6 +349,105 @@ func TestSuperSTUNRefreshRetainsLocalCandidatesAndDeduplicatesMappings(t *testin
 	}
 	if candidates[1].Address != "198.51.100.3:51820" || candidates[1].Source != mtypes.ControlV2CandidateSTUN {
 		t.Fatalf("refreshed STUN candidate = %#v", candidates)
+	}
+}
+
+func TestSuperSTUNDiscoversBothFamiliesFromSingleHostname(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40103)
+	bind.responses["203.0.113.90:3478"] = net.ParseIP("198.51.100.90")
+	bind.responses["[2001:db8::90]:3478"] = net.ParseIP("2001:db8::1234")
+	device := &Device{}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	manager.resolver = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		if host != "dual.example.test" {
+			t.Fatalf("resolver host = %q", host)
+		}
+		return []net.IPAddr{
+			{IP: net.ParseIP("203.0.113.90")},
+			{IP: net.ParseIP("2001:db8::90")},
+		}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiveSTUNTestPackets(ctx, manager, bind.receive)
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun://dual.example.test:3478"}, 100*time.Millisecond)
+
+	// Then
+	if len(candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2: %#v", len(candidates), candidates)
+	}
+	seen := make(map[string]bool)
+	for _, candidate := range candidates {
+		seen[candidate.Address] = true
+	}
+	if !seen["198.51.100.90:40103"] {
+		t.Fatalf("IPv4 candidate missing: %#v", candidates)
+	}
+	if !seen["[2001:db8::1234]:40103"] {
+		t.Fatalf("IPv6 candidate missing: %#v", candidates)
+	}
+}
+
+func TestSuperSTUNDeduplicatesMappedIPsAcrossServers(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40104)
+	bind.responses["203.0.113.91:3478"] = net.ParseIP("198.51.100.91")
+	bind.responses["203.0.113.92:3478"] = net.ParseIP("198.51.100.91") // same mapped IP
+	device := &Device{}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiveSTUNTestPackets(ctx, manager, bind.receive)
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun:203.0.113.91:3478", "stun:203.0.113.92:3478"}, 100*time.Millisecond)
+
+	// Then
+	if len(candidates) != 1 || candidates[0].Address != "198.51.100.91:40104" {
+		t.Fatalf("candidates = %#v, want one deduplicated IP", candidates)
+	}
+}
+
+func TestSuperSTUNDetectsMappedPortMismatch(t *testing.T) {
+	// Given
+	bind := newSameBindSTUNFake(40105)
+	bind.responses["203.0.113.93:3478"] = net.ParseIP("198.51.100.92")
+	bind.responses["203.0.113.94:3478"] = net.ParseIP("2001:db8::92")
+	bind.responsePorts["203.0.113.94:3478"] = 40106
+	var logged []string
+	device := &Device{
+		log: &Logger{
+			Errorf:   func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) },
+			Verbosef: DiscardLogf,
+		},
+	}
+	device.net.bind = bind
+	manager := NewSuperSTUNManager(device)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go receiveSTUNTestPackets(ctx, manager, bind.receive)
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun:203.0.113.93:3478", "stun:203.0.113.94:3478"}, 100*time.Millisecond)
+
+	// Then
+	if len(candidates) != 2 {
+		t.Fatalf("candidate count = %d, want 2: %#v", len(candidates), candidates)
+	}
+	found := false
+	for _, msg := range logged {
+		if strings.Contains(msg, "mapped port mismatch") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected port mismatch log, got %v", logged)
 	}
 }
 
