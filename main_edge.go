@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/google/shlex"
 
@@ -25,6 +27,8 @@ import (
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
 	yaml "gopkg.in/yaml.v2"
 )
+
+const edgeInitialBindTimeout = 5 * time.Second
 
 func printExampleEdgeConf() {
 	tconfig, _ := gencfg.GetExampleEdgeConfV2("")
@@ -45,6 +49,38 @@ func hydrateV2DirectConnectivity(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.E
 	econfig.DynamicRoute.ConnNextTry = resolved.NextEndpointTrySeconds
 }
 
+func bootstrapInitialBind(ctx context.Context, config mtypes.EdgeConfigV2) ([]uint16, error) {
+	client := device.NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey)
+	parameters, err := client.Bootstrap(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap control parameters: %w", err)
+	}
+	ports, err := parameters.ListenPortPriority.Expand()
+	if err != nil {
+		return nil, fmt.Errorf("expand bootstrap listen-port policy: %w", err)
+	}
+	candidates := make([]uint16, len(ports))
+	for i, port := range ports {
+		candidates[i] = uint16(port)
+	}
+	return candidates, nil
+}
+
+func waitInitialBind(ctx context.Context, results <-chan device.InitialBindResult) (uint16, error) {
+	select {
+	case result := <-results:
+		if result.Err != nil {
+			return 0, fmt.Errorf("initial bind: %w", result.Err)
+		}
+		if result.Port == 0 {
+			return 0, errors.New("initial bind reported port zero")
+		}
+		return result.Port, nil
+	case <-ctx.Done():
+		return 0, fmt.Errorf("wait for initial bind: %w", ctx.Err())
+	}
+}
+
 func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (err error) {
 	if printExample {
 		printExampleEdgeConf()
@@ -52,6 +88,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	}
 	var econfig mtypes.EdgeConfig
 	var econfigV2 mtypes.EdgeConfigV2
+	var initialBindCandidates []uint16
 	//printExampleConf()
 	//return
 
@@ -72,6 +109,12 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		econfig.Peers = econfigV2.Peers
 		econfig.SuperNodeV2Enabled = true
 		hydrateV2DirectConnectivity(&econfig, &econfigV2)
+		bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), edgeInitialBindTimeout)
+		initialBindCandidates, err = bootstrapInitialBind(bootstrapCtx, econfigV2)
+		cancelBootstrap()
+		if err != nil {
+			return fmt.Errorf("bootstrap Edge listen-port policy: %w", err)
+		}
 	} else {
 		err = mtypes.ReadYaml(configPath, &econfig)
 	}
@@ -154,11 +197,19 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 
 	EnabledAf := econfig.DisableAf.Disalbed2Enabled()
 
-	the_device := device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version)
-	defer the_device.Close()
+	var the_device *device.Device
+	var initialBindResults <-chan device.InitialBindResult
 	if superNodeV2Enabled {
-		the_device.EnableSuperHTTP(econfigV2)
+		results := make(chan device.InitialBindResult, 1)
+		initialBindResults = results
+		the_device = device.NewDeviceWithInitialBind(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version, device.InitialBindPolicy{
+			Candidates: initialBindCandidates,
+			Results:    results,
+		})
+	} else {
+		the_device = device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version)
 	}
+	defer the_device.Close()
 	pk, err := device.Str2PriKey(econfig.PrivKey)
 	if err != nil {
 		fmt.Println("Error decode base64 ", err)
@@ -166,7 +217,17 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	}
 	the_device.SetPrivateKey(pk)
 	the_device.IpcSet("fwmark=" + fmt.Sprint(econfig.FwMark) + "\n")
-	the_device.IpcSet("listen_port=" + strconv.Itoa(econfig.ListenPort) + "\n")
+	if superNodeV2Enabled {
+		bindCtx, cancelBind := context.WithTimeout(context.Background(), edgeInitialBindTimeout)
+		_, err = waitInitialBind(bindCtx, initialBindResults)
+		cancelBind()
+		if err != nil {
+			return err
+		}
+		the_device.EnableSuperHTTP(econfigV2)
+	} else {
+		the_device.IpcSet("listen_port=" + strconv.Itoa(econfig.ListenPort) + "\n")
+	}
 	the_device.SuperHTTPReady()
 	the_device.IpcSet("replace_peers=true\n")
 	for _, peerconf := range econfig.Peers {

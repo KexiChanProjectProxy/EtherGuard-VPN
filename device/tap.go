@@ -41,7 +41,8 @@ func (device *Device) RoutineTUNEventReader() {
 
 		if event&tap.EventUp != 0 {
 			device.log.Verbosef("Interface up requested")
-			device.Up()
+			err := device.Up()
+			device.publishInitialBindResult(err)
 		}
 
 		if event&tap.EventDown != 0 {

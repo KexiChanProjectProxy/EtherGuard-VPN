@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/conn"
@@ -25,6 +26,20 @@ import (
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
 	fixed_time_cache "github.com/KusakabeSi/go-cache"
 )
+
+// InitialBindResult reports the port selected during the first EventUp bind.
+// A non-nil Err means no UDP listener remains open for that initial attempt.
+type InitialBindResult struct {
+	Port uint16
+	Err  error
+}
+
+// InitialBindPolicy supplies immutable, Super-issued candidates for the first
+// EventUp bind. Results receives exactly one outcome and should be buffered.
+type InitialBindPolicy struct {
+	Candidates []uint16
+	Results    chan<- InitialBindResult
+}
 
 type Device struct {
 	state struct {
@@ -120,6 +135,14 @@ type Device struct {
 	tap struct {
 		device tap.Device
 		mtu    int32
+	}
+
+	initialBind struct {
+		candidates []uint16
+		results    chan<- InitialBindResult
+		err        error
+		pending    bool
+		once       sync.Once
 	}
 
 	ipcMutex      sync.RWMutex
@@ -218,7 +241,17 @@ func (device *Device) changeState(want deviceState) (err error) {
 // upLocked attempts to bring the device up and reports whether it succeeded.
 // The caller must hold device.state.mu and is responsible for updating device.state.state.
 func (device *Device) upLocked() error {
-	if err := device.BindUpdate(); err != nil {
+	if device.initialBind.pending {
+		err := device.bindInitialPolicy()
+		device.initialBind.pending = false
+		device.initialBind.err = err
+		if err != nil {
+			device.log.Errorf("Unable to apply initial bind policy: %v", err)
+			return err
+		}
+	} else if device.initialBind.err != nil {
+		return device.initialBind.err
+	} else if err := device.BindUpdate(); err != nil {
 		device.log.Errorf("Unable to update bind: %v", err)
 		return err
 	}
@@ -326,11 +359,20 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 }
 
 func NewDevice(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *Logger, graph *path.IG, configpath string, econfig *mtypes.EdgeConfig, version string) *Device {
+	return NewDeviceWithInitialBind(tapDevice, id, bind, logger, graph, configpath, econfig, version, InitialBindPolicy{})
+}
+
+// NewDeviceWithInitialBind installs the first-bind policy before TUN workers
+// consume EventUp.
+func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.Bind, logger *Logger, graph *path.IG, configpath string, econfig *mtypes.EdgeConfig, version string, initialBind InitialBindPolicy) *Device {
 	device := new(Device)
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan int)
 	device.log = logger
 	device.net.bind = bind
+	device.initialBind.candidates = append([]uint16(nil), initialBind.Candidates...)
+	device.initialBind.results = initialBind.Results
+	device.initialBind.pending = initialBind.Results != nil
 	device.superSTUN = NewSuperSTUNManager(device)
 	device.tap.device = tapDevice
 	mtu, err := device.tap.device.MTU()
@@ -694,19 +736,46 @@ func (device *Device) BindUpdate() error {
 		return nil
 	}
 
-	// bind to new port
+	return device.bindOpenLocked(device.net.port)
+}
+
+func (device *Device) bindInitialPolicy() error {
+	device.net.Lock()
+	defer device.net.Unlock()
+
+	if err := closeBindLocked(device); err != nil {
+		return err
+	}
+	for _, port := range device.initialBind.candidates {
+		if err := device.bindOpenLocked(port); err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				continue
+			}
+			return err
+		}
+		return nil
+	}
+	return device.bindOpenLocked(0)
+}
+
+func (device *Device) bindOpenLocked(port uint16) error {
 	var err error
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
-	recvFns, netc.port, err = netc.bind.Open(netc.port)
+	var actualPort uint16
+	recvFns, actualPort, err = netc.bind.Open(port)
 	if err != nil {
 		netc.port = 0
 		return err
 	}
+	netc.port = actualPort
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
-		netc.bind.Close()
+		closeErr := netc.bind.Close()
 		netc.port = 0
+		if closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close bind after route listener setup: %w", closeErr))
+		}
 		return err
 	}
 
@@ -714,6 +783,11 @@ func (device *Device) BindUpdate() error {
 	if netc.fwmark != 0 {
 		err = netc.bind.SetMark(netc.fwmark)
 		if err != nil {
+			closeErr := netc.bind.Close()
+			netc.port = 0
+			if closeErr != nil {
+				return errors.Join(err, fmt.Errorf("close bind after setting mark: %w", closeErr))
+			}
 			return err
 		}
 	}
@@ -739,6 +813,24 @@ func (device *Device) BindUpdate() error {
 
 	device.log.Verbosef("UDP bind has been updated")
 	return nil
+}
+
+func (device *Device) publishInitialBindResult(err error) {
+	if device.initialBind.results == nil {
+		return
+	}
+	device.initialBind.once.Do(func() {
+		result := InitialBindResult{Err: err}
+		if err == nil {
+			device.net.RLock()
+			result.Port = device.net.port
+			device.net.RUnlock()
+		}
+		select {
+		case device.initialBind.results <- result:
+		case <-device.closed:
+		}
+	})
 }
 
 func (device *Device) BindClose() error {
