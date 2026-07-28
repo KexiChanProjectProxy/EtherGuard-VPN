@@ -265,6 +265,9 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		header.SetDst(mtypes.NodeID_Spread)
 		device.SpreadPacket(make(map[mtypes.Vertex]bool), path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
+	} else {
+		header.SetDst(content.Src_nodeID)
+		device.SendPacket(peer, path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 	}
 	go device.SendPing(peer, content.RequestReply, 0, 3)
 	return nil
