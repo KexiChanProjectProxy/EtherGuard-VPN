@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 )
+
+var ErrControlUnknownPeer = errors.New("control state: unknown peer")
 
 const (
 	HeaderNodeID    = "X-EG-NodeID"
@@ -151,9 +154,30 @@ func (c *ControlHTTPClient) Report(ctx context.Context, x *mtypes.ControlV2Repor
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("report: %s", resp.Status)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("report: read error response: %w", readErr)
+		}
+		return &reportStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(body)}
 	}
 	return nil
+}
+
+type reportStatusError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *reportStatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("report: %s", e.Status)
+	}
+	return fmt.Sprintf("report: %s: %s", e.Status, e.Body)
+}
+
+func (e *reportStatusError) Is(target error) bool {
+	return target == ErrControlUnknownPeer && e.StatusCode == http.StatusBadRequest && strings.Contains(e.Body, ErrControlUnknownPeer.Error())
 }
 
 func (c *ControlHTTPClient) Register(ctx context.Context, x *mtypes.ControlV2RegisterRequest) (*mtypes.ControlV2Snapshot, error) {

@@ -35,6 +35,9 @@ type SuperHTTPRuntime struct {
 	parameters       mtypes.ControlV2Parameters
 	generation       uint64
 	recoveryRequests map[mtypes.Vertex]time.Time
+	lastReregister   time.Time
+	reregistering    bool
+	reregisterWG     sync.WaitGroup
 	parameterUpdates chan struct{}
 }
 
@@ -94,13 +97,14 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	}()
 	go func() {
 		defer wg.Done()
-		runtime.reportLoop(ctx)
+		runtime.reportLoop(ctx, ready)
 	}()
 	go func() {
 		defer wg.Done()
 		runtime.stunLoop(ctx)
 	}()
 	wg.Wait()
+	runtime.reregisterWG.Wait()
 }
 
 func localControlCandidates(device *Device, ready superHTTPReady) []mtypes.ControlV2Candidate {
@@ -249,7 +253,7 @@ func (runtime *SuperHTTPRuntime) setCandidates(candidates []mtypes.ControlV2Cand
 	runtime.mu.Unlock()
 }
 
-func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context) {
+func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTPReady) {
 	for {
 		runtime.mu.RLock()
 		interval := runtime.parameters.ReportInterval
@@ -274,10 +278,59 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context) {
 			report.Observed = runtime.observedEndpoints()
 			runtime.recoverExhaustedPeers()
 		}
-		if err := runtime.client.Report(ctx, &report); err != nil && ctx.Err() == nil && runtime.device != nil {
-			runtime.device.log.Errorf("HTTP control report failed: %v", err)
+		if err := runtime.client.Report(ctx, &report); err != nil && ctx.Err() == nil {
+			if errors.Is(err, ErrControlUnknownPeer) {
+				runtime.requestReregistration(ctx, ready)
+			}
+			if runtime.device != nil {
+				runtime.device.log.Errorf("HTTP control report failed: %v", err)
+			}
 		}
 	}
+}
+
+func (runtime *SuperHTTPRuntime) requestReregistration(ctx context.Context, ready superHTTPReady) {
+	now := time.Now()
+	runtime.mu.Lock()
+	if runtime.reregistering || (!runtime.lastReregister.IsZero() && now.Sub(runtime.lastReregister) < 30*time.Second) {
+		runtime.mu.Unlock()
+		return
+	}
+	runtime.lastReregister = now
+	runtime.reregistering = true
+	runtime.reregisterWG.Add(1)
+	runtime.mu.Unlock()
+
+	go func() {
+		success := false
+		defer func() {
+			runtime.mu.Lock()
+			runtime.reregistering = false
+			if success {
+				runtime.lastReregister = time.Now()
+			}
+			runtime.mu.Unlock()
+			runtime.reregisterWG.Done()
+		}()
+
+		runtime.mu.RLock()
+		candidates := append([]mtypes.ControlV2Candidate(nil), runtime.candidates...)
+		runtime.mu.RUnlock()
+		if runtime.device != nil {
+			candidates = runtime.device.filterControlCandidates(candidates)
+		}
+		register := runtime.registerRequest(ready, candidates)
+		snapshot, err := runtime.client.Register(ctx, &register)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) && runtime.device != nil {
+				runtime.device.log.Errorf("HTTP control re-register failed: %v", err)
+			}
+			return
+		}
+		runtime.applySnapshot(snapshot)
+		runtime.refreshSTUN(ctx, snapshot.Parameters)
+		success = true
+	}()
 }
 
 func (runtime *SuperHTTPRuntime) observedEndpoints() []mtypes.ControlV2ObservedEndpoint {

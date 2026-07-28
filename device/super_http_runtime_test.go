@@ -97,6 +97,61 @@ func TestSuperHTTPRuntimeStartsAfterReadyAndReports(t *testing.T) {
 	waitRuntimeCondition(t, time.Second, func() bool { return registered.Load() > 0 && reported.Load() > 0 })
 }
 
+func TestSuperHTTPRuntimeLifecycleReregistersAfterUnknownPeer(t *testing.T) {
+	// Given
+	super := newLifecycleSuper(t, "lifecycle-key", policySingle(47112))
+	bind := &bindScript{}
+	_, _, _ = startLifecycleEdgeReturningRuntime(t, super, bind, []uint16{47112}, nil)
+	waitRuntimeCondition(t, time.Second, func() bool { return super.registerRequests.Load() == 1 })
+	super.deleteRegisteredPeer()
+
+	// When
+	waitRuntimeCondition(t, time.Second, func() bool { return super.registerRequests.Load() >= 2 })
+
+	// Then
+	if got := super.registerRequests.Load(); got != 2 {
+		t.Fatalf("register attempts after unknown peer = %d, want exactly 2", got)
+	}
+	snapshot := super.snapshot()
+	if len(snapshot.Peers) != 1 || snapshot.Peers[0].NodeID != 47100 {
+		t.Fatalf("snapshot peers after re-registration = %+v, want edge 47100", snapshot.Peers)
+	}
+}
+
+func TestSuperHTTPRuntimeLifecycleCoalescesUnknownPeerReregistration(t *testing.T) {
+	// Given
+	super := newLifecycleSuper(t, "lifecycle-key", policySingle(47113))
+	bind := &bindScript{}
+	_, _, _ = startLifecycleEdgeReturningRuntime(t, super, bind, []uint16{47113}, nil)
+	waitRuntimeCondition(t, time.Second, func() bool { return super.registerRequests.Load() == 1 })
+	super.reportUnknownPeer.Store(true)
+
+	// When
+	waitRuntimeCondition(t, time.Second, func() bool { return super.reportCalls.Load() >= 6 })
+
+	// Then
+	if got := super.registerRequests.Load(); got != 2 {
+		t.Fatalf("coalesced register attempts = %d, want exactly 2", got)
+	}
+}
+
+func TestSuperHTTPRuntimeLifecycleDoesNotReregisterOnUnauthorizedReport(t *testing.T) {
+	// Given
+	super := newLifecycleSuper(t, "lifecycle-key", policySingle(47114))
+	bind := &bindScript{}
+	_, _, _ = startLifecycleEdgeReturningRuntime(t, super, bind, []uint16{47114}, nil)
+	waitRuntimeCondition(t, time.Second, func() bool { return super.registerRequests.Load() == 1 })
+	super.reportUnauthorized.Store(true)
+
+	// When
+	waitRuntimeCondition(t, time.Second, func() bool { return super.reportCalls.Load() >= 6 })
+
+	// Then
+	if got := super.registerRequests.Load(); got != 1 {
+		t.Fatalf("register attempts after unauthorized report = %d, want 1", got)
+	}
+}
+
 func TestSuperHTTPRuntimeSyncFallsBackToPollingAndStops(t *testing.T) {
 	// Given
 	var revision atomic.Uint64
@@ -399,12 +454,16 @@ type lifecycleSuper struct {
 	policySnapshot atomic.Pointer[mtypes.ControlV2Parameters]
 	snapshotRev    atomic.Uint64
 
-	mu                sync.Mutex
-	registerCalls     int
-	reportCalls       int
-	lastRegister      mtypes.ControlV2RegisterRequest
-	bootstrapRequests atomic.Int32
-	registerRequests  atomic.Int32
+	mu                 sync.Mutex
+	registerCalls      int
+	reportCalls        atomic.Int32
+	lastRegister       mtypes.ControlV2RegisterRequest
+	bootstrapRequests  atomic.Int32
+	registerRequests   atomic.Int32
+	reportUnknownPeer  atomic.Bool
+	reportUnauthorized atomic.Bool
+	registeredPeer     mtypes.ControlV2Peer
+	peerPresent        bool
 	// closeHandler, when non-nil, replaces the default /bootstrap handler
 	// (used to simulate unreachable / wrong-key / malformed responses).
 	closeHandler func(http.ResponseWriter, *http.Request)
@@ -494,6 +553,16 @@ func (super *lifecycleSuper) handleRegister(writer http.ResponseWriter, request 
 	super.mu.Lock()
 	super.lastRegister = captured
 	super.registerCalls++
+	super.registeredPeer = mtypes.ControlV2Peer{
+		NodeID:   captured.NodeID,
+		NodeName: captured.NodeName,
+		PubKey:   captured.PubKey,
+		LocalV4:  append([]string(nil), captured.LocalV4...),
+		LocalV6:  append([]string(nil), captured.LocalV6...),
+		PublicV4: append([]string(nil), captured.PublicV4...),
+		PublicV6: append([]string(nil), captured.PublicV6...),
+	}
+	super.peerPresent = true
 	super.mu.Unlock()
 	snapshot := super.snapshot()
 	writer.Header().Set("Content-Type", "application/json")
@@ -508,8 +577,17 @@ func (super *lifecycleSuper) handleReport(writer http.ResponseWriter, request *h
 		return
 	}
 	super.mu.Lock()
-	super.reportCalls++
+	peerPresent := super.peerPresent
 	super.mu.Unlock()
+	super.reportCalls.Add(1)
+	if super.reportUnauthorized.Load() {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if super.reportUnknownPeer.Load() || !peerPresent {
+		http.Error(writer, "report: control state: unknown peer", http.StatusBadRequest)
+		return
+	}
 	writer.WriteHeader(http.StatusAccepted)
 }
 
@@ -561,7 +639,18 @@ func (super *lifecycleSuper) snapshot() mtypes.ControlV2Snapshot {
 			ListenPortPriority:  super.policy,
 		},
 	}
+	super.mu.Lock()
+	if super.peerPresent {
+		snapshot.Peers = []mtypes.ControlV2Peer{super.registeredPeer}
+	}
+	super.mu.Unlock()
 	return snapshot
+}
+
+func (super *lifecycleSuper) deleteRegisteredPeer() {
+	super.mu.Lock()
+	super.peerPresent = false
+	super.mu.Unlock()
 }
 
 func (super *lifecycleSuper) lastRegisterCall(t *testing.T) mtypes.ControlV2RegisterRequest {
