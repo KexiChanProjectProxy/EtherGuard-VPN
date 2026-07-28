@@ -28,6 +28,34 @@ import (
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
 )
 
+func TestSuperHTTPPongsReportsOutboundLatency(t *testing.T) {
+	// Given
+	device, peer := newSuperLatencyTestDevice(t)
+	content := mtypes.PongMsg{
+		Src_nodeID:  device.ID,
+		Dst_nodeID:  peer.ID,
+		Timediff:    0.012,
+		TimeToAlive: device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+	}
+
+	// When
+	if err := device.process_pong(peer, content); err != nil {
+		t.Fatalf("process_pong: %v", err)
+	}
+	reports := device.superHTTPPongs()
+
+	// Then
+	if len(reports) != 1 {
+		t.Fatalf("reported pong count = %d, want 1", len(reports))
+	}
+	if reports[0].SourceNode != device.ID || reports[0].DestNode != peer.ID {
+		t.Fatalf("reported direction = %v -> %v, want %v -> %v", reports[0].SourceNode, reports[0].DestNode, device.ID, peer.ID)
+	}
+	if reports[0].TimediffMS < 11.9 || reports[0].TimediffMS > 12.1 {
+		t.Fatalf("reported outbound latency = %f ms, want about 12 ms", reports[0].TimediffMS)
+	}
+}
+
 func TestSuperHTTPRuntimeStartsAfterReadyAndReports(t *testing.T) {
 	// Given
 	var registered atomic.Int32

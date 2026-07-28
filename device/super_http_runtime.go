@@ -375,6 +375,14 @@ func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot,
 		}
 	}
 	device.graph.RecalculateNhTable(false)
+	for id := range wanted {
+		next := device.graph.Next(device.ID, id)
+		if next == mtypes.NodeID_Invalid {
+			device.log.Verbosef("super route missing next hop self=%v wanted=%v", device.ID, id)
+			continue
+		}
+		device.log.Verbosef("super route next hop self=%v wanted=%v next=%v", device.ID, id, next)
+	}
 	device.signalEndpointRetry()
 }
 
@@ -424,7 +432,7 @@ func (device *Device) superHTTPPongs() []mtypes.ControlV2Pong {
 		if alive < 0 {
 			alive = 0
 		}
-		latencyMS := peer.SingleWayLatency.GetVal() * 1000
+		latencyMS := peer.OutboundLatency.GetVal() * 1000
 		pongs = append(pongs, mtypes.ControlV2Pong{SourceNode: device.ID, DestNode: id, TimediffMS: latencyMS, LatencyMS: latencyMS, AliveSeconds: alive})
 	}
 	return pongs
