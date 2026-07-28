@@ -3,6 +3,7 @@ package mtypes
 import (
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
@@ -1007,5 +1008,140 @@ ListenPortPriority:
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("validate v2 super config with ListenPortPriority: %v", err)
+	}
+}
+
+func TestControlV2ParametersEndpointBlacklistWireKeyRoundTrip(t *testing.T) {
+	// Given
+	parameters := validControlV2Parameters(t)
+	parameters.EndpointBlacklist = []string{
+		"192.0.2.1",
+		"192.0.2.0/24",
+		"2001:db8::1",
+		"2001:db8::/64",
+	}
+
+	// When
+	data, err := json.Marshal(parameters)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var decoded ControlV2Parameters
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if !strings.Contains(string(data), `"EndpointBlacklist"`) {
+		t.Fatalf("wire JSON = %s, missing PascalCase key", data)
+	}
+	if !reflect.DeepEqual(decoded.EndpointBlacklist, parameters.EndpointBlacklist) {
+		t.Fatalf("decoded blacklist = %#v, want %#v", decoded.EndpointBlacklist, parameters.EndpointBlacklist)
+	}
+}
+
+func TestControlV2ParametersEndpointBlacklistAbsentFieldDecodesEmpty(t *testing.T) {
+	// Given
+	var parameters ControlV2Parameters
+
+	// When
+	err := json.Unmarshal([]byte(`{"ProtocolVersion":"v2"}`), &parameters)
+
+	// Then
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if len(parameters.EndpointBlacklist) != 0 {
+		t.Fatalf("decoded blacklist = %#v, want empty", parameters.EndpointBlacklist)
+	}
+}
+
+func TestControlV2ParametersEndpointBlacklistRejectsMalformedEntry(t *testing.T) {
+	// Given
+	parameters := validControlV2Parameters(t)
+	parameters.EndpointBlacklist = []string{"not-an-ip-or-cidr"}
+
+	// When
+	err := parameters.Validate()
+
+	// Then
+	if err == nil {
+		t.Fatal("Validate() error = nil, want malformed blacklist error")
+	}
+	if !IsControlV2Error(err) {
+		t.Fatalf("Validate() error = %T, want ControlV2Error", err)
+	}
+	if got := ErrorCode(err); got != ControlV2ErrInvalidCandidate {
+		t.Fatalf("error code = %q, want %q", got, ControlV2ErrInvalidCandidate)
+	}
+	if !strings.Contains(err.Error(), "EndpointBlacklist[0]") {
+		t.Fatalf("error = %v, want indexed blacklist field", err)
+	}
+}
+
+func TestControlV2ParametersEndpointBlacklistRejectsMoreThan256Entries(t *testing.T) {
+	// Given
+	parameters := validControlV2Parameters(t)
+	parameters.EndpointBlacklist = make([]string, 257)
+	for i := range parameters.EndpointBlacklist {
+		parameters.EndpointBlacklist[i] = "192.0.2.1"
+	}
+
+	// When
+	err := parameters.Validate()
+
+	// Then
+	if err == nil {
+		t.Fatal("Validate() error = nil, want blacklist size error")
+	}
+	if !strings.Contains(err.Error(), "256") {
+		t.Fatalf("error = %v, want 256-entry limit", err)
+	}
+}
+
+func TestControlV2ParametersParseEndpointBlacklistNormalizesHosts(t *testing.T) {
+	// Given
+	parameters := ControlV2Parameters{EndpointBlacklist: []string{
+		"192.0.2.1",
+		"192.0.2.0/24",
+		"2001:db8::1",
+		"2001:db8::/64",
+	}}
+
+	// When
+	prefixes, err := parameters.ParseEndpointBlacklist()
+
+	// Then
+	if err != nil {
+		t.Fatalf("ParseEndpointBlacklist() error = %v", err)
+	}
+	want := []netip.Prefix{
+		netip.MustParsePrefix("192.0.2.1/32"),
+		netip.MustParsePrefix("192.0.2.0/24"),
+		netip.MustParsePrefix("2001:db8::1/128"),
+		netip.MustParsePrefix("2001:db8::/64"),
+	}
+	if !reflect.DeepEqual(prefixes, want) {
+		t.Fatalf("ParseEndpointBlacklist() = %v, want %v", prefixes, want)
+	}
+}
+
+func TestSuperConfigV2EndpointBlacklistYAMLRoundTrip(t *testing.T) {
+	// Given
+	in := SuperConfigV2{EndpointBlacklist: []string{"192.0.2.1", "2001:db8::/64"}}
+
+	// When
+	data, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out SuperConfigV2
+	if err := yamlUnmarshal(data, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if !reflect.DeepEqual(out.EndpointBlacklist, in.EndpointBlacklist) {
+		t.Fatalf("decoded blacklist = %#v, want %#v", out.EndpointBlacklist, in.EndpointBlacklist)
 	}
 }

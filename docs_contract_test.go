@@ -116,7 +116,7 @@ func TestDocsReferenceValidYAMLKeys(t *testing.T) {
 		"PollIntervalSeconds": true, "ReportIntervalSeconds": true,
 		"HeartbeatIntervalSeconds": true, "EventReplay": true,
 		"PeerAliveTimeoutSeconds": true, "UsePSKForInterEdge": true,
-		"DampingFilterRadius": true, "Peers": true,
+		"DampingFilterRadius": true, "EndpointBlacklist": true, "Peers": true,
 	}
 	validEdgeKeys := map[string]bool{
 		"Interface": true, "NodeID": true, "NodeName": true,

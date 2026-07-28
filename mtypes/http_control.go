@@ -17,6 +17,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -58,6 +59,7 @@ const (
 	controlV2MaxObservedHintsPerFamily = 14
 	controlV2MaxDirectConnectivitySecs = 24 * 60 * 60
 	controlV2MaxListenPortCandidates   = 256
+	controlV2MaxEndpointBlacklist      = 256
 	controlV2MinPort                   = 1
 	controlV2MaxPort                   = 65535
 )
@@ -508,6 +510,7 @@ type ControlV2Parameters struct {
 	HeartbeatInterval   time.Duration      `json:"heartbeat_interval"`
 	EventReplay         uint64             `json:"event_replay"`
 	ListenPortPriority  ListenPortPriority `json:"listen_port_priority,omitempty"`
+	EndpointBlacklist   []string           `json:"endpoint_blacklist,omitempty"`
 }
 
 // Validate enforces positive durations, a known protocol version, and a
@@ -536,7 +539,37 @@ func (p *ControlV2Parameters) Validate() error {
 			return newControlV2Error(ControlV2ErrInvalidSTUNServer, fmt.Sprintf("stun_servers[%d]", i), "%v", err)
 		}
 	}
+	if _, err := p.ParseEndpointBlacklist(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ParseEndpointBlacklist parses endpoint IP and CIDR strings into prefixes.
+// Host addresses are normalized to their full address length; CIDR host bits
+// are masked so callers receive canonical prefixes.
+func (p *ControlV2Parameters) ParseEndpointBlacklist() ([]netip.Prefix, error) {
+	return parseEndpointBlacklist(p.EndpointBlacklist)
+}
+
+func parseEndpointBlacklist(entries []string) ([]netip.Prefix, error) {
+	if len(entries) > controlV2MaxEndpointBlacklist {
+		return nil, newControlV2Error(ControlV2ErrInvalidCandidate, "EndpointBlacklist", "contains %d entries, maximum is %d", len(entries), controlV2MaxEndpointBlacklist)
+	}
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for i, raw := range entries {
+		field := fmt.Sprintf("EndpointBlacklist[%d]", i)
+		prefix, prefixErr := netip.ParsePrefix(raw)
+		if prefixErr != nil {
+			addr, addrErr := netip.ParseAddr(raw)
+			if addrErr != nil {
+				return nil, newControlV2Error(ControlV2ErrInvalidCandidate, field, "must be an IP address or CIDR: %q (prefix: %v; address: %v)", raw, prefixErr, addrErr)
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		prefixes = append(prefixes, prefix.Masked())
+	}
+	return prefixes, nil
 }
 
 // MarshalJSON renders durations as seconds (the wire form for v2).
@@ -551,6 +584,7 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
 		EventReplay              uint64             `json:"EventReplay"`
 		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
+		EndpointBlacklist        []string           `json:"EndpointBlacklist"`
 	}
 	w := wire{
 		ProtocolVersion:          p.ProtocolVersion,
@@ -562,6 +596,7 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 		HeartbeatIntervalSeconds: p.HeartbeatInterval.Seconds(),
 		EventReplay:              p.EventReplay,
 		ListenPortPriority:       p.ListenPortPriority,
+		EndpointBlacklist:        p.EndpointBlacklist,
 	}
 	return json.Marshal(w)
 }
@@ -578,6 +613,7 @@ func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
 		EventReplay              uint64             `json:"EventReplay"`
 		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
+		EndpointBlacklist        []string           `json:"EndpointBlacklist"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -592,6 +628,7 @@ func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 	p.HeartbeatInterval = durationFromSeconds(w.HeartbeatIntervalSeconds)
 	p.EventReplay = w.EventReplay
 	p.ListenPortPriority = w.ListenPortPriority
+	p.EndpointBlacklist = w.EndpointBlacklist
 	return nil
 }
 
@@ -699,6 +736,7 @@ type SuperConfigV2 struct {
 	UsePSKForInterEdge         bool                        `yaml:"UsePSKForInterEdge"`
 	DampingFilterRadius        uint64                      `yaml:"DampingFilterRadius"`
 	ListenPortPriority         ListenPortPriority          `yaml:"ListenPortPriority,omitempty"`
+	EndpointBlacklist          []string                    `yaml:"EndpointBlacklist,omitempty"`
 	Peers                      []SuperConfigV2Peer         `yaml:"Peers"`
 }
 
@@ -743,6 +781,9 @@ func (c *SuperConfigV2) Validate() error {
 		}
 	}
 	if _, err := c.ListenPortPriority.Expand(); err != nil {
+		return err
+	}
+	if _, err := parseEndpointBlacklist(c.EndpointBlacklist); err != nil {
 		return err
 	}
 	return nil
