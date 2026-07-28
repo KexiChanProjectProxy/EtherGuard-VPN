@@ -96,6 +96,10 @@ type Device struct {
 	chan_send_packet  chan *packet_send_params
 	sendQueueDrops    atomic.Uint64
 
+	endpointBlacklistMu      sync.RWMutex
+	endpointBlacklist        atomic.Pointer[endpointBlacklist]
+	blacklistedDatagramDrops atomic.Uint64
+
 	EdgeConfigPath      string
 	EdgeConfig          *mtypes.EdgeConfig
 	dampingFilterRadius uint64

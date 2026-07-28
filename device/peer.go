@@ -30,6 +30,7 @@ type endpoint_tryitem struct {
 	cost     int
 	lastTry  time.Time
 	firstTry time.Time
+	ip       net.IP
 }
 
 type endpoint_trylist struct {
@@ -55,6 +56,8 @@ func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.Enabl
 }
 
 func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool, AfPerfer int) {
+	et.peer.device.endpointBlacklistMu.RLock()
+	defer et.peer.device.endpointBlacklistMu.RUnlock()
 	et.Lock()
 	defer et.Unlock()
 	newmap_super := make(map[string]*endpoint_tryitem)
@@ -66,11 +69,19 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 		}
 	}
 	for _, candidate := range urls.GetList(UseLocalIP) {
-		addr, _, err := conn.LookupIP(candidate.URL, et.enabledAf, AfPerfer)
+		addr, resolved, err := conn.LookupIP(candidate.URL, et.enabledAf, AfPerfer)
 		if err != nil {
 			if et.peer.device.LogLevel.LogInternal {
 				fmt.Printf("Internal: Peer %v : Update trylist(super) %v error: %v\n", et.peer.ID.ToString(), candidate.URL, err)
 			}
+			continue
+		}
+		host, _, err := net.SplitHostPort(resolved)
+		if err != nil {
+			continue
+		}
+		endpointIP := net.ParseIP(host)
+		if endpointIP == nil || et.peer.device.endpointBlacklisted(endpointIP) {
 			continue
 		}
 		cost := superCandidateCost(candidate)
@@ -85,6 +96,7 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 			}
 		}
 		if val, ok := et.trymap_super[candidate.URL]; ok && val.source == candidate.Source && val.cost == cost {
+			val.ip = endpointIP
 			if et.peer.device.LogLevel.LogInternal {
 				fmt.Printf("Internal: Peer %v : Update trylist(super) %v\n", et.peer.ID.ToString(), candidate.URL)
 			}
@@ -103,6 +115,7 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 				cost:     cost,
 				lastTry:  time.Time{}.Add(mtypes.S2TD(float64(cost))),
 				firstTry: firstTry,
+				ip:       endpointIP,
 			}
 		}
 	}
@@ -127,8 +140,21 @@ func superCandidateCost(candidate mtypes.APIConnURLCandidate) int {
 }
 
 func (et *endpoint_trylist) UpdateP2P(url string) {
-	_, _, err := conn.LookupIP(url, et.enabledAf, 0)
+	_, resolved, err := conn.LookupIP(url, et.enabledAf, 0)
 	if err != nil {
+		return
+	}
+	host, _, err := net.SplitHostPort(resolved)
+	if err != nil {
+		return
+	}
+	endpointIP := net.ParseIP(host)
+	if endpointIP == nil {
+		return
+	}
+	et.peer.device.endpointBlacklistMu.RLock()
+	defer et.peer.device.endpointBlacklistMu.RUnlock()
+	if et.peer.device.endpointBlacklisted(endpointIP) {
 		return
 	}
 	et.Lock()
@@ -141,6 +167,7 @@ func (et *endpoint_trylist) UpdateP2P(url string) {
 			URL:      url,
 			lastTry:  time.Now(),
 			firstTry: time.Time{},
+			ip:       endpointIP,
 		}
 	}
 }
@@ -150,6 +177,23 @@ func (et *endpoint_trylist) Delete(url string) {
 	defer et.Unlock()
 	delete(et.trymap_super, url)
 	delete(et.trymap_p2p, url)
+}
+
+func (et *endpoint_trylist) removeBlacklisted() {
+	et.Lock()
+	defer et.Unlock()
+	for url, candidate := range et.trymap_super {
+		if et.candidateBlacklisted(candidate) {
+			delete(et.trymap_super, url)
+		}
+	}
+	for url, candidate := range et.trymap_p2p {
+		if et.candidateBlacklisted(candidate) {
+			delete(et.trymap_p2p, url)
+		}
+	}
+	et.superAttempt = make(map[string]struct{})
+	et.superCycleComplete = false
 }
 
 // ConsumeSuperCycleComplete returns true once after every Super candidate in
@@ -169,7 +213,11 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 	defer et.Unlock()
 	var smallest *endpoint_tryitem
 	FastTry := true
-	for _, v := range et.trymap_super {
+	for url, v := range et.trymap_super {
+		if et.candidateBlacklisted(v) {
+			delete(et.trymap_super, url)
+			continue
+		}
 		if tryBefore(v, smallest) {
 			smallest = v
 		}
@@ -180,6 +228,11 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 				fmt.Printf("Internal: Peer %v : Delete trylist(p2p) %v\n", et.peer.ID.ToString(), url)
 			}
 			delete(et.trymap_p2p, url)
+			continue
+		}
+		if et.candidateBlacklisted(v) {
+			delete(et.trymap_p2p, url)
+			continue
 		}
 		if tryBefore(v, smallest) {
 			smallest = v
@@ -210,6 +263,16 @@ func (et *endpoint_trylist) GetNextTry() (bool, string) {
 
 func tryBefore(candidate, current *endpoint_tryitem) bool {
 	return current == nil || candidate.lastTry.Before(current.lastTry) || (candidate.lastTry.Equal(current.lastTry) && candidate.URL < current.URL)
+}
+
+func (et *endpoint_trylist) candidateBlacklisted(candidate *endpoint_tryitem) bool {
+	if et.peer == nil || et.peer.device == nil {
+		return false
+	}
+	if candidate.ip != nil {
+		return et.peer.device.endpointBlacklisted(candidate.ip)
+	}
+	return et.peer.device.endpointURLBlacklisted(candidate.URL)
 }
 
 type filterwindow struct {
@@ -469,13 +532,19 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 	}
 
 	peer.RLock()
-	defer peer.RUnlock()
+	endpoint := peer.endpoint
+	peer.RUnlock()
 
-	if peer.endpoint == nil {
+	if endpoint == nil {
 		return errors.New("no known endpoint for peer")
 	}
+	peer.device.endpointBlacklistMu.RLock()
+	defer peer.device.endpointBlacklistMu.RUnlock()
+	if peer.device.endpointBlacklisted(endpoint.DstIP()) {
+		return errEndpointBlacklisted
+	}
 
-	err := peer.device.net.bind.Send(buffer, peer.endpoint)
+	err := peer.device.net.bind.Send(buffer, endpoint)
 	if err == nil {
 		atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
 	}
@@ -645,11 +714,22 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	if err != nil {
 		return err
 	}
+	peer.device.endpointBlacklistMu.RLock()
+	blacklisted := peer.device.endpointBlacklisted(endpoint.DstIP())
+	peer.device.endpointBlacklistMu.RUnlock()
+	if blacklisted {
+		return errEndpointBlacklisted
+	}
 	peer.SetEndpointFromPacket(endpoint)
 	return nil
 }
 
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
+	peer.device.endpointBlacklistMu.RLock()
+	if peer.device.endpointBlacklisted(endpoint.DstIP()) {
+		peer.device.endpointBlacklistMu.RUnlock()
+		return
+	}
 	endpointUpdated, localAddressChanged := func() (bool, bool) {
 		peer.Lock()
 		defer peer.Unlock()
@@ -662,6 +742,7 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		peer.endpoint = endpoint
 		return true, localAddressChanged
 	}()
+	peer.device.endpointBlacklistMu.RUnlock()
 	if !endpointUpdated || !localAddressChanged {
 		return
 	}

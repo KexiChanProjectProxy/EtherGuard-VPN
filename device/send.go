@@ -176,6 +176,12 @@ func (peer *Peer) SendHandshakeResponse() error {
 }
 
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
+	device.endpointBlacklistMu.RLock()
+	blacklisted := device.endpointBlacklisted(initiatingElem.endpoint.DstIP())
+	device.endpointBlacklistMu.RUnlock()
+	if blacklisted {
+		return errEndpointBlacklisted
+	}
 	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 
 	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])

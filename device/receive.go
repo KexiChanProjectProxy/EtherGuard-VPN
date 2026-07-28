@@ -119,6 +119,15 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 			return
 		}
 		deathSpiral = 0
+		if endpoint != nil {
+			device.endpointBlacklistMu.RLock()
+			blacklisted := device.endpointBlacklisted(endpoint.SrcIP())
+			device.endpointBlacklistMu.RUnlock()
+			if blacklisted {
+				device.logBlacklistedDatagram(endpoint.SrcIP())
+				continue
+			}
+		}
 
 		if size < MinMessageSize {
 			continue

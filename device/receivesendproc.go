@@ -391,6 +391,9 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 					continue
 				}
 				err := thepeer.SetEndpointFromConnURL(connurl, device.enabledAf, device.EdgeConfig.AfPrefer, static) //trying to bind first url in the list and wait ConnNextTry seconds
+				if err == errEndpointBlacklisted {
+					continue
+				}
 				if err != nil {
 					device.log.Errorf("Endpoint retry failed: endpoint=%s error=%v", connurl, err)
 					continue
@@ -513,6 +516,9 @@ func (device *Device) RoutineResetEndpoint() {
 				continue
 			}
 			err := peer.SetEndpointFromConnURL(connURL, connAF, device.EdgeConfig.AfPrefer, static)
+			if err == errEndpointBlacklisted {
+				continue
+			}
 			if err != nil {
 				device.log.Errorf("Static endpoint reset failed: endpoint=%s error=%v", connURL, err)
 				continue

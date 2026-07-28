@@ -75,7 +75,7 @@ func (device *Device) p2pLocalEndpointURLs() []string {
 		}
 		records = append(records, interfaceAddresses{name: iface.Name, flags: iface.Flags, addrs: addresses})
 	}
-	return endpointURLsForInterfaces(records, device.EdgeConfig.Interface.Name, device.activeListenPort(), device.enabledAf)
+	return device.filterEndpointURLs(endpointURLsForInterfaces(records, device.EdgeConfig.Interface.Name, device.activeListenPort(), device.enabledAf))
 }
 
 func (device *Device) spreadPeerAdvertisement(response mtypes.BoardcastPeerMsg) error {

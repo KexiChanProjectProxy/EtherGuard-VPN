@@ -72,7 +72,7 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 		return
 	}
 
-	local := localControlCandidates(ready)
+	local := localControlCandidates(runtime.device, ready)
 	runtime.setCandidates(local)
 	register := runtime.registerRequest(ready, local)
 	snapshot, err := runtime.client.Register(ctx, &register)
@@ -103,7 +103,7 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	wg.Wait()
 }
 
-func localControlCandidates(ready superHTTPReady) []mtypes.ControlV2Candidate {
+func localControlCandidates(device *Device, ready superHTTPReady) []mtypes.ControlV2Candidate {
 	candidates := make([]mtypes.ControlV2Candidate, 0, 2)
 	if ready.v4 != nil && !ready.v4.IsUnspecified() {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v4.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
@@ -111,7 +111,10 @@ func localControlCandidates(ready superHTTPReady) []mtypes.ControlV2Candidate {
 	if ready.v6 != nil && !ready.v6.IsUnspecified() {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v6.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
 	}
-	return candidates
+	if device == nil {
+		return candidates
+	}
+	return device.filterControlCandidates(candidates)
 }
 
 func (runtime *SuperHTTPRuntime) registerRequest(ready superHTTPReady, candidates []mtypes.ControlV2Candidate) mtypes.ControlV2RegisterRequest {
@@ -124,6 +127,7 @@ func (runtime *SuperHTTPRuntime) registerRequest(ready superHTTPReady, candidate
 		runtime.device.staticIdentity.RLock()
 		request.PubKey = runtime.device.staticIdentity.publicKey.ToString()
 		runtime.device.staticIdentity.RUnlock()
+		candidates = runtime.device.filterControlCandidates(candidates)
 	}
 	for _, candidate := range candidates {
 		host, _, err := net.SplitHostPort(candidate.Address)
@@ -145,9 +149,15 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	}
 	runtime.apply.Lock()
 	defer runtime.apply.Unlock()
+	if runtime.device != nil {
+		runtime.device.applyEndpointBlacklist(snapshot.Parameters)
+	}
 	runtime.mu.Lock()
 	runtime.parameters = snapshot.Parameters
 	runtime.generation = snapshot.Revision
+	if runtime.device != nil {
+		runtime.candidates = runtime.device.filterControlCandidates(runtime.candidates)
+	}
 	runtime.mu.Unlock()
 	wanted := make(map[mtypes.Vertex]struct{}, len(snapshot.Peers))
 	for _, peer := range snapshot.Peers {
@@ -172,6 +182,9 @@ func (runtime *SuperHTTPRuntime) refreshSTUN(ctx context.Context, parameters mty
 	}
 	runtime.mu.Lock()
 	runtime.candidates = mergeControlCandidates(runtime.candidates, public)
+	if runtime.device != nil {
+		runtime.candidates = runtime.device.filterControlCandidates(runtime.candidates)
+	}
 	runtime.mu.Unlock()
 }
 
@@ -228,6 +241,9 @@ func (runtime *SuperHTTPRuntime) stunLoop(ctx context.Context) {
 }
 
 func (runtime *SuperHTTPRuntime) setCandidates(candidates []mtypes.ControlV2Candidate) {
+	if runtime.device != nil {
+		candidates = runtime.device.filterControlCandidates(candidates)
+	}
 	runtime.mu.Lock()
 	runtime.candidates = append([]mtypes.ControlV2Candidate(nil), candidates...)
 	runtime.mu.Unlock()
@@ -253,6 +269,7 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context) {
 		}
 		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, Candidates: candidates, ReportedAt: time.Now()}
 		if runtime.device != nil {
+			report.Candidates = runtime.device.filterControlCandidates(report.Candidates)
 			report.Pongs = runtime.device.superHTTPPongs()
 			report.Observed = runtime.observedEndpoints()
 			runtime.recoverExhaustedPeers()
@@ -282,6 +299,9 @@ func (runtime *SuperHTTPRuntime) observedEndpoints() []mtypes.ControlV2ObservedE
 		}
 		address := peer.GetEndpointDstStr()
 		if address == "" {
+			continue
+		}
+		if runtime.device.endpointURLBlacklistedReadLocked(address) {
 			continue
 		}
 		observed = append(observed, mtypes.ControlV2ObservedEndpoint{TargetNodeID: id, Address: address})
