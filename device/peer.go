@@ -303,6 +303,7 @@ type Peer struct {
 	LastPacketReceivedAdd1Sec atomic.Value // *time.Time
 
 	SingleWayLatency filterwindow
+	OutboundLatency  filterwindow
 
 	stopping sync.WaitGroup // routines pending stop
 
@@ -397,6 +398,10 @@ func (device *Device) NewPeer(pk NoisePublicKey, id mtypes.Vertex, isSuper bool,
 	peer.endpoint_trylist = NewEndpoint_trylist(peer, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout), device.enabledAf)
 	peer.SingleWayLatency.device = device
 	peer.SingleWayLatency.Push(mtypes.Infinity)
+	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+		peer.OutboundLatency.device = device
+		peer.OutboundLatency.Push(mtypes.Infinity)
+	}
 	peer.queue.outbound = newAutodrainingOutboundQueue(device)
 	peer.queue.inbound = newAutodrainingInboundQueue(device)
 	peer.queue.staged = make(chan *QueueOutboundElement, QueueStagedSize)

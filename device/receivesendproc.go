@@ -290,6 +290,10 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 			copy(buf[path.EgHeaderLen:], body)
 			device.SendPacket(peer, path.QueryPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 		}
+	} else if content.Src_nodeID == device.ID {
+		device.graph.UpdateLatency(device.ID, content.Dst_nodeID, content.Timediff, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
+		peer.OutboundLatency.Push(content.Timediff)
+		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f", device.ID, content.Dst_nodeID, content.Timediff*1000)
 	}
 	return nil
 }
