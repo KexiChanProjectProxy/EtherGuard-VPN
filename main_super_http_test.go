@@ -488,6 +488,80 @@ func TestSuperStartupPublishesListenPortPolicy(t *testing.T) {
 	}
 }
 
+func TestSuperStartupPublishesEndpointBlacklistFromYAML(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.EndpointBlacklist = []string{"203.0.113.17", "198.51.100.0/24", "2001:db8::/32"}
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+
+	path := writeV2Config(t, cfg)
+	loaded, err := loadSuperConfigV2(path)
+	if err != nil {
+		t.Fatalf("loadSuperConfigV2: %v", err)
+	}
+	if len(loaded.EndpointBlacklist) != len(cfg.EndpointBlacklist) {
+		t.Fatalf("loaded EndpointBlacklist len=%d want %d", len(loaded.EndpointBlacklist), len(cfg.EndpointBlacklist))
+	}
+
+	fx := newRuntimeTestFixture(t, func(c *superConfig) { c.BaseConfig = loaded })
+	defer fx.Shutdown(context.Background())
+
+	status, body := fx.signedGet(t, "/edge/v2/snapshot", 7, "seed-key-7")
+	if status != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", status, body)
+	}
+	var snap mtypes.ControlV2Snapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if !reflect.DeepEqual(snap.Parameters.EndpointBlacklist, cfg.EndpointBlacklist) {
+		t.Fatalf("snapshot EndpointBlacklist=%#v want %#v", snap.Parameters.EndpointBlacklist, cfg.EndpointBlacklist)
+	}
+
+	loaded.EndpointBlacklist[0] = "192.0.2.1"
+	status, body = fx.signedGet(t, "/edge/v2/snapshot", 7, "seed-key-7")
+	if status != http.StatusOK {
+		t.Fatalf("snapshot after config mutation status=%d body=%s", status, body)
+	}
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode snapshot after config mutation: %v", err)
+	}
+	if snap.Parameters.EndpointBlacklist[0] != "203.0.113.17" {
+		t.Fatalf("snapshot blacklist changed after config mutation: %#v", snap.Parameters.EndpointBlacklist)
+	}
+}
+
+func TestSuperStartupPublishesEmptyEndpointBlacklistWhenAbsent(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+
+	path := writeV2Config(t, cfg)
+	loaded, err := loadSuperConfigV2(path)
+	if err != nil {
+		t.Fatalf("loadSuperConfigV2: %v", err)
+	}
+	if loaded.EndpointBlacklist != nil {
+		t.Fatalf("absent YAML policy decoded as %#v, want nil", loaded.EndpointBlacklist)
+	}
+
+	fx := newRuntimeTestFixture(t, func(c *superConfig) { c.BaseConfig = loaded })
+	defer fx.Shutdown(context.Background())
+	status, body := fx.signedGet(t, "/edge/v2/snapshot", 7, "seed-key-7")
+	if status != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", status, body)
+	}
+	var snap mtypes.ControlV2Snapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if len(snap.Parameters.EndpointBlacklist) != 0 {
+		t.Fatalf("absent snapshot blacklist=%#v, want empty", snap.Parameters.EndpointBlacklist)
+	}
+}
+
 // TestSuperStartupRejectsInvalidListenPortPolicy proves an invalid policy
 // fails config validation BEFORE the HTTP listener accepts requests.
 func TestSuperStartupRejectsInvalidListenPortPolicy(t *testing.T) {

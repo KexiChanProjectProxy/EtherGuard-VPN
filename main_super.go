@@ -676,6 +676,7 @@ func buildControlV2Parameters(cfg mtypes.SuperConfigV2) mtypes.ControlV2Paramete
 		HeartbeatInterval:   time.Duration(cfg.HeartbeatIntervalSeconds * float64(time.Second)),
 		EventReplay:         cfg.EventReplay,
 		ListenPortPriority:  cloneListenPortPriority(cfg.ListenPortPriority),
+		EndpointBlacklist:   append([]string{}, cfg.EndpointBlacklist...),
 	}
 }
 
