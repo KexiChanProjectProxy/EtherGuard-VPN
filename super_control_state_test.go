@@ -715,6 +715,48 @@ func TestControlStateParametersCloneIsolationPointeeMutation(t *testing.T) {
 	}
 }
 
+func TestControlStateParametersCloneIsolationEndpointBlacklist(t *testing.T) {
+	cfg := validBaseConfig()
+	cfg.EndpointBlacklist = []string{"203.0.113.17", "198.51.100.0/24", "2001:db8::/32"}
+	svc := NewControlState(ControlStateConfig{Parameters: buildControlV2Parameters(cfg)})
+
+	bootstrap := svc.ParametersForBootstrap()
+	bootstrap.EndpointBlacklist[0] = "192.0.2.1"
+	current := svc.ParametersForBootstrap()
+	if current.EndpointBlacklist[0] != "203.0.113.17" {
+		t.Fatalf("bootstrap clone mutation changed state: %#v", current.EndpointBlacklist)
+	}
+
+	snapshot := svc.SnapshotFor(1)
+	snapshot.Parameters.EndpointBlacklist[1] = "192.0.2.0/24"
+	current = svc.ParametersForBootstrap()
+	if current.EndpointBlacklist[1] != "198.51.100.0/24" {
+		t.Fatalf("snapshot clone mutation changed state: %#v", current.EndpointBlacklist)
+	}
+
+	updated := buildControlV2Parameters(cfg)
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) {
+		events = append(events, event)
+	})
+	if err := svc.UpdateParameters(context.Background(), updated); err != nil {
+		t.Fatalf("UpdateParameters: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("published events=%d want 1", len(events))
+	}
+	payload, ok := events[0].Data.(mtypes.ControlV2Parameters)
+	if !ok {
+		t.Fatalf("event payload type=%T want mtypes.ControlV2Parameters", events[0].Data)
+	}
+	payload.EndpointBlacklist[2] = "192.0.2.0/24"
+	updated.EndpointBlacklist[0] = "192.0.2.1"
+	current = svc.ParametersForBootstrap()
+	if current.EndpointBlacklist[0] != "203.0.113.17" || current.EndpointBlacklist[2] != "2001:db8::/32" {
+		t.Fatalf("update clone mutation changed state: %#v", current.EndpointBlacklist)
+	}
+}
+
 func TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps(t *testing.T) {
 	// Given a shared state with one target, readers, and live observers
 	svc := NewControlState(ControlStateConfig{PeerAliveTimeout: time.Hour})

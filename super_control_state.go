@@ -561,6 +561,7 @@ func cloneCandidates(in []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate
 func cloneParameters(in mtypes.ControlV2Parameters) mtypes.ControlV2Parameters {
 	in.STUNServers = append([]string{}, in.STUNServers...)
 	in.ListenPortPriority = cloneListenPortPriority(in.ListenPortPriority)
+	in.EndpointBlacklist = append([]string{}, in.EndpointBlacklist...)
 	return in
 }
 
