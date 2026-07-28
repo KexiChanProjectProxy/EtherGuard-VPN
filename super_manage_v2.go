@@ -471,11 +471,13 @@ func (m *ManageV2) Snapshot() mtypes.SuperConfigV2 {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// buildEdgeConfigV2 clones the edge template and fills in NodeID, NodeName,
-// and the SuperNodeV2 reference (API URL, prefix, Super NodeID placeholder,
-// freshly-generated control PSKey).
+// buildEdgeConfigV2 clones the edge template and fills in the per-Edge key,
+// NodeID, NodeName, and the SuperNodeV2 reference (API URL, prefix, Super
+// NodeID placeholder, freshly-generated control PSKey).
 func (m *ManageV2) buildEdgeConfigV2(nodeID mtypes.Vertex, nodeName, controlPSKey string) mtypes.EdgeConfigV2 {
 	p := m.edgeTemplate
+	pri, _ := device.RandomKeyPair()
+	p.PrivKey = pri.ToString()
 	p.NodeID = nodeID
 	p.NodeName = nodeName
 	p.SuperNodeV2 = mtypes.SuperNodeV2Ref{

@@ -58,6 +58,9 @@ func TestGenSuperCfgHTTPOnly(t *testing.T) {
 		if err := edge.Validate(); err != nil {
 			t.Fatalf("validate %s: %v", name, err)
 		}
+		if edge.PrivKey == "" {
+			t.Fatalf("generated %s has an empty private key", name)
+		}
 	}
 }
 

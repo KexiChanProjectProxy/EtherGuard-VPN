@@ -154,6 +154,8 @@ func GenSuperCfg(configPath string, printExample bool) error {
 		idstr := fmt.Sprintf("%0"+strconv.Itoa(width)+"d", rawID)
 		controlKey := device.RandomPSK().ToString()
 		edge := edgeTemplate
+		pri, _ := device.RandomKeyPair()
+		edge.PrivKey = pri.ToString()
 		edge.NodeID = nodeID
 		edge.NodeName = input.NetworkName
 		edge.Interface.Name = input.NetworkName

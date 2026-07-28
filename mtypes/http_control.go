@@ -776,6 +776,7 @@ type EdgeConfigV2 struct {
 	Interface          InterfaceConf               `yaml:"Interface"`
 	NodeID             Vertex                      `yaml:"NodeID"`
 	NodeName           string                      `yaml:"NodeName"`
+	PrivKey            string                      `yaml:"PrivKey" json:"-"`
 	DefaultTTL         uint8                       `yaml:"DefaultTTL"`
 	LogLevel           LoggerInfo                  `yaml:"LogLevel"`
 	SuperNodeV2        SuperNodeV2Ref              `yaml:"SuperNodeV2"`

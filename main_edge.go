@@ -49,6 +49,18 @@ func hydrateV2DirectConnectivity(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.E
 	econfig.DynamicRoute.ConnNextTry = resolved.NextEndpointTrySeconds
 }
 
+func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfigV2) {
+	econfig.Interface = econfigV2.Interface
+	econfig.NodeID = econfigV2.NodeID
+	econfig.NodeName = econfigV2.NodeName
+	econfig.PrivKey = econfigV2.PrivKey
+	econfig.DefaultTTL = econfigV2.DefaultTTL
+	econfig.LogLevel = econfigV2.LogLevel
+	econfig.Peers = econfigV2.Peers
+	econfig.SuperNodeV2Enabled = true
+	hydrateV2DirectConnectivity(econfig, econfigV2)
+}
+
 func bootstrapInitialBind(ctx context.Context, config mtypes.EdgeConfigV2) ([]uint16, error) {
 	client := device.NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey)
 	parameters, err := client.Bootstrap(ctx)
@@ -101,14 +113,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		if err := econfigV2.Validate(); err != nil {
 			return fmt.Errorf("validate v2 edge config %q: %w", configPath, err)
 		}
-		econfig.Interface = econfigV2.Interface
-		econfig.NodeID = econfigV2.NodeID
-		econfig.NodeName = econfigV2.NodeName
-		econfig.DefaultTTL = econfigV2.DefaultTTL
-		econfig.LogLevel = econfigV2.LogLevel
-		econfig.Peers = econfigV2.Peers
-		econfig.SuperNodeV2Enabled = true
-		hydrateV2DirectConnectivity(&econfig, &econfigV2)
+		hydrateV2EdgeConfig(&econfig, &econfigV2)
 		bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), edgeInitialBindTimeout)
 		initialBindCandidates, err = bootstrapInitialBind(bootstrapCtx, econfigV2)
 		cancelBootstrap()

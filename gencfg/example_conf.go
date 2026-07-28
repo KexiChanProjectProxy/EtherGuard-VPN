@@ -156,6 +156,7 @@ func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {
 		}
 		return config, nil
 	}
+	pri, _ := device.RandomKeyPair()
 	return mtypes.EdgeConfigV2{
 		Interface: mtypes.InterfaceConf{
 			IType:         "tap",
@@ -170,6 +171,7 @@ func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {
 		},
 		NodeID:     1,
 		NodeName:   "Node01",
+		PrivKey:    pri.ToString(),
 		DefaultTTL: 200,
 		LogLevel: mtypes.LoggerInfo{
 			LogLevel:    "error",

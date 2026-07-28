@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v2"
 )
 
 // TestControlV2RegisterRequestRoundTrip proves a valid register request
@@ -716,6 +718,45 @@ Peers:
 	}
 	if cfg.SuperNodeV2.NodeID != Vertex(65530) {
 		t.Errorf("SuperNodeV2.NodeID: got %v", cfg.SuperNodeV2.NodeID)
+	}
+}
+
+func TestEdgeConfigV2PrivateKeyYAMLRoundTrip(t *testing.T) {
+	// Given
+	in := EdgeConfigV2{
+		PrivKey: "mL5IW0GuqbjgDeOJuPHBU2iJzBPNKhaNEXbIGwwYWWk=",
+		NodeID:  7,
+	}
+
+	// When
+	raw, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal v2 edge config: %v", err)
+	}
+	var out EdgeConfigV2
+	if err := yamlUnmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal v2 edge config: %v", err)
+	}
+
+	// Then
+	if out.PrivKey != in.PrivKey {
+		t.Fatalf("private key = %q, want %q", out.PrivKey, in.PrivKey)
+	}
+}
+
+func TestEdgeConfigV2PrivateKeyIsExcludedFromJSON(t *testing.T) {
+	// Given
+	config := EdgeConfigV2{PrivKey: "private-key-must-not-leak"}
+
+	// When
+	raw, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("marshal v2 edge config JSON: %v", err)
+	}
+
+	// Then
+	if strings.Contains(string(raw), config.PrivKey) || strings.Contains(string(raw), "PrivKey") {
+		t.Fatalf("private key leaked into v2 edge config JSON: %s", raw)
 	}
 }
 

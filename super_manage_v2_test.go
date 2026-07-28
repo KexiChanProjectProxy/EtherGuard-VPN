@@ -254,6 +254,12 @@ func TestManageV2AddPeerWritesFreshProfiles(t *testing.T) {
 	if edge2.SuperNodeV2.ControlPSKey == edge1.SuperNodeV2.ControlPSKey {
 		t.Fatalf("edge2 leaked edge1's PSKey: %q", edge2.SuperNodeV2.ControlPSKey)
 	}
+	if edge1.PrivKey == "" || edge2.PrivKey == "" {
+		t.Fatal("generated edge profile has an empty private key")
+	}
+	if edge1.PrivKey == edge2.PrivKey {
+		t.Fatalf("two edges share the same private key: %q", edge1.PrivKey)
+	}
 
 	// No legacy UDP fields should be present in any written file.
 	data, _ := ioutil.ReadFile(superPath)
