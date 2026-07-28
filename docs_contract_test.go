@@ -570,12 +570,7 @@ func TestCorpusEdgeRecvSendUnchanged(t *testing.T) {
 	}
 }
 
-// TestCorpusSuperYAMLPolicyIsTask6Addition asserts the operational Super
-// YAML carries exactly the approved ListenPortPriority addition (Port:
-// 16386) and nothing else in the port-policy surface. Other fields must
-// be untouched; the audit re-decodes the YAML and verifies the policy
-// expands to a single-element [16386] candidate set.
-func TestCorpusSuperYAMLPolicyIsTask6Addition(t *testing.T) {
+func TestCorpusSuperYAMLPolicyIsRange(t *testing.T) {
 	t.Parallel()
 	if _, err := os.Stat(operationalSuperYAML); err != nil {
 		t.Skipf("operational Super YAML not present at %s: %v", operationalSuperYAML, err)
@@ -585,15 +580,10 @@ func TestCorpusSuperYAMLPolicyIsTask6Addition(t *testing.T) {
 		t.Fatalf("read %s: %v", operationalSuperYAML, err)
 	}
 	if !strings.Contains(string(data), "ListenPortPriority:") {
-		t.Fatalf("%s: missing ListenPortPriority: key (Task 6 requires [{Port: 16386}])", operationalSuperYAML)
-	}
-	if !strings.Contains(string(data), "- Port: 16386") {
-		t.Fatalf("%s: missing '- Port: 16386' entry under ListenPortPriority", operationalSuperYAML)
+		t.Fatalf("%s: missing ListenPortPriority: key", operationalSuperYAML)
 	}
 	// The Super YAML must decode into a typed SuperConfigV2 and the
-	// policy must expand to exactly one port: 16386. This catches
-	// accidental Range/Port mixing or future entries without requiring
-	// the test to reason about string fragments.
+	// policy must contain exactly one range with the approved bounds.
 	var cfg mtypes.SuperConfigV2
 	if err := yamlUnmarshal(data, &cfg); err != nil {
 		t.Fatalf("%s: yaml unmarshal: %v", operationalSuperYAML, err)
@@ -601,12 +591,22 @@ func TestCorpusSuperYAMLPolicyIsTask6Addition(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("%s: SuperConfigV2.Validate(): %v", operationalSuperYAML, err)
 	}
+	if len(cfg.ListenPortPriority) != 1 {
+		t.Fatalf("%s: ListenPortPriority has %d entries, want exactly one", operationalSuperYAML, len(cfg.ListenPortPriority))
+	}
+	entry := cfg.ListenPortPriority[0]
+	if entry.Port != nil || entry.Range == nil {
+		t.Fatalf("%s: ListenPortPriority entry = %#v, want exactly one Range entry", operationalSuperYAML, entry)
+	}
+	if entry.Range.From != 16386 || entry.Range.To != 16390 {
+		t.Fatalf("%s: ListenPortPriority range = %#v, want From=16386 To=16390", operationalSuperYAML, *entry.Range)
+	}
 	ports, err := cfg.ListenPortPriority.Expand()
 	if err != nil {
 		t.Fatalf("%s: ListenPortPriority.Expand(): %v", operationalSuperYAML, err)
 	}
-	if len(ports) != 1 || ports[0] != 16386 {
-		t.Fatalf("%s: expanded policy = %v, want [16386]", operationalSuperYAML, ports)
+	if len(ports) != 5 || ports[0] != 16386 || ports[1] != 16387 || ports[2] != 16388 || ports[3] != 16389 || ports[4] != 16390 {
+		t.Fatalf("%s: expanded policy = %v, want [16386 16387 16388 16389 16390]", operationalSuperYAML, ports)
 	}
 	// Ensure the YAML does not carry a forbidden legacy key that
 	// would be rejected by SuperConfigV2.UnmarshalYAML — the typed
@@ -639,12 +639,11 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	}
 	liveLines := strings.Split(string(data), "\n")
 	goldenLines := strings.Split(operationalSuperYAMLGolden, "\n")
-	if len(liveLines) != len(goldenLines)+2 {
-		// Task 6 adds exactly 2 lines: 'ListenPortPriority:' and '- Port: 16386'.
-		t.Fatalf("%s: line count drift: got %d, want golden %d + 2 added = %d",
-			operationalSuperYAML, len(liveLines), len(goldenLines), len(goldenLines)+2)
+	if len(liveLines) != len(goldenLines)+4 {
+		t.Fatalf("%s: line count drift: got %d, want golden %d + 4 added = %d",
+			operationalSuperYAML, len(liveLines), len(goldenLines), len(goldenLines)+4)
 	}
-	// Walk both side-by-side, skipping the two inserted lines. The
+	// Walk both side-by-side, skipping the four inserted lines. The
 	// insertion is anchored AFTER DampingFilterRadius: 4 — the live
 	// YAML has golden[0..insertAt] verbatim, then two new lines, then
 	// golden[insertAt+1..]. Locate the DampingFilterRadius anchor in
@@ -661,21 +660,23 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	if insertAt < 0 {
 		t.Fatalf("%s: DampingFilterRadius: 4 anchor not found", operationalSuperYAML)
 	}
-	if insertAt+2 >= len(liveLines) {
+	if insertAt+4 >= len(liveLines) {
 		t.Fatalf("%s: not enough lines after DampingFilterRadius anchor for policy insertion", operationalSuperYAML)
 	}
 	if liveLines[insertAt+1] != "ListenPortPriority:" {
 		t.Errorf("%s: line after DampingFilterRadius = %q, want \"ListenPortPriority:\"", operationalSuperYAML, liveLines[insertAt+1])
 	}
-	if liveLines[insertAt+2] != "- Port: 16386" {
-		t.Errorf("%s: line 2 after DampingFilterRadius = %q, want \"- Port: 16386\"", operationalSuperYAML, liveLines[insertAt+2])
+	for offset, want := range []string{"- Range:", "    From: 16386", "    To: 16390"} {
+		if liveLines[insertAt+2+offset] != want {
+			t.Errorf("%s: policy line %d = %q, want %q", operationalSuperYAML, offset+2, liveLines[insertAt+2+offset], want)
+		}
 	}
 	// Now compare every other line to the golden snapshot. For golden
-	// indices strictly past insertAt, the live YAML has shifted by 2.
+	// indices strictly past insertAt, the live YAML has shifted by 4.
 	for i, gline := range goldenLines {
 		liveLine := liveLines[i]
 		if i > insertAt {
-			liveLine = liveLines[i+2] // skip the two inserted lines
+			liveLine = liveLines[i+4]
 		}
 		if liveLine != gline {
 			t.Errorf("%s: line %d drift: got %q, want golden %q", operationalSuperYAML, i+1, liveLine, gline)
