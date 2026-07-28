@@ -483,19 +483,22 @@ type ControlV2Snapshot struct {
 	Peers      []ControlV2Peer     `json:"peers"`
 }
 
+const controlV2SnapshotIssueTimeTolerance = time.Second
+
 // ETag returns a deterministic opaque string suitable for If-None-Match.
 func (s *ControlV2Snapshot) ETag() string {
 	return `"rev-` + strconv.FormatUint(s.Revision, 10) + `"`
 }
 
-// Accepts reports whether the receiver revision should accept incoming as
-// the new authoritative snapshot. Same revision is idempotent (accept);
-// strictly older incoming is rejected.
+// Accepts reports whether the receiver should accept incoming as the new
+// authoritative snapshot. Same revision is idempotent; older revisions are
+// accepted only when their issue time is at least one second newer.
 func (s *ControlV2Snapshot) Accepts(incoming *ControlV2Snapshot) bool {
 	if incoming == nil {
 		return false
 	}
-	return incoming.Revision >= s.Revision
+	return incoming.Revision >= s.Revision ||
+		!incoming.IssuedAt.Before(s.IssuedAt.Add(controlV2SnapshotIssueTimeTolerance))
 }
 
 // ControlV2Parameters is the typed view of the Super-published control

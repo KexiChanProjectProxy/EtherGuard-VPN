@@ -425,6 +425,67 @@ func TestControlV2SnapshotRevisionMonotonic(t *testing.T) {
 	}
 }
 
+func TestControlV2SnapshotAcceptsRestartedSuperByIssueTime(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	current := ControlV2Snapshot{Revision: 500, IssuedAt: issuedAt}
+	incoming := ControlV2Snapshot{Revision: 2, IssuedAt: issuedAt.Add(time.Minute)}
+
+	// When
+	accepted := current.Accepts(&incoming)
+
+	// Then
+	if !accepted {
+		t.Fatal("snapshot from restarted Super should be accepted by newer issue time")
+	}
+}
+
+func TestControlV2SnapshotRejectsOlderSameGeneration(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	current := ControlV2Snapshot{Revision: 500, IssuedAt: issuedAt}
+	incoming := ControlV2Snapshot{Revision: 499, IssuedAt: issuedAt.Add(-time.Minute)}
+
+	// When
+	accepted := current.Accepts(&incoming)
+
+	// Then
+	if accepted {
+		t.Fatal("older same-generation snapshot should be rejected")
+	}
+}
+
+func TestControlV2SnapshotUsesIssueTimeTolerance(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	current := ControlV2Snapshot{Revision: 500, IssuedAt: issuedAt}
+
+	// When
+	withinTolerance := ControlV2Snapshot{Revision: 499, IssuedAt: issuedAt.Add(500 * time.Millisecond)}
+	atTolerance := ControlV2Snapshot{Revision: 499, IssuedAt: issuedAt.Add(time.Second)}
+
+	// Then
+	if current.Accepts(&withinTolerance) {
+		t.Fatal("issue-time jitter within tolerance should be rejected")
+	}
+	if !current.Accepts(&atTolerance) {
+		t.Fatal("issue time at tolerance should be accepted")
+	}
+}
+
+func TestControlV2SnapshotRejectsNilIncoming(t *testing.T) {
+	// Given
+	current := ControlV2Snapshot{Revision: 500}
+
+	// When
+	accepted := current.Accepts(nil)
+
+	// Then
+	if accepted {
+		t.Fatal("nil incoming snapshot should be rejected")
+	}
+}
+
 // TestControlV2EventEnvelope ensures SSE event envelopes preserve their
 // revision + event ID for replay.
 func TestControlV2EventEnvelope(t *testing.T) {

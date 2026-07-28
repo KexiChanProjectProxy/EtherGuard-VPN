@@ -382,7 +382,7 @@ func TestControlHTTPClientMonotonicRevision(t *testing.T) {
 
 	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 99), "k")
 	c.mu.Lock()
-	c.current = &mtypes.ControlV2Snapshot{Revision: 7}
+	c.current = &mtypes.ControlV2Snapshot{Revision: 7, IssuedAt: time.Unix(7, 0)}
 	c.mu.Unlock()
 
 	snap, ok, err := c.Snapshot(context.Background())
@@ -397,6 +397,45 @@ func TestControlHTTPClientMonotonicRevision(t *testing.T) {
 	}
 	if cur := c.Current(); cur == nil || cur.Revision != 7 {
 		t.Fatalf("Current() should still be rev 7, got %+v", cur)
+	}
+}
+
+func TestControlHTTPClientAcceptsRestartedSuperSnapshot(t *testing.T) {
+	// Given
+	env := &serverEnv{psKey: []byte("k")}
+	issuedAt := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := env.snapshot(2)
+		snapshot.IssuedAt = issuedAt.Add(time.Minute)
+		w.Header().Set("ETag", snapshot.ETag())
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 100), "k")
+	client.mu.Lock()
+	client.current = &mtypes.ControlV2Snapshot{Revision: 500, IssuedAt: issuedAt}
+	client.mu.Unlock()
+
+	// When
+	snapshot, applied, err := client.Snapshot(context.Background())
+
+	// Then
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if !applied {
+		t.Fatal("snapshot from restarted Super should be applied")
+	}
+	if snapshot == nil || snapshot.Revision != 2 {
+		t.Fatalf("snapshot = %+v, want revision 2", snapshot)
 	}
 }
 
@@ -607,7 +646,7 @@ func TestControlHTTPClientSyncMonotonic(t *testing.T) {
 	c := newTestClient(t, srv.URL, "edge/v2", vertexFromInt(t, 333), "k")
 	// Pre-seed current to rev=10 so all incoming snapshots are stale.
 	c.mu.Lock()
-	c.current = &mtypes.ControlV2Snapshot{Revision: 10}
+	c.current = &mtypes.ControlV2Snapshot{Revision: 10, IssuedAt: time.Unix(10, 0)}
 	c.mu.Unlock()
 	c.MinBackoff = 10 * time.Millisecond
 	c.MaxBackoff = 20 * time.Millisecond
