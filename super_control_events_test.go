@@ -920,6 +920,43 @@ func TestControlEventsParamsChangeCarriesEndpointBlacklist(t *testing.T) {
 	}
 }
 
+func TestControlStateParamsChangeCarriesEndpointBlacklistOrdering(t *testing.T) {
+	cfg := validBaseConfig()
+	svc := NewControlState(ControlStateConfig{Parameters: buildControlV2Parameters(cfg)})
+	hub := NewControlEventHub(4)
+	defer hub.Close()
+	svc.SetPublishForTest(hub.Publish)
+
+	sub, err := hub.Subscribe(context.Background(), "")
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+
+	updated := buildControlV2Parameters(cfg)
+	updated.EndpointBlacklist = []string{"203.0.113.17", "198.51.100.0/24", "2001:db8::/32"}
+	if err := svc.UpdateParameters(context.Background(), updated); err != nil {
+		t.Fatalf("UpdateParameters: %v", err)
+	}
+
+	events := drain(t, context.Background(), sub.Events(), 1)
+	if events[0].Type != mtypes.ControlV2EventParamsChange {
+		t.Fatalf("event type=%v want params_change", events[0].Type)
+	}
+	payload, ok := events[0].Data.(mtypes.ControlV2Parameters)
+	if !ok {
+		t.Fatalf("event payload type=%T want mtypes.ControlV2Parameters", events[0].Data)
+	}
+	if len(payload.EndpointBlacklist) != len(updated.EndpointBlacklist) {
+		t.Fatalf("event blacklist=%#v want %#v", payload.EndpointBlacklist, updated.EndpointBlacklist)
+	}
+	for i, want := range updated.EndpointBlacklist {
+		if payload.EndpointBlacklist[i] != want {
+			t.Fatalf("event blacklist[%d]=%q want %q", i, payload.EndpointBlacklist[i], want)
+		}
+	}
+}
+
 func TestControlEventsAbsentEndpointBlacklistDecodesEmpty(t *testing.T) {
 	hub := NewControlEventHub(4)
 	defer hub.Close()
