@@ -126,6 +126,7 @@ type PongMsg struct {
 	Timediff       float64
 	TimeToAlive    float64
 	AdditionalCost float64
+	PingTime       time.Time
 }
 
 func (c *PongMsg) ToString() string {
