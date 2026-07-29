@@ -265,6 +265,195 @@ func TestSuperHTTPRuntimeApplySnapshotSerializesConcurrentCalls(t *testing.T) {
 	}
 }
 
+func TestSuperHTTPRuntimeEffectiveRelayCostUsesOverride(t *testing.T) {
+	// Given
+	override := 125.5
+	serverDefault := 250.25
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{RelayCostMS: &override})
+	snapshot := runtimeTestSnapshot(t, 1)
+	snapshot.Parameters.RelayCostMS = &serverDefault
+
+	// When
+	runtime.applySnapshot(snapshot)
+
+	// Then
+	if got := runtime.effectiveRelayCostMS(); got != override {
+		t.Fatalf("effective relay cost = %f, want override %f", got, override)
+	}
+}
+
+func TestSuperHTTPRuntimeEffectiveRelayCostUsesServerDefaultWithoutOverride(t *testing.T) {
+	// Given
+	serverDefault := 250.25
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	snapshot := runtimeTestSnapshot(t, 1)
+	snapshot.Parameters.RelayCostMS = &serverDefault
+
+	// When
+	runtime.applySnapshot(snapshot)
+
+	// Then
+	if got := runtime.effectiveRelayCostMS(); got != serverDefault {
+		t.Fatalf("effective relay cost = %f, want server default %f", got, serverDefault)
+	}
+}
+
+func TestSuperHTTPRuntimeEffectiveRelayCostDefaultsToZero(t *testing.T) {
+	// Given
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+
+	// When
+	runtime.applySnapshot(runtimeTestSnapshot(t, 1))
+
+	// Then
+	if got := runtime.effectiveRelayCostMS(); got != 0 {
+		t.Fatalf("effective relay cost = %f, want zero", got)
+	}
+}
+
+func TestSuperHTTPRuntimeReportIncludesEffectiveRelayCost(t *testing.T) {
+	// Given
+	override := 125.5
+	reports := make(chan mtypes.ControlV2ReportRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/edge/v2/report" {
+			http.NotFound(w, r)
+			return
+		}
+		var report mtypes.ControlV2ReportRequest
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Errorf("decode report: %v", err)
+			return
+		}
+		reports <- report
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{
+		NodeID:      10,
+		RelayCostMS: &override,
+	})
+	runtime.client = NewControlHTTPClient(server.URL, "/edge/v2", runtime.config.NodeID, "key")
+	snapshot := runtimeTestSnapshot(t, 1)
+	snapshot.Parameters.ReportInterval = time.Millisecond
+	runtime.applySnapshot(snapshot)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	// When
+	go func() {
+		runtime.reportLoop(ctx, superHTTPReady{})
+		close(done)
+	}()
+
+	// Then
+	select {
+	case report := <-reports:
+		if report.RelayCostMS == nil || *report.RelayCostMS != override {
+			t.Fatalf("reported relay cost = %v, want %f", report.RelayCostMS, override)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("report loop emitted no report")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("report loop did not stop")
+	}
+}
+
+func TestApplySuperHTTPSnapshotUsesIncomingDestinationRelayCosts(t *testing.T) {
+	// Given
+	const (
+		nodeA = mtypes.Vertex(1)
+		nodeR = mtypes.Vertex(2)
+		nodeB = mtypes.Vertex(3)
+	)
+	relayCostR := 50.0
+	serverDefault := 70.0
+	device := newRelayCostSnapshotDevice(t, 99)
+	peerKeys := make([]string, 3)
+	for index := range peerKeys {
+		_, publicKey := RandomKeyPair()
+		peerKeys[index] = publicKey.ToString()
+	}
+	snapshot := runtimeTestSnapshot(t, 1)
+	snapshot.Parameters.RelayCostMS = &serverDefault
+	snapshot.Peers = []mtypes.ControlV2Peer{
+		{NodeID: nodeA, PubKey: peerKeys[0], LatencyMS: map[mtypes.Vertex]float64{nodeR: 10, nodeB: 25}},
+		{NodeID: nodeR, PubKey: peerKeys[1], RelayCostMS: &relayCostR, LatencyMS: map[mtypes.Vertex]float64{nodeB: 10}},
+		{NodeID: nodeB, PubKey: peerKeys[2]},
+	}
+
+	// When
+	device.applySuperHTTPSnapshot(snapshot, 0)
+
+	// Then
+	if got := device.graph.Weight(nodeA, nodeR, true); math.Abs(got-0.060) > 0.000001 {
+		t.Fatalf("A->R weighted cost = %f, want 0.060", got)
+	}
+	if got := device.graph.Weight(nodeR, nodeB, true); math.Abs(got-0.080) > 0.000001 {
+		t.Fatalf("R->B weighted cost = %f, want 0.080", got)
+	}
+	if got := device.graph.Weight(nodeA, nodeB, true); math.Abs(got-0.095) > 0.000001 {
+		t.Fatalf("A->B weighted cost = %f, want 0.095", got)
+	}
+	if next := device.graph.Next(nodeA, nodeB); next != nodeB {
+		t.Fatalf("costed next hop A->B = %v, want direct B(%v)", next, nodeB)
+	}
+
+	uncosted := newRelayCostSnapshotDevice(t, 99)
+	plainSnapshot := runtimeTestSnapshot(t, 1)
+	plainSnapshot.Parameters.RelayCostMS = nil
+	plainSnapshot.Peers = make([]mtypes.ControlV2Peer, len(snapshot.Peers))
+	copy(plainSnapshot.Peers, snapshot.Peers)
+	for index := range plainSnapshot.Peers {
+		plainSnapshot.Peers[index].RelayCostMS = nil
+	}
+	uncosted.applySuperHTTPSnapshot(plainSnapshot, 0)
+	if got := uncosted.graph.Weight(nodeA, nodeB, true); math.Abs(got-0.025) > 0.000001 {
+		t.Fatalf("uncosted A->B weighted cost = %f, want 0.025", got)
+	}
+	if next := uncosted.graph.Next(nodeA, nodeB); next != nodeR {
+		t.Fatalf("uncosted next hop A->B = %v, want relay R(%v)", next, nodeR)
+	}
+	costedTwoHop := device.graph.Weight(nodeA, nodeR, true) + device.graph.Weight(nodeR, nodeB, true)
+	uncostedTwoHop := uncosted.graph.Weight(nodeA, nodeR, true) + uncosted.graph.Weight(nodeR, nodeB, true)
+	costedDirect := device.graph.Weight(nodeA, nodeB, true)
+	uncostedDirect := uncosted.graph.Weight(nodeA, nodeB, true)
+	if got := (costedTwoHop - costedDirect) - (uncostedTwoHop - uncostedDirect); math.Abs(got-relayCostR/1000) > 0.000001 {
+		t.Fatalf("intermediate relay cost delta = %f, want %f", got, relayCostR/1000)
+	}
+}
+
+func newRelayCostSnapshotDevice(t *testing.T, id mtypes.Vertex) *Device {
+	t.Helper()
+	graph, err := path.NewGraph(0, true, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
+	if err != nil {
+		t.Fatalf("graph: %v", err)
+	}
+	device := &Device{
+		ID:                id,
+		closed:            make(chan int),
+		event_tryendpoint: make(chan struct{}, 1),
+		enabledAf:         conn.EnabledAf46,
+		log:               NewLogger(LogLevelSilent, "relay-cost-snapshot-test"),
+		graph:             graph,
+		EdgeConfig: &mtypes.EdgeConfig{
+			DynamicRoute: mtypes.DynamicRouteInfo{
+				PeerAliveTimeout: 60,
+				P2P:              mtypes.P2PInfo{UseP2P: false},
+			},
+			SuperNodeV2Enabled: true,
+		},
+	}
+	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
+	device.peers.IDMap = make(map[mtypes.Vertex]*Peer)
+	device.peers.SuperPeer = make(map[NoisePublicKey]*Peer)
+	return device
+}
+
 func TestSuperHTTPRuntimeSnapshotURLsWeightsObservedCandidates(t *testing.T) {
 	// Given
 	info := mtypes.ControlV2Peer{

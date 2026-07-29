@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -22,6 +23,8 @@ type superHTTPReady struct {
 
 // SuperHTTPRuntime owns the Edge HTTP control-plane lifecycle.
 type SuperHTTPRuntime struct {
+	relayCostMS atomic.Uint64
+
 	device *Device
 	config mtypes.EdgeConfigV2
 	client *ControlHTTPClient
@@ -43,7 +46,7 @@ type SuperHTTPRuntime struct {
 }
 
 func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
-	return &SuperHTTPRuntime{
+	runtime := &SuperHTTPRuntime{
 		device:           device,
 		config:           config,
 		client:           NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey),
@@ -52,6 +55,29 @@ func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPR
 		recoveryRequests: make(map[mtypes.Vertex]time.Time),
 		parameterUpdates: make(chan struct{}, 1),
 	}
+	runtime.relayCostMS.Store(math.Float64bits(resolveRelayCostMS(config.RelayCostMS, nil)))
+	return runtime
+}
+
+func resolveRelayCostMS(override, serverDefault *float64) float64 {
+	if override != nil {
+		return *override
+	}
+	if serverDefault != nil {
+		return *serverDefault
+	}
+	return 0
+}
+
+func (runtime *SuperHTTPRuntime) effectiveRelayCostMS() float64 {
+	return math.Float64frombits(runtime.relayCostMS.Load())
+}
+
+func (device *Device) effectiveRelayCostMS() float64 {
+	if device.superHTTP == nil {
+		return 0
+	}
+	return device.superHTTP.effectiveRelayCostMS()
 }
 
 func (runtime *SuperHTTPRuntime) Start(ctx context.Context) {
@@ -159,6 +185,7 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	}
 	runtime.mu.Lock()
 	runtime.parameters = snapshot.Parameters
+	runtime.relayCostMS.Store(math.Float64bits(resolveRelayCostMS(runtime.config.RelayCostMS, snapshot.Parameters.RelayCostMS)))
 	runtime.generation = snapshot.Revision
 	if runtime.device != nil {
 		runtime.candidates = runtime.device.filterControlCandidates(runtime.candidates)
@@ -272,7 +299,8 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 			return
 		case <-timer.C:
 		}
-		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, Candidates: candidates, ReportedAt: time.Now()}
+		relayCostMS := runtime.effectiveRelayCostMS()
+		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, RelayCostMS: &relayCostMS, Candidates: candidates, ReportedAt: time.Now()}
 		if runtime.device != nil {
 			report.Candidates = runtime.device.filterControlCandidates(report.Candidates)
 			report.Pongs = runtime.device.superHTTPPongs()
@@ -409,6 +437,14 @@ func (runtime *SuperHTTPRuntime) shouldRequestSnapshotRefresh(id mtypes.Vertex, 
 
 func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot, persistentKeepalive uint32) {
 	wanted := make(map[mtypes.Vertex]mtypes.ControlV2Peer, len(snapshot.Peers))
+	relayCosts := make(map[mtypes.Vertex]float64, len(snapshot.Peers)+1)
+	relayCosts[device.ID] = device.effectiveRelayCostMS()
+	for _, info := range snapshot.Peers {
+		if info.NodeID == device.ID {
+			continue
+		}
+		relayCosts[info.NodeID] = resolveRelayCostMS(info.RelayCostMS, snapshot.Parameters.RelayCostMS)
+	}
 	for _, info := range snapshot.Peers {
 		if info.NodeID == device.ID {
 			continue
@@ -439,7 +475,7 @@ func (device *Device) applySuperHTTPSnapshot(snapshot *mtypes.ControlV2Snapshot,
 		urls := snapshotURLs(info)
 		peer.endpoint_trylist.UpdateSuper(urls, true, device.EdgeConfig.AfPrefer)
 		for destination, latencyMS := range info.LatencyMS {
-			device.graph.UpdateLatency(info.NodeID, destination, latencyMS/1000, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, 0, false, false)
+			device.graph.UpdateLatency(info.NodeID, destination, latencyMS/1000, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, relayCosts[destination], false, false)
 		}
 	}
 	for id, peer := range device.allPeersByIDSnapshot() {
