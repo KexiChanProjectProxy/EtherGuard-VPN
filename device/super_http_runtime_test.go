@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,43 @@ func TestSuperHTTPPongsReportsOutboundLatency(t *testing.T) {
 	}
 	if reports[0].TimediffMS < 11.9 || reports[0].TimediffMS > 12.1 {
 		t.Fatalf("reported outbound latency = %f ms, want about 12 ms", reports[0].TimediffMS)
+	}
+}
+
+func TestSuperHTTPPongsSkipsInvalidLatencyAndPreservesValidPeer(t *testing.T) {
+	for _, sample := range []struct {
+		name  string
+		value float64
+	}{
+		{name: "negative", value: -0.012},
+		{name: "not a number", value: math.NaN()},
+		{name: "infinite", value: math.Inf(1)},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			// Given
+			device, invalidPeer := newSuperLatencyTestDevice(t)
+			invalidPeer.OutboundLatency.Push(sample.value)
+			now := time.Now()
+			validPeer := &Peer{ID: 3, device: device, endpoint: runtimeTestEndpoint{}}
+			validPeer.LastPacketReceivedAdd1Sec.Store(&now)
+			validPeer.OutboundLatency.device = device
+			validPeer.OutboundLatency.Push(0.008)
+			device.peers.IDMap[validPeer.ID] = validPeer
+
+			// When
+			reports := device.superHTTPPongs()
+
+			// Then
+			if len(reports) != 1 {
+				t.Fatalf("reported pong count = %d, want 1 valid pong", len(reports))
+			}
+			if reports[0].DestNode != validPeer.ID {
+				t.Fatalf("reported peer = %v, want valid peer %v", reports[0].DestNode, validPeer.ID)
+			}
+			if err := (&mtypes.ControlV2ReportRequest{NodeID: device.ID, Pongs: reports}).Validate(); err != nil {
+				t.Fatalf("valid report rejected: %v", err)
+			}
+		})
 	}
 }
 

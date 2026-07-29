@@ -3,6 +3,7 @@ package device
 import (
 	"context"
 	"errors"
+	"math"
 	"net"
 	"sort"
 	"strconv"
@@ -505,7 +506,11 @@ func (device *Device) superHTTPPongs() []mtypes.ControlV2Pong {
 		if alive < 0 {
 			alive = 0
 		}
-		latencyMS := peer.OutboundLatency.GetVal() * 1000
+		latency := peer.OutboundLatency.GetVal()
+		if latency < 0 || latency >= mtypes.Infinity || math.IsNaN(latency) || math.IsInf(latency, 0) {
+			continue
+		}
+		latencyMS := latency * 1000
 		pongs = append(pongs, mtypes.ControlV2Pong{SourceNode: device.ID, DestNode: id, TimediffMS: latencyMS, LatencyMS: latencyMS, AliveSeconds: alive})
 	}
 	return pongs
