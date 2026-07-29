@@ -94,6 +94,42 @@ func TestProcessPingSuperModeClampsNegativeLegacyLatencyAndEchoesTimestamp(t *te
 	}
 }
 
+func TestProcessPingSuperModeCarriesEffectiveRelayCost(t *testing.T) {
+	// Given
+	device, peer := newSuperPingTestDevice(t)
+	device.EdgeConfig.SuperNodeV2Enabled = true
+	relayCost := 125.5
+	device.superHTTP = NewSuperHTTPRuntime(device, mtypes.EdgeConfigV2{NodeID: device.ID, RelayCostMS: &relayCost})
+	content := mtypes.PingMsg{
+		Src_nodeID:   peer.ID,
+		Time:         device.graph.GetCurrentTime().Add(-10 * time.Millisecond),
+		RequestReply: 0,
+	}
+
+	// When
+	if err := device.process_ping(peer, content); err != nil {
+		t.Fatalf("process_ping: %v", err)
+	}
+
+	// Then
+	select {
+	case params := <-device.chan_send_packet:
+		t.Cleanup(func() {
+			device.PutMessageBuffer(params.elem.buffer)
+			device.PutOutboundElement(params.elem)
+		})
+		pong, err := mtypes.ParsePongMsg(params.elem.packet[path.EgHeaderLen:])
+		if err != nil {
+			t.Fatalf("parse PongPacket: %v", err)
+		}
+		if pong.AdditionalCost != relayCost {
+			t.Fatalf("pong additional cost = %f, want %f", pong.AdditionalCost, relayCost)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("super-mode process_ping emitted no PongPacket")
+	}
+}
+
 func TestProcessPongSuperModeAddsOutboundRoute(t *testing.T) {
 	// Given
 	device, peer := newSuperLatencyTestDevice(t)
@@ -141,6 +177,28 @@ func TestProcessPongSuperModeUsesLocalRTTHalfWhenPingTimeEchoed(t *testing.T) {
 	}
 	if outbound := peer.OutboundLatency.GetVal(); outbound <= 0 || math.Abs(outbound-want) > 0.01 {
 		t.Fatalf("outbound latency = %f seconds, want local RTT/2 near %f seconds", outbound, want)
+	}
+}
+
+func TestProcessPongSuperModeClampsNegativeAdditionalCost(t *testing.T) {
+	// Given
+	device, peer := newSuperLatencyTestDevice(t)
+	content := mtypes.PongMsg{
+		Src_nodeID:     device.ID,
+		Dst_nodeID:     peer.ID,
+		Timediff:       0.012,
+		TimeToAlive:    device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+		AdditionalCost: -50,
+	}
+
+	// When
+	if err := device.process_pong(peer, content); err != nil {
+		t.Fatalf("process_pong: %v", err)
+	}
+
+	// Then
+	if got := device.graph.Weight(device.ID, peer.ID, true); math.Abs(got-0.012) > 0.000001 {
+		t.Fatalf("negative additional cost changed weighted latency to %f, want 0.012", got)
 	}
 }
 

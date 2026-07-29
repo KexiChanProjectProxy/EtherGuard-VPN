@@ -249,13 +249,17 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 		legacyTimediff = 0
 	}
 	newTimediff := peer.SingleWayLatency.Push(legacyTimediff)
+	additionalCost := device.EdgeConfig.DynamicRoute.AdditionalCost
+	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P && (device.EdgeConfig.SuperNodeV2Enabled || device.superHTTP != nil) {
+		additionalCost = device.effectiveRelayCostMS()
+	}
 
 	pongMessage := mtypes.PongMsg{
 		Src_nodeID:     content.Src_nodeID,
 		Dst_nodeID:     device.ID,
 		Timediff:       newTimediff,
 		TimeToAlive:    device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
-		AdditionalCost: device.EdgeConfig.DynamicRoute.AdditionalCost,
+		AdditionalCost: additionalCost,
 		PingTime:       content.Time,
 	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P && time.Now().After(device.graph.NhTableExpire) {
