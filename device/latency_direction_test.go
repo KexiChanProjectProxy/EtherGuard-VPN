@@ -1,6 +1,7 @@
 package device
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -10,25 +11,7 @@ import (
 
 func TestProcessPingSuperModeEmitsPongToPinger(t *testing.T) {
 	// Given
-	graph, err := path.NewGraph(0, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
-	if err != nil {
-		t.Fatalf("graph: %v", err)
-	}
-	device := &Device{
-		ID:    1,
-		graph: graph,
-		EdgeConfig: &mtypes.EdgeConfig{
-			Interface: mtypes.InterfaceConf{MTU: 1400},
-			DynamicRoute: mtypes.DynamicRouteInfo{
-				PeerAliveTimeout: 60,
-				P2P:              mtypes.P2PInfo{UseP2P: false},
-			},
-		},
-		chan_send_packet: make(chan *packet_send_params, 1),
-	}
-	device.PopulatePools()
-	peer := &Peer{ID: 2, device: device, endpoint: reliabilityTestEndpoint{}}
-	peer.SingleWayLatency.device = device
+	device, peer := newSuperPingTestDevice(t)
 	content := mtypes.PingMsg{
 		Src_nodeID:   peer.ID,
 		Time:         device.graph.GetCurrentTime().Add(-10 * time.Millisecond),
@@ -60,6 +43,52 @@ func TestProcessPingSuperModeEmitsPongToPinger(t *testing.T) {
 		if header.GetSrc() != device.ID || header.GetDst() != peer.ID {
 			t.Fatalf("PongPacket route = %v -> %v, want %v -> %v", header.GetSrc(), header.GetDst(), device.ID, peer.ID)
 		}
+		pong, err := mtypes.ParsePongMsg(params.elem.packet[path.EgHeaderLen:])
+		if err != nil {
+			t.Fatalf("parse PongPacket: %v", err)
+		}
+		if !pong.PingTime.Equal(content.Time) {
+			t.Fatalf("echoed ping time = %v, want %v", pong.PingTime, content.Time)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("super-mode process_ping emitted no PongPacket")
+	}
+}
+
+func TestProcessPingSuperModeClampsNegativeLegacyLatencyAndEchoesTimestamp(t *testing.T) {
+	// Given
+	device, peer := newSuperPingTestDevice(t)
+	content := mtypes.PingMsg{
+		Src_nodeID:   peer.ID,
+		Time:         device.graph.GetCurrentTime().Add(time.Second),
+		RequestReply: 0,
+	}
+	if rawDelta := device.graph.GetCurrentTime().Sub(content.Time).Seconds(); rawDelta >= 0 {
+		t.Fatalf("raw receiver-clock delta = %f, want negative", rawDelta)
+	}
+
+	// When
+	if err := device.process_ping(peer, content); err != nil {
+		t.Fatalf("process_ping: %v", err)
+	}
+
+	// Then
+	select {
+	case params := <-device.chan_send_packet:
+		t.Cleanup(func() {
+			device.PutMessageBuffer(params.elem.buffer)
+			device.PutOutboundElement(params.elem)
+		})
+		pong, err := mtypes.ParsePongMsg(params.elem.packet[path.EgHeaderLen:])
+		if err != nil {
+			t.Fatalf("parse PongPacket: %v", err)
+		}
+		if !pong.PingTime.Equal(content.Time) {
+			t.Fatalf("echoed ping time = %v, want %v", pong.PingTime, content.Time)
+		}
+		if pong.Timediff != 0 {
+			t.Fatalf("legacy timediff = %f, want 0 after negative raw delta", pong.Timediff)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("super-mode process_ping emitted no PongPacket")
 	}
@@ -72,6 +101,7 @@ func TestProcessPongSuperModeAddsOutboundRoute(t *testing.T) {
 		Src_nodeID:  device.ID,
 		Dst_nodeID:  peer.ID,
 		Timediff:    0.012,
+		PingTime:    time.Time{},
 		TimeToAlive: device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
 	}
 
@@ -84,6 +114,98 @@ func TestProcessPongSuperModeAddsOutboundRoute(t *testing.T) {
 	if next := device.graph.Next(device.ID, peer.ID); next != peer.ID {
 		t.Fatalf("next hop self=%v peer=%v, want direct peer; graph edge was not recorded", device.ID, next)
 	}
+}
+
+func TestProcessPongSuperModeUsesLocalRTTHalfWhenPingTimeEchoed(t *testing.T) {
+	// Given
+	device, peer := newSuperLatencyTestDevice(t)
+	pingTime := device.graph.GetCurrentTime().Add(-40 * time.Millisecond)
+	content := mtypes.PongMsg{
+		Src_nodeID:  device.ID,
+		Dst_nodeID:  peer.ID,
+		Timediff:    -0.250,
+		PingTime:    pingTime,
+		TimeToAlive: device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+	}
+
+	// When
+	if err := device.process_pong(peer, content); err != nil {
+		t.Fatalf("process_pong: %v", err)
+	}
+
+	// Then
+	want := device.graph.GetCurrentTime().Sub(pingTime).Seconds() / 2
+	got := device.graph.Weight(device.ID, peer.ID, false)
+	if got <= 0 || math.Abs(got-want) > 0.01 {
+		t.Fatalf("outbound graph latency = %f seconds, want local RTT/2 near %f seconds", got, want)
+	}
+	if outbound := peer.OutboundLatency.GetVal(); outbound <= 0 || math.Abs(outbound-want) > 0.01 {
+		t.Fatalf("outbound latency = %f seconds, want local RTT/2 near %f seconds", outbound, want)
+	}
+}
+
+func TestProcessPongSuperModeSkipsInvalidLegacyLatency(t *testing.T) {
+	for _, sample := range []struct {
+		name  string
+		value float64
+	}{
+		{name: "negative", value: -0.012},
+		{name: "not a number", value: math.NaN()},
+		{name: "infinite", value: math.Inf(1)},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			// Given
+			device, peer := newSuperLatencyTestDevice(t)
+			content := mtypes.PongMsg{
+				Src_nodeID:  device.ID,
+				Dst_nodeID:  peer.ID,
+				Timediff:    sample.value,
+				PingTime:    time.Time{},
+				TimeToAlive: device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+			}
+
+			// When
+			if err := device.process_pong(peer, content); err != nil {
+				t.Fatalf("process_pong: %v", err)
+			}
+
+			// Then
+			if got := device.graph.Weight(device.ID, peer.ID, false); got != mtypes.Infinity {
+				t.Fatalf("legacy invalid latency produced graph edge %f, want no edge", got)
+			}
+			if got := peer.OutboundLatency.GetVal(); got != mtypes.Infinity {
+				t.Fatalf("legacy invalid latency produced outbound sample %f, want no sample", got)
+			}
+			if reports := device.superHTTPPongs(); len(reports) != 0 {
+				t.Fatalf("legacy invalid latency produced %d report entries, want 0", len(reports))
+			}
+		})
+	}
+}
+
+func newSuperPingTestDevice(t *testing.T) (*Device, *Peer) {
+	t.Helper()
+	graph, err := path.NewGraph(0, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
+	if err != nil {
+		t.Fatalf("graph: %v", err)
+	}
+	device := &Device{
+		ID:    1,
+		log:   NewLogger(LogLevelSilent, "super-ping-test"),
+		graph: graph,
+		EdgeConfig: &mtypes.EdgeConfig{
+			Interface: mtypes.InterfaceConf{MTU: 1400},
+			DynamicRoute: mtypes.DynamicRouteInfo{
+				PeerAliveTimeout: 60,
+				P2P:              mtypes.P2PInfo{UseP2P: false},
+			},
+		},
+		chan_send_packet: make(chan *packet_send_params, 1),
+	}
+	device.PopulatePools()
+	peer := &Peer{ID: 2, device: device, endpoint: reliabilityTestEndpoint{}}
+	peer.SingleWayLatency.device = device
+	return device, peer
 }
 
 func newSuperLatencyTestDevice(t *testing.T) (*Device, *Peer) {

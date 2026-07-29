@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"math"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -241,20 +242,26 @@ func (device *Device) SendPing(peer *Peer, times int, replies int, interval floa
 }
 
 func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
-	Timediff := device.graph.GetCurrentTime().Sub(content.Time).Seconds()
-	NewTimediff := peer.SingleWayLatency.Push(Timediff)
+	receiverTime := device.graph.GetCurrentTime()
+	legacyTimediff := receiverTime.Sub(content.Time).Seconds()
+	if legacyTimediff < 0 {
+		device.log.Errorf("negative raw one-way latency source=%v destination=%v sent_at=%s receiver_at=%s raw_delta_ms=%.3f; check clock skew, using zero for legacy pong timing", content.Src_nodeID, device.ID, content.Time.Format(time.RFC3339Nano), receiverTime.Format(time.RFC3339Nano), legacyTimediff*1000)
+		legacyTimediff = 0
+	}
+	newTimediff := peer.SingleWayLatency.Push(legacyTimediff)
 
-	PongMSG := mtypes.PongMsg{
+	pongMessage := mtypes.PongMsg{
 		Src_nodeID:     content.Src_nodeID,
 		Dst_nodeID:     device.ID,
-		Timediff:       NewTimediff,
+		Timediff:       newTimediff,
 		TimeToAlive:    device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
 		AdditionalCost: device.EdgeConfig.DynamicRoute.AdditionalCost,
+		PingTime:       content.Time,
 	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P && time.Now().After(device.graph.NhTableExpire) {
-		device.graph.UpdateLatencyMulti([]mtypes.PongMsg{PongMSG}, true, false)
+		device.graph.UpdateLatencyMulti([]mtypes.PongMsg{pongMessage}, true, false)
 	}
-	body, err := mtypes.GetByte(&PongMSG)
+	body, err := mtypes.GetByte(&pongMessage)
 	if err != nil {
 		return err
 	}
@@ -275,6 +282,9 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 
 func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+		if !isValidLatencySample(content.Timediff) {
+			return nil
+		}
 		if time.Now().After(device.graph.NhTableExpire) {
 			device.graph.UpdateLatency(content.Src_nodeID, content.Dst_nodeID, content.Timediff, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
 		}
@@ -294,11 +304,27 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 			device.SendPacket(peer, path.QueryPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 		}
 	} else if content.Src_nodeID == device.ID {
-		device.graph.UpdateLatency(device.ID, content.Dst_nodeID, content.Timediff, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
-		peer.OutboundLatency.Push(content.Timediff)
-		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f", device.ID, content.Dst_nodeID, content.Timediff*1000)
+		latency := content.Timediff
+		if content.PingTime.IsZero() {
+			if !isValidLatencySample(latency) {
+				return nil
+			}
+		} else {
+			elapsed := device.graph.GetCurrentTime().Sub(content.PingTime)
+			if elapsed < 0 {
+				return nil
+			}
+			latency = elapsed.Seconds() / 2
+		}
+		device.graph.UpdateLatency(device.ID, content.Dst_nodeID, latency, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
+		peer.OutboundLatency.Push(latency)
+		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f", device.ID, content.Dst_nodeID, latency*1000)
 	}
 	return nil
+}
+
+func isValidLatencySample(latency float64) bool {
+	return latency >= 0 && !math.IsNaN(latency) && !math.IsInf(latency, 0)
 }
 
 func (device *Device) process_RequestPeerMsg(content mtypes.QueryPeerMsg) error { //Send all my peers to all my peers
