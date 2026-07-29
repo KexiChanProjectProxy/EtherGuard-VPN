@@ -60,6 +60,7 @@ const (
 	controlV2MaxDirectConnectivitySecs = 24 * 60 * 60
 	controlV2MaxListenPortCandidates   = 256
 	controlV2MaxEndpointBlacklist      = 256
+	controlV2MaxRelayCostMS            = 60000
 	controlV2MinPort                   = 1
 	controlV2MaxPort                   = 65535
 )
@@ -331,17 +332,21 @@ func (r *ControlV2RegisterRequest) Validate() error {
 // ControlV2ReportRequest is the body of POST /edge/v2/report. It is sent
 // periodically with pongs, candidate refreshes, and a heartbeat.
 type ControlV2ReportRequest struct {
-	NodeID     Vertex                      `json:"node_id"`
-	Pongs      []ControlV2Pong             `json:"pongs,omitempty"`
-	Candidates []ControlV2Candidate        `json:"candidates,omitempty"`
-	Observed   []ControlV2ObservedEndpoint `json:"observed,omitempty"`
-	ReportedAt time.Time                   `json:"reported_at"`
+	NodeID      Vertex                      `json:"node_id"`
+	RelayCostMS *float64                    `json:"relay_cost_ms,omitempty"`
+	Pongs       []ControlV2Pong             `json:"pongs,omitempty"`
+	Candidates  []ControlV2Candidate        `json:"candidates,omitempty"`
+	Observed    []ControlV2ObservedEndpoint `json:"observed,omitempty"`
+	ReportedAt  time.Time                   `json:"reported_at"`
 }
 
 // Validate ensures the NodeID is real and every nested entry is valid.
 func (r *ControlV2ReportRequest) Validate() error {
 	if r.NodeID.IsSpecial() {
 		return newControlV2Error(ControlV2ErrInvalidNodeID, "node_id", "node_id is special: %s", r.NodeID.ToString())
+	}
+	if err := validateRelayCostMS("relay_cost_ms", r.RelayCostMS); err != nil {
+		return err
 	}
 	for i := range r.Pongs {
 		if err := r.Pongs[i].Validate(); err != nil {
@@ -380,18 +385,19 @@ func (r *ControlV2ReportRequest) Validate() error {
 // UsePSKForInterEdge), it is the pairwise inter-Edge WireGuard PSK and
 // is allowed in the snapshot.
 type ControlV2Peer struct {
-	NodeID     Vertex                     `json:"node_id"`
-	NodeName   string                     `json:"node_name"`
-	PubKey     string                     `json:"pub_key"`
-	PSKey      string                     `json:"-"`
-	LocalV4    []string                   `json:"local_v4,omitempty"`
-	LocalV6    []string                   `json:"local_v6,omitempty"`
-	PublicV4   []string                   `json:"public_v4,omitempty"`
-	PublicV6   []string                   `json:"public_v6,omitempty"`
-	ObservedV4 []ControlV2ObservedAddress `json:"observed_v4,omitempty"`
-	ObservedV6 []ControlV2ObservedAddress `json:"observed_v6,omitempty"`
-	LatencyMS  map[Vertex]float64         `json:"latency_ms,omitempty"`
-	LastSeen   time.Time                  `json:"last_seen"`
+	NodeID      Vertex                     `json:"node_id"`
+	NodeName    string                     `json:"node_name"`
+	RelayCostMS *float64                   `json:"relay_cost_ms,omitempty"`
+	PubKey      string                     `json:"pub_key"`
+	PSKey       string                     `json:"-"`
+	LocalV4     []string                   `json:"local_v4,omitempty"`
+	LocalV6     []string                   `json:"local_v6,omitempty"`
+	PublicV4    []string                   `json:"public_v4,omitempty"`
+	PublicV6    []string                   `json:"public_v6,omitempty"`
+	ObservedV4  []ControlV2ObservedAddress `json:"observed_v4,omitempty"`
+	ObservedV6  []ControlV2ObservedAddress `json:"observed_v6,omitempty"`
+	LatencyMS   map[Vertex]float64         `json:"latency_ms,omitempty"`
+	LastSeen    time.Time                  `json:"last_seen"`
 }
 
 // ControlV2ObservedAddress is an anonymous, aggregate observed endpoint in a
@@ -416,6 +422,9 @@ func (o *ControlV2ObservedAddress) Validate() (bool, error) {
 
 // Validate enforces the published observed-hint caps and family partitions.
 func (p *ControlV2Peer) Validate() error {
+	if err := validateRelayCostMS("relay_cost_ms", p.RelayCostMS); err != nil {
+		return err
+	}
 	if len(p.ObservedV4)+len(p.ObservedV6) > controlV2MaxObservedHints {
 		return newControlV2Error(ControlV2ErrInvalidObservation, "observed", "more than %d observed hints", controlV2MaxObservedHints)
 	}
@@ -512,6 +521,7 @@ type ControlV2Parameters struct {
 	ReportInterval      time.Duration      `json:"report_interval"`
 	HeartbeatInterval   time.Duration      `json:"heartbeat_interval"`
 	EventReplay         uint64             `json:"event_replay"`
+	RelayCostMS         *float64           `json:"relay_cost_ms,omitempty"`
 	ListenPortPriority  ListenPortPriority `json:"listen_port_priority,omitempty"`
 	EndpointBlacklist   []string           `json:"endpoint_blacklist,omitempty"`
 }
@@ -536,6 +546,9 @@ func (p *ControlV2Parameters) Validate() error {
 	}
 	if p.HeartbeatInterval <= 0 {
 		return newControlV2Error(ControlV2ErrInvalidDuration, "heartbeat_interval", "must be positive")
+	}
+	if err := validateRelayCostMS("relay_cost_ms", p.RelayCostMS); err != nil {
+		return err
 	}
 	for i, raw := range p.STUNServers {
 		if err := ValidateSTUNURI(raw); err != nil {
@@ -586,6 +599,7 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 		ReportIntervalSeconds    float64            `json:"ReportIntervalSeconds"`
 		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
 		EventReplay              uint64             `json:"EventReplay"`
+		RelayCostMS              *float64           `json:"RelayCostMS,omitempty"`
 		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
 		EndpointBlacklist        []string           `json:"EndpointBlacklist"`
 	}
@@ -598,6 +612,7 @@ func (p ControlV2Parameters) MarshalJSON() ([]byte, error) {
 		ReportIntervalSeconds:    p.ReportInterval.Seconds(),
 		HeartbeatIntervalSeconds: p.HeartbeatInterval.Seconds(),
 		EventReplay:              p.EventReplay,
+		RelayCostMS:              p.RelayCostMS,
 		ListenPortPriority:       p.ListenPortPriority,
 		EndpointBlacklist:        p.EndpointBlacklist,
 	}
@@ -615,6 +630,7 @@ func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 		ReportIntervalSeconds    float64            `json:"ReportIntervalSeconds"`
 		HeartbeatIntervalSeconds float64            `json:"HeartbeatIntervalSeconds"`
 		EventReplay              uint64             `json:"EventReplay"`
+		RelayCostMS              *float64           `json:"RelayCostMS,omitempty"`
 		ListenPortPriority       ListenPortPriority `json:"ListenPortPriority"`
 		EndpointBlacklist        []string           `json:"EndpointBlacklist"`
 	}
@@ -630,6 +646,7 @@ func (p *ControlV2Parameters) UnmarshalJSON(data []byte) error {
 	p.ReportInterval = durationFromSeconds(w.ReportIntervalSeconds)
 	p.HeartbeatInterval = durationFromSeconds(w.HeartbeatIntervalSeconds)
 	p.EventReplay = w.EventReplay
+	p.RelayCostMS = w.RelayCostMS
 	p.ListenPortPriority = w.ListenPortPriority
 	p.EndpointBlacklist = w.EndpointBlacklist
 	return nil
@@ -738,6 +755,7 @@ type SuperConfigV2 struct {
 	PeerAliveTimeoutSeconds    float64                     `yaml:"PeerAliveTimeoutSeconds"`
 	UsePSKForInterEdge         bool                        `yaml:"UsePSKForInterEdge"`
 	DampingFilterRadius        uint64                      `yaml:"DampingFilterRadius"`
+	RelayCostMS                *float64                    `yaml:"RelayCostMS,omitempty"`
 	ListenPortPriority         ListenPortPriority          `yaml:"ListenPortPriority,omitempty"`
 	EndpointBlacklist          []string                    `yaml:"EndpointBlacklist,omitempty"`
 	Peers                      []SuperConfigV2Peer         `yaml:"Peers"`
@@ -766,6 +784,9 @@ func (c *SuperConfigV2) Validate() error {
 	}
 	if c.HeartbeatIntervalSeconds <= 0 {
 		return newControlV2Error(ControlV2ErrInvalidDuration, "HeartbeatIntervalSeconds", "must be positive")
+	}
+	if err := validateRelayCostMS("RelayCostMS", c.RelayCostMS); err != nil {
+		return err
 	}
 	if c.STUNRequestTimeoutSeconds <= 0 {
 		return newControlV2Error(ControlV2ErrInvalidDuration, "STUNRequestTimeoutSeconds", "must be positive")
@@ -820,6 +841,7 @@ type EdgeConfigV2 struct {
 	Interface          InterfaceConf               `yaml:"Interface"`
 	NodeID             Vertex                      `yaml:"NodeID"`
 	NodeName           string                      `yaml:"NodeName"`
+	RelayCostMS        *float64                    `yaml:"RelayCostMS,omitempty"`
 	PrivKey            string                      `yaml:"PrivKey" json:"-"`
 	DefaultTTL         uint8                       `yaml:"DefaultTTL"`
 	LogLevel           LoggerInfo                  `yaml:"LogLevel"`
@@ -887,11 +909,24 @@ func (c *EdgeConfigV2) Validate() error {
 	if c.NodeName == "" {
 		return newControlV2Error(ControlV2ErrMissingField, "NodeName", "NodeName is required")
 	}
+	if err := validateRelayCostMS("RelayCostMS", c.RelayCostMS); err != nil {
+		return err
+	}
 	if err := c.SuperNodeV2.Validate(); err != nil {
 		return err
 	}
 	if err := c.DirectConnectivity.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateRelayCostMS(field string, value *float64) error {
+	if value == nil {
+		return nil
+	}
+	if math.IsNaN(*value) || math.IsInf(*value, 0) || *value < 0 || *value > controlV2MaxRelayCostMS {
+		return newControlV2Error(ControlV2ErrInvalidDuration, field, "must be finite and between 0 and %d milliseconds", controlV2MaxRelayCostMS)
 	}
 	return nil
 }

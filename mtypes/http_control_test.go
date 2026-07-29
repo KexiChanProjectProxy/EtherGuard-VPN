@@ -3,6 +3,7 @@ package mtypes
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/netip"
 	"reflect"
 	"strings"
@@ -1204,5 +1205,220 @@ func TestSuperConfigV2EndpointBlacklistYAMLRoundTrip(t *testing.T) {
 	// Then
 	if !reflect.DeepEqual(out.EndpointBlacklist, in.EndpointBlacklist) {
 		t.Fatalf("decoded blacklist = %#v, want %#v", out.EndpointBlacklist, in.EndpointBlacklist)
+	}
+}
+
+func TestControlV2ParametersRelayCostMSWireRoundTrip(t *testing.T) {
+	// Given
+	cost := 1234.5
+	in := validControlV2Parameters(t)
+	in.RelayCostMS = &cost
+
+	// When
+	data, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out ControlV2Parameters
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if !strings.Contains(string(data), `"RelayCostMS"`) {
+		t.Fatalf("wire JSON = %s, missing PascalCase key", data)
+	}
+	if out.RelayCostMS == nil || *out.RelayCostMS != cost {
+		t.Fatalf("decoded RelayCostMS = %v, want %v", out.RelayCostMS, cost)
+	}
+
+	var absent ControlV2Parameters
+	if err := json.Unmarshal([]byte(`{"ProtocolVersion":"v2"}`), &absent); err != nil {
+		t.Fatalf("absent field Unmarshal() error = %v", err)
+	}
+	if absent.RelayCostMS != nil {
+		t.Fatalf("absent RelayCostMS = %v, want nil", absent.RelayCostMS)
+	}
+	absentData, err := json.Marshal(absent)
+	if err != nil {
+		t.Fatalf("absent field Marshal() error = %v", err)
+	}
+	if strings.Contains(string(absentData), `"RelayCostMS"`) {
+		t.Fatalf("absent RelayCostMS was serialized: %s", absentData)
+	}
+}
+
+func TestSuperConfigV2RelayCostMSYAMLRoundTrip(t *testing.T) {
+	// Given
+	cost := 250.25
+	in := SuperConfigV2{RelayCostMS: &cost}
+
+	// When
+	data, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out SuperConfigV2
+	if err := yamlUnmarshal(data, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if out.RelayCostMS == nil || *out.RelayCostMS != cost {
+		t.Fatalf("decoded RelayCostMS = %v, want %v", out.RelayCostMS, cost)
+	}
+}
+
+func TestEdgeConfigV2RelayCostMSYAMLRoundTrip(t *testing.T) {
+	// Given
+	cost := 500.5
+	in := EdgeConfigV2{RelayCostMS: &cost}
+
+	// When
+	data, err := yaml.Marshal(in)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var out EdgeConfigV2
+	if err := yamlUnmarshal(data, &out); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if out.RelayCostMS == nil || *out.RelayCostMS != cost {
+		t.Fatalf("decoded RelayCostMS = %v, want %v", out.RelayCostMS, cost)
+	}
+}
+
+func TestControlV2ReportAndSnapshotRelayCostMSJSONRoundTrip(t *testing.T) {
+	// Given
+	cost := 75.75
+	report := ControlV2ReportRequest{NodeID: Vertex(11), RelayCostMS: &cost}
+	snapshot := ControlV2Snapshot{
+		Revision: 1,
+		Peers:    []ControlV2Peer{{NodeID: Vertex(12), RelayCostMS: &cost}},
+	}
+
+	// When
+	reportData, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("report Marshal() error = %v", err)
+	}
+	var decodedReport ControlV2ReportRequest
+	if err := json.Unmarshal(reportData, &decodedReport); err != nil {
+		t.Fatalf("report Unmarshal() error = %v", err)
+	}
+	snapshotData, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("snapshot Marshal() error = %v", err)
+	}
+	var decodedSnapshot ControlV2Snapshot
+	if err := json.Unmarshal(snapshotData, &decodedSnapshot); err != nil {
+		t.Fatalf("snapshot Unmarshal() error = %v", err)
+	}
+
+	// Then
+	if decodedReport.RelayCostMS == nil || *decodedReport.RelayCostMS != cost {
+		t.Fatalf("decoded report RelayCostMS = %v, want %v", decodedReport.RelayCostMS, cost)
+	}
+	if len(decodedSnapshot.Peers) != 1 || decodedSnapshot.Peers[0].RelayCostMS == nil || *decodedSnapshot.Peers[0].RelayCostMS != cost {
+		t.Fatalf("decoded snapshot peers = %#v, want RelayCostMS=%v", decodedSnapshot.Peers, cost)
+	}
+}
+
+func TestRelayCostMSValidationRejectsInvalidValues(t *testing.T) {
+	invalidValues := map[string]float64{
+		"negative":          -0.1,
+		"nan":               math.NaN(),
+		"positive infinity": math.Inf(1),
+		"over cap":          60000.1,
+	}
+	for name, value := range invalidValues {
+		value := value
+		t.Run(name, func(t *testing.T) {
+			validators := map[string]func() error{
+				"parameters": func() error {
+					parameters := validControlV2Parameters(t)
+					parameters.RelayCostMS = &value
+					return parameters.Validate()
+				},
+				"super config": func() error {
+					config := validRelayCostSuperConfig()
+					config.RelayCostMS = &value
+					return config.Validate()
+				},
+				"edge config": func() error {
+					config := validRelayCostEdgeConfig()
+					config.RelayCostMS = &value
+					return config.Validate()
+				},
+				"report": func() error {
+					report := ControlV2ReportRequest{NodeID: Vertex(11), RelayCostMS: &value}
+					return report.Validate()
+				},
+				"peer": func() error {
+					peer := ControlV2Peer{NodeID: Vertex(12), RelayCostMS: &value}
+					return peer.Validate()
+				},
+			}
+			for surface, validate := range validators {
+				if err := validate(); err == nil {
+					t.Errorf("%s accepted RelayCostMS=%v", surface, value)
+				}
+			}
+		})
+	}
+}
+
+func TestRelayCostMSValidationAcceptsBounds(t *testing.T) {
+	for _, value := range []float64{0, 60000} {
+		value := value
+		t.Run(fmt.Sprintf("%v", value), func(t *testing.T) {
+			parameters := validControlV2Parameters(t)
+			parameters.RelayCostMS = &value
+			if err := parameters.Validate(); err != nil {
+				t.Fatalf("parameters rejected RelayCostMS=%v: %v", value, err)
+			}
+			superConfig := validRelayCostSuperConfig()
+			superConfig.RelayCostMS = &value
+			if err := superConfig.Validate(); err != nil {
+				t.Fatalf("super config rejected RelayCostMS=%v: %v", value, err)
+			}
+			edgeConfig := validRelayCostEdgeConfig()
+			edgeConfig.RelayCostMS = &value
+			if err := edgeConfig.Validate(); err != nil {
+				t.Fatalf("edge config rejected RelayCostMS=%v: %v", value, err)
+			}
+			report := ControlV2ReportRequest{NodeID: Vertex(11), RelayCostMS: &value}
+			if err := report.Validate(); err != nil {
+				t.Fatalf("report rejected RelayCostMS=%v: %v", value, err)
+			}
+			peer := ControlV2Peer{NodeID: Vertex(12), RelayCostMS: &value}
+			if err := peer.Validate(); err != nil {
+				t.Fatalf("peer rejected RelayCostMS=%v: %v", value, err)
+			}
+		})
+	}
+}
+
+func validRelayCostSuperConfig() SuperConfigV2 {
+	return SuperConfigV2{
+		NodeName:                   "super-1",
+		APIUrl:                     "https://super.example.com:8443",
+		ManagementAuth:             SuperConfigV2ManagementAuth{User: "admin", PasswordHash: "hash"},
+		STUNServers:                []string{"stun:1.2.3.4:3478"},
+		STUNRequestTimeoutSeconds:  1,
+		STUNRefreshIntervalSeconds: 60,
+		PollIntervalSeconds:        15,
+		ReportIntervalSeconds:      10,
+		HeartbeatIntervalSeconds:   25,
+	}
+}
+
+func validRelayCostEdgeConfig() EdgeConfigV2 {
+	return EdgeConfigV2{
+		NodeID:      Vertex(10),
+		NodeName:    "edge-010",
+		SuperNodeV2: SuperNodeV2Ref{APIUrl: "https://super.example.com:8443", NodeID: Vertex(65530), ControlPSKey: "key"},
 	}
 }
