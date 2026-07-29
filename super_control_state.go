@@ -109,6 +109,7 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 	if exists {
 		view.LatencyMS = cloneLatency(old.view.LatencyMS)
 		changed = changed || !sameStrings(old.view.LocalV4, view.LocalV4) || !sameStrings(old.view.LocalV6, view.LocalV6) || !sameStrings(old.view.PublicV4, view.PublicV4) || !sameStrings(old.view.PublicV6, view.PublicV6)
+		view.RelayCostMS = cloneFloat64Ptr(old.view.RelayCostMS)
 	}
 	s.peers[req.NodeID] = &controlPeerRecord{view: view, controlKey: controlPSKey, candidates: candidateState}
 	s.clearObservedVotesForObserverLocked(req.NodeID)
@@ -219,6 +220,10 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 	peer.candidates = cloneCandidates(req.Candidates)
 	peer.view.LastSeen = s.now()
 	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
+	if req.RelayCostMS != nil && (peer.view.RelayCostMS == nil || *peer.view.RelayCostMS != *req.RelayCostMS) {
+		peer.view.RelayCostMS = cloneFloat64Ptr(req.RelayCostMS)
+		viewChanged = true
+	}
 	for _, pong := range req.Pongs {
 		if pong.SourceNode != req.NodeID {
 			continue
@@ -390,6 +395,7 @@ func (s *ControlState) snapshotLocked(requester mtypes.Vertex, revision uint64) 
 		peer.LocalV6 = append([]string{}, peer.LocalV6...)
 		peer.PublicV4 = append([]string{}, peer.PublicV4...)
 		peer.PublicV6 = append([]string{}, peer.PublicV6...)
+		peer.RelayCostMS = cloneFloat64Ptr(peer.RelayCostMS)
 		peer.ObservedV4, peer.ObservedV6 = s.observedHintsLocked(id)
 		peer.LatencyMS = cloneLatency(peer.LatencyMS)
 		peers = append(peers, peer)
@@ -558,7 +564,17 @@ func cloneLatency(in map[mtypes.Vertex]float64) map[mtypes.Vertex]float64 {
 func cloneCandidates(in []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate {
 	return append([]mtypes.ControlV2Candidate{}, in...)
 }
+
+func cloneFloat64Ptr(in *float64) *float64 {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
+}
+
 func cloneParameters(in mtypes.ControlV2Parameters) mtypes.ControlV2Parameters {
+	in.RelayCostMS = cloneFloat64Ptr(in.RelayCostMS)
 	in.STUNServers = append([]string{}, in.STUNServers...)
 	in.ListenPortPriority = cloneListenPortPriority(in.ListenPortPriority)
 	in.EndpointBlacklist = append([]string{}, in.EndpointBlacklist...)

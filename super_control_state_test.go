@@ -38,6 +38,99 @@ func TestControlStateRegistrationAndReport(t *testing.T) {
 	}
 }
 
+func TestControlStateParametersCloneRelayCostMSPointeeIsolation(t *testing.T) {
+	// Given a service with a configured relay cost
+	want := 42.5
+	svc := NewControlState(ControlStateConfig{Parameters: mtypes.ControlV2Parameters{RelayCostMS: &want}})
+
+	// When bootstrap parameters are copied and the returned pointer is mutated
+	got := svc.ParametersForBootstrap()
+	if got.RelayCostMS == nil {
+		t.Fatal("bootstrap parameters lost relay cost")
+	}
+	if got.RelayCostMS == svc.parameters.RelayCostMS {
+		t.Fatal("bootstrap relay cost aliases authoritative state")
+	}
+	*got.RelayCostMS = 99.5
+
+	// Then the authoritative relay cost remains unchanged
+	current := svc.ParametersForBootstrap()
+	if current.RelayCostMS == nil || *current.RelayCostMS != want {
+		t.Fatalf("authoritative relay cost changed: %#v", current.RelayCostMS)
+	}
+}
+
+func TestControlStateReportRelayCostMSReachesOtherEdges(t *testing.T) {
+	// Given two registered edges
+	svc := NewControlState(ControlStateConfig{})
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "key-a"); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(2, "edge-b"), "key-b"); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+
+	// When edge A reports its effective relay cost
+	cost := 17.25
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: 1, RelayCostMS: &cost}); err != nil {
+		t.Fatalf("report a: %v", err)
+	}
+
+	// Then edge B's snapshot exposes edge A's reported cost
+	peers := svc.SnapshotFor(2).Peers
+	if len(peers) != 1 || peers[0].NodeID != 1 {
+		t.Fatalf("unexpected peers: %#v", peers)
+	}
+	if peers[0].RelayCostMS == nil || *peers[0].RelayCostMS != cost {
+		t.Fatalf("relay cost = %#v, want %v", peers[0].RelayCostMS, cost)
+	}
+}
+
+func TestControlStateReportWithoutRelayCostMSRetainsPreviousValue(t *testing.T) {
+	// Given two registered edges and an initial effective relay cost
+	svc := NewControlState(ControlStateConfig{})
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "key-a"); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(2, "edge-b"), "key-b"); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	cost := 23.75
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: 1, RelayCostMS: &cost}); err != nil {
+		t.Fatalf("initial report: %v", err)
+	}
+
+	// When edge A sends a later report without a relay cost
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: 1}); err != nil {
+		t.Fatalf("absent-cost report: %v", err)
+	}
+
+	// Then the previous effective relay cost remains published
+	peers := svc.SnapshotFor(2).Peers
+	if len(peers) != 1 || peers[0].RelayCostMS == nil || *peers[0].RelayCostMS != cost {
+		t.Fatalf("relay cost after absent report = %#v, want %v", peers, cost)
+	}
+}
+
+func TestControlStateSnapshotWithoutRelayCostMSReportsNil(t *testing.T) {
+	// Given two registered edges that have not reported an effective relay cost
+	svc := NewControlState(ControlStateConfig{})
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "key-a"); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(2, "edge-b"), "key-b"); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+
+	// When edge B receives a snapshot
+	peers := svc.SnapshotFor(2).Peers
+
+	// Then edge A's relay cost is absent
+	if len(peers) != 1 || peers[0].RelayCostMS != nil {
+		t.Fatalf("unreported relay cost = %#v, want nil", peers)
+	}
+}
+
 func TestControlStateReportedCandidateReachesOtherEdges(t *testing.T) {
 	// Given two registered edges on a fresh service
 	svc := NewControlState(ControlStateConfig{})
