@@ -488,6 +488,30 @@ func TestSuperStartupPublishesListenPortPolicy(t *testing.T) {
 	}
 }
 
+func TestSuperStartupPublishesRelayCostMS(t *testing.T) {
+	cost := 31.5
+	cfg := validBaseConfig()
+	cfg.RelayCostMS = &cost
+	cfg.Peers = []mtypes.SuperConfigV2Peer{
+		{NodeID: 7, NodeName: "edge-7", ControlPSKey: "seed-key-7", AdditionalCost: 0},
+	}
+
+	fx := newRuntimeTestFixture(t, func(c *superConfig) { c.BaseConfig = cfg })
+	defer fx.Shutdown(context.Background())
+
+	status, body := fx.signedGet(t, "/edge/v2/snapshot", 7, "seed-key-7")
+	if status != http.StatusOK {
+		t.Fatalf("snapshot status=%d body=%s", status, body)
+	}
+	var snap mtypes.ControlV2Snapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("decode snapshot: %v", err)
+	}
+	if snap.Parameters.RelayCostMS == nil || *snap.Parameters.RelayCostMS != cost {
+		t.Fatalf("snapshot relay cost = %#v, want %v", snap.Parameters.RelayCostMS, cost)
+	}
+}
+
 func TestSuperStartupPublishesEndpointBlacklistFromYAML(t *testing.T) {
 	cfg := validBaseConfig()
 	cfg.EndpointBlacklist = []string{"203.0.113.17", "198.51.100.0/24", "2001:db8::/32"}
