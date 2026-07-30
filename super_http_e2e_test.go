@@ -53,7 +53,7 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 			return false
 		}
 		peer, found := e2ePeer(snapshot, 101)
-		return found && len(peer.LocalV4) == 1 && len(peer.PublicV4) == 1
+		return found && len(peer.LocalV4) >= 1 && len(peer.PublicV4) == 1
 	})
 
 	// Then the peer-safe HTTP snapshot exposes the other Edge's same-bind

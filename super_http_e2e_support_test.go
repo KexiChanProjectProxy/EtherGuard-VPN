@@ -143,6 +143,18 @@ func (f *e2eFabric) remove(address string, bind *e2eBind) {
 func (f *e2eFabric) deliver(packet []byte, destination, source string) error {
 	f.mu.RLock()
 	bind := f.binds[destination]
+	if bind == nil {
+		_, destinationPort, err := net.SplitHostPort(destination)
+		if err == nil {
+			for address, candidate := range f.binds {
+				_, candidatePort, splitErr := net.SplitHostPort(address)
+				if splitErr == nil && candidatePort == destinationPort {
+					bind = candidate
+					break
+				}
+			}
+		}
+	}
 	f.mu.RUnlock()
 	if bind == nil {
 		return nil
