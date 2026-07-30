@@ -421,8 +421,8 @@ func TestDocsDirectConnectivity(t *testing.T) {
 // local-port-policy key has crept in, and pins RecvAddr/SendAddr to the
 // golden manifest captured before Task 6 edits. The operational Super
 // YAML is checked separately: it must contain exactly the approved
-// `ListenPortPriority: [{Port: 16386}]` addition with no other surface
-// change. When the corpus directory is not present (e.g. CI runners
+// `RelayCostMS: 10` and `ListenPortPriority` range additions with no other
+// surface change. When the corpus directory is not present (e.g. CI runners
 // without the operational repo) the tests skip with t.Skipf so the
 // contract still runs everywhere the corpus is mounted.
 
@@ -434,8 +434,8 @@ func TestDocsDirectConnectivity(t *testing.T) {
 const operationalCorpusDir = "/home/kexi/KexiSdnConfig/http-sse"
 
 // operationalSuperYAML is the path to the single Super YAML inside the
-// operational corpus. The audit asserts it carries the Task 6 addition
-// and nothing else.
+// operational corpus. The audit asserts it carries the approved
+// RelayCostMS and ListenPortPriority additions and nothing else.
 const operationalSuperYAML = operationalCorpusDir + "/ngsdn_super.yaml"
 
 // edgeFiles returns the 100 file basenames the audit must enumerate, in
@@ -622,11 +622,12 @@ func TestCorpusSuperYAMLPolicyIsRange(t *testing.T) {
 }
 
 // TestCorpusSuperYAMLOtherFieldsUnchanged guarantees the operational
-// Super YAML is touched ONLY for the ListenPortPriority insertion: every
+// Super YAML is touched ONLY for the approved RelayCostMS and
+// ListenPortPriority insertions: every
 // other top-level key/value pair must be byte-identical to the golden
 // snapshot captured before Task 6 edits. The golden snapshot is the
 // exact pre-edit file content embedded as a string; the test computes
-// the line-level delta and fails if any non-ListenPortPriority line
+// the line-level delta and fails if any non-approved insertion line
 // drifted. This is the strongest possible guarantee that the
 // operational deployment (which copies this file to /opt/sdn/config.yaml)
 // remains bit-compatible with the previous release.
@@ -641,17 +642,17 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	}
 	liveLines := strings.Split(string(data), "\n")
 	goldenLines := strings.Split(operationalSuperYAMLGolden, "\n")
-	if len(liveLines) != len(goldenLines)+4 {
-		t.Fatalf("%s: line count drift: got %d, want golden %d + 4 added = %d",
-			operationalSuperYAML, len(liveLines), len(goldenLines), len(goldenLines)+4)
+	if len(liveLines) != len(goldenLines)+5 {
+		t.Fatalf("%s: line count drift: got %d, want golden %d + 5 approved additions = %d",
+			operationalSuperYAML, len(liveLines), len(goldenLines), len(goldenLines)+5)
 	}
-	// Walk both side-by-side, skipping the four inserted lines. The
+	// Walk both side-by-side, skipping the five inserted lines. The
 	// insertion is anchored AFTER DampingFilterRadius: 4 — the live
-	// YAML has golden[0..insertAt] verbatim, then two new lines, then
-	// golden[insertAt+1..]. Locate the DampingFilterRadius anchor in
-	// the live YAML and assert the next two lines are exactly the
-	// policy. insertAt is the 0-based index of the anchor line in
-	// the live YAML; in the golden the anchor is at the same index.
+	// YAML has golden[0..insertAt] verbatim, then the five approved
+	// lines, then golden[insertAt+1..]. Locate the DampingFilterRadius
+	// anchor in the live YAML and assert those five lines are exact.
+	// insertAt is the 0-based index of the anchor line in the live YAML;
+	// in the golden the anchor is at the same index.
 	insertAt := -1
 	for i, line := range liveLines {
 		if line == "DampingFilterRadius: 4" {
@@ -662,23 +663,26 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	if insertAt < 0 {
 		t.Fatalf("%s: DampingFilterRadius: 4 anchor not found", operationalSuperYAML)
 	}
-	if insertAt+4 >= len(liveLines) {
-		t.Fatalf("%s: not enough lines after DampingFilterRadius anchor for policy insertion", operationalSuperYAML)
+	if insertAt+5 >= len(liveLines) {
+		t.Fatalf("%s: not enough lines after DampingFilterRadius anchor for approved additions", operationalSuperYAML)
 	}
-	if liveLines[insertAt+1] != "ListenPortPriority:" {
-		t.Errorf("%s: line after DampingFilterRadius = %q, want \"ListenPortPriority:\"", operationalSuperYAML, liveLines[insertAt+1])
-	}
-	for offset, want := range []string{"- Range:", "    From: 16386", "    To: 16390"} {
-		if liveLines[insertAt+2+offset] != want {
-			t.Errorf("%s: policy line %d = %q, want %q", operationalSuperYAML, offset+2, liveLines[insertAt+2+offset], want)
+	for offset, want := range []string{
+		"RelayCostMS: 10",
+		"ListenPortPriority:",
+		"- Range:",
+		"    From: 16386",
+		"    To: 16390",
+	} {
+		if liveLines[insertAt+1+offset] != want {
+			t.Errorf("%s: approved insertion line %d = %q, want %q", operationalSuperYAML, offset+1, liveLines[insertAt+1+offset], want)
 		}
 	}
 	// Now compare every other line to the golden snapshot. For golden
-	// indices strictly past insertAt, the live YAML has shifted by 4.
+	// indices strictly past insertAt, the live YAML has shifted by 5.
 	for i, gline := range goldenLines {
 		liveLine := liveLines[i]
 		if i > insertAt {
-			liveLine = liveLines[i+4]
+			liveLine = liveLines[i+5]
 		}
 		if liveLine != gline {
 			t.Errorf("%s: line %d drift: got %q, want golden %q", operationalSuperYAML, i+1, liveLine, gline)
@@ -689,9 +693,10 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 // operationalSuperYAMLGolden is the byte-exact content of the
 // operational Super YAML as it existed BEFORE Task 6 edits, captured
 // from the working tree at the start of the task. The audit compares
-// the live file against this snapshot, allowing exactly 2 lines of
-// drift for the ListenPortPriority addition. A future operator change
-// (renaming, adding a STUN server, etc.) must refresh this constant
+// the live file against this snapshot, allowing exactly 5 lines of
+// drift for the approved RelayCostMS and ListenPortPriority additions.
+// A future operator change (renaming, adding a STUN server, etc.) must
+// refresh this constant
 // after review.
 const operationalSuperYAMLGolden = `NodeName: ngsdnSN
 APIUrl: https://cd.kexi.fqbin.com
