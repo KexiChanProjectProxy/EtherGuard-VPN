@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -104,7 +105,13 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 	candidateState = append(candidateState, addressesToCandidates(req.LocalV6, mtypes.ControlV2CandidateLocal)...)
 	candidateState = append(candidateState, addressesToCandidates(req.PublicV4, mtypes.ControlV2CandidateSTUN)...)
 	candidateState = append(candidateState, addressesToCandidates(req.PublicV6, mtypes.ControlV2CandidateSTUN)...)
-	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, PubKey: req.PubKey, LocalV4: append([]string{}, req.LocalV4...), LocalV6: append([]string{}, req.LocalV6...), PublicV4: append([]string{}, req.PublicV4...), PublicV6: append([]string{}, req.PublicV6...), LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
+	candidateState, filterErr := s.filterCandidatesLocked(candidateState)
+	if filterErr != nil {
+		s.mu.Unlock()
+		return mtypes.ControlV2Snapshot{}, filterErr
+	}
+	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, PubKey: req.PubKey, LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
+	mergeCandidatesIntoView(&view, candidateState)
 	changed := !exists || old.view.NodeName != view.NodeName || old.view.PubKey != view.PubKey || old.view.LastSeen.IsZero() || old.controlKey != controlPSKey
 	if exists {
 		view.LatencyMS = cloneLatency(old.view.LatencyMS)
@@ -217,7 +224,12 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 	reportedTargets := make(map[mtypes.Vertex]struct{}, len(req.Observed))
 	hintTargets := append(previousTargets, observedTargets(req.Observed)...)
 	beforeObserved := s.observedHintsForTargetsLocked(hintTargets)
-	peer.candidates = cloneCandidates(req.Candidates)
+	candidates, filterErr := s.filterCandidatesLocked(req.Candidates)
+	if filterErr != nil {
+		s.mu.Unlock()
+		return filterErr
+	}
+	peer.candidates = candidates
 	peer.view.LastSeen = s.now()
 	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
 	if req.RelayCostMS != nil && (peer.view.RelayCostMS == nil || *peer.view.RelayCostMS != *req.RelayCostMS) {
@@ -561,10 +573,6 @@ func cloneLatency(in map[mtypes.Vertex]float64) map[mtypes.Vertex]float64 {
 	}
 	return out
 }
-func cloneCandidates(in []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate {
-	return append([]mtypes.ControlV2Candidate{}, in...)
-}
-
 func cloneFloat64Ptr(in *float64) *float64 {
 	if in == nil {
 		return nil
@@ -620,6 +628,38 @@ func addressesToCandidates(addresses []string, source mtypes.ControlV2CandidateS
 		out = append(out, mtypes.ControlV2Candidate{Address: address, Source: source})
 	}
 	return out
+}
+
+func (s *ControlState) filterCandidatesLocked(candidates []mtypes.ControlV2Candidate) ([]mtypes.ControlV2Candidate, error) {
+	prefixes, err := s.parameters.ParseEndpointBlacklist()
+	if err != nil {
+		return nil, ErrControlStateInvalidParameters
+	}
+	filtered := make([]mtypes.ControlV2Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		host, _, err := net.SplitHostPort(candidate.Address)
+		if err != nil {
+			filtered = append(filtered, candidate)
+			continue
+		}
+		address, err := netip.ParseAddr(host)
+		if err != nil {
+			filtered = append(filtered, candidate)
+			continue
+		}
+		unmapped := address.Unmap()
+		blacklisted := false
+		for _, prefix := range prefixes {
+			if prefix.Contains(address) || prefix.Contains(unmapped) {
+				blacklisted = true
+				break
+			}
+		}
+		if !blacklisted {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered, nil
 }
 
 // mergeCandidatesIntoView rebuilds the LocalV4/LocalV6/PublicV4/PublicV6

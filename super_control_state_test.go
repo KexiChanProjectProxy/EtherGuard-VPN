@@ -173,6 +173,58 @@ func TestControlStateReportedCandidateReachesOtherEdges(t *testing.T) {
 	}
 }
 
+func TestControlStateRegisterFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished(t *testing.T) {
+	// Given
+	config := validBaseConfig()
+	config.EndpointBlacklist = []string{"100.64.0.0/22"}
+	svc := NewControlState(ControlStateConfig{Parameters: buildControlV2Parameters(config)})
+	request := controlRegisterRequest(1, "edge-a")
+	request.LocalV4 = []string{"100.64.1.55:16386", "10.42.0.7:16386"}
+
+	// When
+	if _, err := svc.Register(context.Background(), request, "key-a"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Then
+	peers := svc.SnapshotFor(2).Peers
+	if len(peers) != 1 || len(peers[0].LocalV4) != 1 || peers[0].LocalV4[0] != "10.42.0.7:16386" {
+		t.Fatalf("registered local candidates = %#v, want only eligible private address", peers)
+	}
+	record := svc.peers[request.NodeID]
+	if len(record.candidates) != 1 || record.candidates[0] != (mtypes.ControlV2Candidate{Address: "10.42.0.7:16386", Source: mtypes.ControlV2CandidateLocal}) {
+		t.Fatalf("stored candidates = %#v, want only eligible private address", record.candidates)
+	}
+}
+
+func TestControlStateReportFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished(t *testing.T) {
+	// Given
+	config := validBaseConfig()
+	config.EndpointBlacklist = []string{"100.64.0.0/22"}
+	svc := NewControlState(ControlStateConfig{Parameters: buildControlV2Parameters(config)})
+	if _, err := svc.Register(context.Background(), controlRegisterRequest(1, "edge-a"), "key-a"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// When
+	if err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{NodeID: 1, Candidates: []mtypes.ControlV2Candidate{
+		{Address: "100.64.1.55:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "10.42.0.7:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "203.0.113.7:16386", Source: mtypes.ControlV2CandidateSTUN},
+	}}); err != nil {
+		t.Fatalf("report: %v", err)
+	}
+
+	// Then
+	peers := svc.SnapshotFor(2).Peers
+	if len(peers) != 1 || len(peers[0].LocalV4) != 1 || peers[0].LocalV4[0] != "10.42.0.7:16386" {
+		t.Fatalf("reported local candidates = %#v, want only eligible private address", peers)
+	}
+	if len(peers[0].PublicV4) != 1 || peers[0].PublicV4[0] != "203.0.113.7:16386" {
+		t.Fatalf("reported public candidates = %#v, want STUN source preserved", peers)
+	}
+}
+
 func TestControlStateTimeoutAndRevisionSemantics(t *testing.T) {
 	// Given a controllable clock and an alive timeout
 	svc := NewControlState(ControlStateConfig{Now: currentTime, PeerAliveTimeout: 0})
