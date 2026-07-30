@@ -771,7 +771,6 @@ func (super *lifecycleSuper) handleRegister(writer http.ResponseWriter, request 
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	super.registerRequests.Add(1)
 	var captured mtypes.ControlV2RegisterRequest
 	if err := json.Unmarshal(body, &captured); err != nil {
 		http.Error(writer, "malformed", http.StatusBadRequest)
@@ -791,6 +790,7 @@ func (super *lifecycleSuper) handleRegister(writer http.ResponseWriter, request 
 	}
 	super.peerPresent = true
 	super.mu.Unlock()
+	super.registerRequests.Add(1)
 	snapshot := super.snapshot()
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
@@ -1392,8 +1392,7 @@ func TestSuperHTTPRuntimeListenPortOldSnapshotWithoutListenPortPriorityStillDeco
 // chosen port without reaching into package-internal state.
 func startLifecycleEdge(t *testing.T, super *lifecycleSuper, bind *bindScript, candidates []uint16, _ func()) InitialBindResult {
 	t.Helper()
-	deviceRef, _, result := startLifecycleEdgeReturningRuntime(t, super, bind, candidates, nil)
-	deviceRef.superHTTP = nil
+	_, _, result := startLifecycleEdgeReturningRuntime(t, super, bind, candidates, nil)
 	return result
 }
 
