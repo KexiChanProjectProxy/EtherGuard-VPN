@@ -3,6 +3,7 @@ package device
 import (
 	"errors"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -172,6 +173,37 @@ func TestLocalControlCandidatesExcludeBlacklistedAddresses(t *testing.T) {
 	// Then
 	if len(candidates) != 1 || candidates[0].Address != "[2001:db8::8]:51820" {
 		t.Fatalf("local candidates = %+v, want only non-blacklisted IPv6 candidate", candidates)
+	}
+}
+
+func TestLocalControlCandidatesAdvertiseEligibleInterfaceEndpoints(t *testing.T) {
+	// Given
+	device := newEndpointBlacklistTestDevice(t)
+	device.applyEndpointBlacklist(mtypes.ControlV2Parameters{EndpointBlacklist: []string{"100.64.0.0/22"}})
+	ready := superHTTPReady{port: 51820, v4: net.ParseIP("10.10.0.2")}
+	interfaces := []interfaceAddresses{
+		{name: "eth0", flags: net.FlagUp, addrs: []net.Addr{
+			&net.IPNet{IP: net.ParseIP("10.10.0.2"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("192.168.50.8"), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.ParseIP("100.64.0.2"), Mask: net.CIDRMask(22, 32)},
+			&net.IPNet{IP: net.ParseIP("2001:db8::8"), Mask: net.CIDRMask(64, 128)},
+		}},
+		{name: "eg0", flags: net.FlagUp, addrs: []net.Addr{
+			&net.IPNet{IP: net.ParseIP("10.55.0.1"), Mask: net.CIDRMask(24, 32)},
+		}},
+	}
+	endpoints := endpointURLsForInterfaces(interfaces, "eg0", ready.port, conn.EnabledAf4)
+
+	// When
+	candidates := localControlCandidatesFromAddresses(device, ready, endpoints)
+
+	// Then
+	want := []mtypes.ControlV2Candidate{
+		{Address: "10.10.0.2:51820", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "192.168.50.8:51820", Source: mtypes.ControlV2CandidateLocal},
+	}
+	if !reflect.DeepEqual(candidates, want) {
+		t.Fatalf("local candidates = %#v, want %#v", candidates, want)
 	}
 }
 

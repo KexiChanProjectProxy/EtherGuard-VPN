@@ -60,22 +60,26 @@ func interfaceAddressIP(address net.Addr) net.IP {
 	}
 }
 
-func (device *Device) p2pLocalEndpointURLs() []string {
+func (device *Device) localEndpointURLs(port int) []string {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		device.log.Verbosef("P2P local interface discovery failed: error=%v", err)
+		device.log.Verbosef("Local interface discovery failed: error=%v", err)
 		return nil
 	}
 	records := make([]interfaceAddresses, 0, len(interfaces))
 	for _, iface := range interfaces {
 		addresses, err := iface.Addrs()
 		if err != nil {
-			device.log.Verbosef("P2P local interface address discovery failed: interface=%s error=%v", iface.Name, err)
+			device.log.Verbosef("Local interface address discovery failed: interface=%s error=%v", iface.Name, err)
 			continue
 		}
 		records = append(records, interfaceAddresses{name: iface.Name, flags: iface.Flags, addrs: addresses})
 	}
-	return device.filterEndpointURLs(endpointURLsForInterfaces(records, device.EdgeConfig.Interface.Name, device.activeListenPort(), device.enabledAf))
+	return device.filterEndpointURLs(endpointURLsForInterfaces(records, device.EdgeConfig.Interface.Name, port, device.enabledAf))
+}
+
+func (device *Device) p2pLocalEndpointURLs() []string {
+	return device.localEndpointURLs(device.activeListenPort())
 }
 
 func (device *Device) spreadPeerAdvertisement(response mtypes.BoardcastPeerMsg) error {

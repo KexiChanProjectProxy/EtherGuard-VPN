@@ -135,13 +135,25 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 }
 
 func localControlCandidates(device *Device, ready superHTTPReady) []mtypes.ControlV2Candidate {
-	candidates := make([]mtypes.ControlV2Candidate, 0, 2)
+	var localEndpoints []string
+	if device != nil {
+		localEndpoints = device.localEndpointURLs(ready.port)
+	}
+	return localControlCandidatesFromAddresses(device, ready, localEndpoints)
+}
+
+func localControlCandidatesFromAddresses(device *Device, ready superHTTPReady, localEndpoints []string) []mtypes.ControlV2Candidate {
+	candidates := make([]mtypes.ControlV2Candidate, 0, len(localEndpoints)+2)
 	if ready.v4 != nil && !ready.v4.IsUnspecified() {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v4.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
 	}
 	if ready.v6 != nil && !ready.v6.IsUnspecified() {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v6.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
 	}
+	for _, endpoint := range localEndpoints {
+		candidates = append(candidates, mtypes.ControlV2Candidate{Address: endpoint, Source: mtypes.ControlV2CandidateLocal})
+	}
+	candidates = mergeControlCandidates(candidates, nil)
 	if device == nil {
 		return candidates
 	}
