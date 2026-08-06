@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -93,12 +92,11 @@ func (c *ControlHTTPClient) sign(r *http.Request, b []byte) {
 	nonce := c.Nonce()
 	d := sha256.Sum256(b)
 	s := r.Method + "\n" + r.URL.EscapedPath() + "\n" + ts + "\n" + nonce + "\n" + hex.EncodeToString(d[:])
-	m := hmac.New(sha256.New, c.PSKey)
-	_, _ = m.Write([]byte(s))
+	signature := mtypes.HMACSHA256(c.PSKey, []byte(s))
 	r.Header.Set(HeaderNodeID, c.NodeID.ToString())
 	r.Header.Set(HeaderTimestamp, ts)
 	r.Header.Set(HeaderNonce, nonce)
-	r.Header.Set(HeaderSignature, hex.EncodeToString(m.Sum(nil)))
+	r.Header.Set(HeaderSignature, hex.EncodeToString(signature))
 }
 
 func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snapshot, bool, error) {

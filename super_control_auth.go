@@ -310,11 +310,7 @@ func (a *ControlAuthenticator) Verify(r *http.Request) (mtypes.Vertex, []byte, e
 	//    sign()) byte-for-byte.
 	digest := sha256.Sum256(body)
 	canonical := r.Method + "\n" + r.URL.EscapedPath() + "\n" + tsHeader + "\n" + nonce + "\n" + hex.EncodeToString(digest[:])
-	mac := hmac.New(sha256.New, []byte(key))
-	if _, err := mac.Write([]byte(canonical)); err != nil {
-		return 0, nil, &ControlAuthError{Code: ErrControlAuthInvalidSignature}
-	}
-	expected := mac.Sum(nil)
+	expected := mtypes.HMACSHA256([]byte(key), []byte(canonical))
 
 	// 7. Decode the supplied signature and compare in constant time.
 	supplied, err := hex.DecodeString(sigHeader)
