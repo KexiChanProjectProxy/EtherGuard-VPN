@@ -80,22 +80,22 @@ func newEndpointBlacklistTestDevice(t *testing.T) *Device {
 	return device
 }
 
-func TestRoutineReceiveIncomingDropsBlacklistedSourceAndQueuesAllowedSource(t *testing.T) {
+func TestRoutineReceiveIncomingDropsBlacklistedRemoteAndQueuesAllowedRemote(t *testing.T) {
 	// Given
 	device := newEndpointBlacklistTestDevice(t)
 	device.PopulatePools()
 	device.queue.decryption = newInboundQueue()
 	device.queue.handshake = newHandshakeQueue()
 	device.net.stopping.Add(1)
-	device.applyEndpointBlacklist(mtypes.ControlV2Parameters{EndpointBlacklist: []string{"198.51.100.0/24"}})
+	device.applyEndpointBlacklist(mtypes.ControlV2Parameters{EndpointBlacklist: []string{"10.0.0.0/8", "198.51.100.0/24"}})
 	packet := make([]byte, MessageInitiationSize)
 	packet[0] = byte(path.MessageInitiationType)
 	packets := []struct {
 		endpoint conn.Endpoint
 		packet   []byte
 	}{
-		{endpoint: endpointBlacklistTestEndpoint{src: net.ParseIP("198.51.100.4"), dst: net.ParseIP("192.0.2.1")}, packet: packet},
-		{endpoint: endpointBlacklistTestEndpoint{src: net.ParseIP("203.0.113.4"), dst: net.ParseIP("192.0.2.1")}, packet: packet},
+		{endpoint: endpointBlacklistTestEndpoint{src: net.ParseIP("10.240.34.217"), dst: net.ParseIP("198.51.100.4")}, packet: packet},
+		{endpoint: endpointBlacklistTestEndpoint{src: net.ParseIP("10.240.34.217"), dst: net.ParseIP("203.0.113.4")}, packet: packet},
 	}
 	next := 0
 	recv := conn.ReceiveFunc(func(buffer []byte) (int, conn.Endpoint, error) {
@@ -118,8 +118,8 @@ func TestRoutineReceiveIncomingDropsBlacklistedSourceAndQueuesAllowedSource(t *t
 	// Then
 	select {
 	case element := <-device.queue.handshake.c:
-		if got := element.endpoint.SrcIP().String(); got != "203.0.113.4" {
-			t.Fatalf("queued packet source = %s, want 203.0.113.4", got)
+		if got := element.endpoint.DstIP().String(); got != "203.0.113.4" {
+			t.Fatalf("queued packet remote = %s, want 203.0.113.4", got)
 		}
 		device.PutMessageBuffer(element.buffer)
 	default:

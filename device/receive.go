@@ -121,10 +121,10 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 		deathSpiral = 0
 		if endpoint != nil {
 			device.endpointBlacklistMu.RLock()
-			blacklisted := device.endpointBlacklisted(endpoint.SrcIP())
+			blacklisted := device.endpointBlacklisted(endpoint.DstIP())
 			device.endpointBlacklistMu.RUnlock()
 			if blacklisted {
-				device.logBlacklistedDatagram(endpoint.SrcIP())
+				device.logBlacklistedDatagram(endpoint.DstIP())
 				continue
 			}
 		}
