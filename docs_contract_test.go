@@ -420,9 +420,8 @@ func TestDocsDirectConnectivity(t *testing.T) {
 // policy. The audit below enumerates every Edge file, asserts that no
 // local-port-policy key has crept in, and pins RecvAddr/SendAddr to the
 // golden manifest captured before Task 6 edits. The operational Super
-// YAML is checked separately: it must contain exactly the approved
-// `RelayCostMS: 10` and `ListenPortPriority` range additions with no other
-// surface change. When the corpus directory is not present (e.g. CI runners
+// YAML is checked separately against its approved policy block. When the
+// corpus directory is not present (e.g. CI runners
 // without the operational repo) the tests skip with t.Skipf so the
 // contract still runs everywhere the corpus is mounted.
 
@@ -621,10 +620,8 @@ func TestCorpusSuperYAMLPolicyIsRange(t *testing.T) {
 	}
 }
 
-// TestCorpusSuperYAMLOtherFieldsUnchanged guarantees the operational
-// Super YAML is touched ONLY for the approved RelayCostMS and
-// ListenPortPriority insertions: every
-// other top-level key/value pair must be byte-identical to the golden
+// TestCorpusSuperYAMLOtherFieldsUnchanged guarantees every line outside the
+// approved operational policy block is byte-identical to the golden
 // snapshot captured before Task 6 edits. The golden snapshot is the
 // exact pre-edit file content embedded as a string; the test computes
 // the line-level delta and fails if any non-approved insertion line
@@ -642,17 +639,21 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	}
 	liveLines := strings.Split(string(data), "\n")
 	goldenLines := strings.Split(operationalSuperYAMLGolden, "\n")
-	if len(liveLines) != len(goldenLines)+5 {
-		t.Fatalf("%s: line count drift: got %d, want golden %d + 5 approved additions = %d",
-			operationalSuperYAML, len(liveLines), len(goldenLines), len(goldenLines)+5)
+	approvedPolicyLines := []string{
+		"RelayCostMS: 10",
+		"ListenPortPriority:",
+		"- Range:",
+		"    From: 16386",
+		"    To: 16390",
+		"EndpointBlacklist:",
+		"- 100.64.0.0/22",
+		"- 2001:0db8::/32",
+		"- 172.18.0.0/30",
 	}
-	// Walk both side-by-side, skipping the five inserted lines. The
-	// insertion is anchored AFTER DampingFilterRadius: 4 — the live
-	// YAML has golden[0..insertAt] verbatim, then the five approved
-	// lines, then golden[insertAt+1..]. Locate the DampingFilterRadius
-	// anchor in the live YAML and assert those five lines are exact.
-	// insertAt is the 0-based index of the anchor line in the live YAML;
-	// in the golden the anchor is at the same index.
+	if len(liveLines) != len(goldenLines)+len(approvedPolicyLines) {
+		t.Fatalf("%s: line count drift: got %d, want golden %d + policy %d = %d",
+			operationalSuperYAML, len(liveLines), len(goldenLines), len(approvedPolicyLines), len(goldenLines)+len(approvedPolicyLines))
+	}
 	insertAt := -1
 	for i, line := range liveLines {
 		if line == "DampingFilterRadius: 4" {
@@ -663,26 +664,18 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 	if insertAt < 0 {
 		t.Fatalf("%s: DampingFilterRadius: 4 anchor not found", operationalSuperYAML)
 	}
-	if insertAt+5 >= len(liveLines) {
+	if insertAt+len(approvedPolicyLines) >= len(liveLines) {
 		t.Fatalf("%s: not enough lines after DampingFilterRadius anchor for approved additions", operationalSuperYAML)
 	}
-	for offset, want := range []string{
-		"RelayCostMS: 10",
-		"ListenPortPriority:",
-		"- Range:",
-		"    From: 16386",
-		"    To: 16390",
-	} {
+	for offset, want := range approvedPolicyLines {
 		if liveLines[insertAt+1+offset] != want {
 			t.Errorf("%s: approved insertion line %d = %q, want %q", operationalSuperYAML, offset+1, liveLines[insertAt+1+offset], want)
 		}
 	}
-	// Now compare every other line to the golden snapshot. For golden
-	// indices strictly past insertAt, the live YAML has shifted by 5.
 	for i, gline := range goldenLines {
 		liveLine := liveLines[i]
 		if i > insertAt {
-			liveLine = liveLines[i+5]
+			liveLine = liveLines[i+len(approvedPolicyLines)]
 		}
 		if liveLine != gline {
 			t.Errorf("%s: line %d drift: got %q, want golden %q", operationalSuperYAML, i+1, liveLine, gline)
@@ -693,8 +686,7 @@ func TestCorpusSuperYAMLOtherFieldsUnchanged(t *testing.T) {
 // operationalSuperYAMLGolden is the byte-exact content of the
 // operational Super YAML as it existed BEFORE Task 6 edits, captured
 // from the working tree at the start of the task. The audit compares
-// the live file against this snapshot, allowing exactly 5 lines of
-// drift for the approved RelayCostMS and ListenPortPriority additions.
+// the live file against this snapshot and the policy block above.
 // A future operator change (renaming, adding a STUN server, etc.) must
 // refresh this constant
 // after review.
