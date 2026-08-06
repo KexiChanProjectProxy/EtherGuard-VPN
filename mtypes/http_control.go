@@ -352,6 +352,9 @@ func (r *ControlV2ReportRequest) Validate() error {
 		if err := r.Pongs[i].Validate(); err != nil {
 			return err
 		}
+		if r.Pongs[i].SourceNode != r.NodeID {
+			return newControlV2Error(ControlV2ErrInvalidNodeID, fmt.Sprintf("pongs[%d].source_node", i), "source_node must equal node_id")
+		}
 	}
 	for i := range r.Candidates {
 		if err := r.Candidates[i].Validate(); err != nil {

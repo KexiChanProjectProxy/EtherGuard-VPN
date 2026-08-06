@@ -65,3 +65,45 @@ func TestControlStateReportPongsReplaceCompleteLatencySet(t *testing.T) {
 		t.Fatalf("unchanged complete set changed revision/events: %d/%d", svc.Revision(), len(events))
 	}
 }
+
+func TestControlStateReportRejectsMismatchedPongSourceWithoutMutation(t *testing.T) {
+	// Given a reporting edge with one published directed latency measurement.
+	svc := NewControlState(ControlStateConfig{})
+	for _, req := range []mtypes.ControlV2RegisterRequest{
+		controlRegisterRequest(1, "reporter"),
+		controlRegisterRequest(4, "reader"),
+	} {
+		if _, err := svc.Register(context.Background(), req, "control-key"); err != nil {
+			t.Fatalf("register node %d: %v", req.NodeID, err)
+		}
+	}
+	var events []mtypes.ControlV2Event
+	svc.SetPublishForTest(func(event mtypes.ControlV2Event) { events = append(events, event) })
+	initial := mtypes.ControlV2ReportRequest{
+		NodeID: 1,
+		Pongs:  []mtypes.ControlV2Pong{{SourceNode: 1, DestNode: 2, LatencyMS: 7, AliveSeconds: 70}},
+	}
+	if err := svc.Report(context.Background(), initial); err != nil {
+		t.Fatalf("initial report: %v", err)
+	}
+	revision := svc.Revision()
+	eventCount := len(events)
+
+	// When an authenticated report claims a pong from a different source.
+	err := svc.Report(context.Background(), mtypes.ControlV2ReportRequest{
+		NodeID: 1,
+		Pongs:  []mtypes.ControlV2Pong{{SourceNode: 3, DestNode: 2, LatencyMS: 9, AliveSeconds: 70}},
+	})
+	if err == nil {
+		t.Fatal("mismatched pong source accepted")
+	}
+
+	// Then the prior complete set, revision, and event stream stay unchanged.
+	latencies := observedPeer(t, svc.SnapshotFor(4), 1).LatencyMS
+	if len(latencies) != 1 || latencies[2] != 7 {
+		t.Fatalf("latencies after invalid report = %#v, want map[2:7]", latencies)
+	}
+	if svc.Revision() != revision || len(events) != eventCount {
+		t.Fatalf("invalid report changed revision/events: %d/%d, want %d/%d", svc.Revision(), len(events), revision, eventCount)
+	}
+}
