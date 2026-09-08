@@ -414,11 +414,7 @@ func TestControlEventsSlowSubscriberEvictionPreservesFastSubscriber(t *testing.T
 }
 
 // TestControlEventsCtxCancelClosesSubscriber ensures cancelling the
-// subscribe context releases the subscriber without goroutine leaks.
-// The hub's per-subscriber state is a struct (no goroutine), so
-// cancellation is a cheap flag flip. The test calls sub.Close()
-// explicitly (the documented way for the caller to release the sub)
-// and verifies no goroutine is left behind.
+// subscribe context plus Close() unregisters the subscriber.
 func TestControlEventsCtxCancelClosesSubscriber(t *testing.T) {
 	hub := NewControlEventHub(8)
 	defer hub.Close()
@@ -432,19 +428,13 @@ func TestControlEventsCtxCancelClosesSubscriber(t *testing.T) {
 	cancel()
 	sub.Close()
 
-	// No goroutines were spawned for this subscriber, so there's
-	// nothing to wait for; just sanity-check we can call methods on
-	// the sub without panicking.
 	select {
 	case <-sub.Done():
-	case <-time.After(100 * time.Millisecond):
-		// Done may not close on ctx cancel alone (the design: Done
-		// closes on eviction or hub.Close); sub.Close is the
-		// explicit release path.
+	case <-time.After(time.Second):
+		t.Fatal("subscriber Done() did not close after Close")
 	}
-	if sub.Err() != nil {
-		// Err is set on eviction or hub.Close; sub.Close alone is a
-		// no-op for the error state. Allow nil.
+	if n := hub.subscriberCount(); n != 0 {
+		t.Fatalf("subscriber still registered after Close: %d", n)
 	}
 }
 
@@ -1175,4 +1165,61 @@ func (m *manualTickerFactory) Shutdown() {
 	for _, s := range m.stoppers {
 		close(s)
 	}
+}
+
+func TestHubUnregistersSubscriberOnClose(t *testing.T) {
+	hub := NewControlEventHub(8)
+	defer hub.Close()
+	for i := range 128 {
+		sub, err := hub.Subscribe(context.Background(), "")
+		if err != nil {
+			t.Fatalf("Subscribe %d: %v", i, err)
+		}
+		sub.Close()
+	}
+	if n := hub.subscriberCount(); n != 0 {
+		t.Fatalf("leaked %d subscribers after Close", n)
+	}
+}
+
+func TestHubUnregistersSSESubscriberOnCancel(t *testing.T) {
+	hub := NewControlEventHub(8)
+	defer hub.Close()
+	for i := range 64 {
+		ctx, cancel := context.WithCancel(context.Background())
+		var buf syncBuffer
+		r, err := hub.ServeSSE(ctx, newFlushWriter(&buf), "", SSEOptions{Heartbeat: time.Hour})
+		if err != nil {
+			t.Fatalf("ServeSSE %d: %v", i, err)
+		}
+		cancel()
+		r.Close()
+	}
+	if n := hub.subscriberCount(); n != 0 {
+		t.Fatalf("leaked %d SSE subscribers after cancel", n)
+	}
+}
+
+func TestHubUnregistersSlowSubscriber(t *testing.T) {
+	hub := NewControlEventHub(4)
+	defer hub.Close()
+	sub, err := hub.SubscribeWithBuffer(context.Background(), "", 1)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	defer sub.Close()
+	for range 8 {
+		hub.Publish(mtypes.ControlV2Event{Type: mtypes.ControlV2EventPeerChange})
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if hub.subscriberCount() == 0 {
+			if !errors.Is(sub.Err(), ErrSlowSubscriber) {
+				t.Fatalf("expected ErrSlowSubscriber, got %v", sub.Err())
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("slow subscriber still registered: %d", hub.subscriberCount())
 }

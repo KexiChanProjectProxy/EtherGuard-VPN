@@ -31,6 +31,10 @@ var (
 	// too slow; the subscriber is evicted and no further events will be
 	// delivered to it.
 	ErrSlowSubscriber = errors.New("control event subscriber evicted (slow consumer)")
+	// ErrSubscriberClosed is returned when the subscriber is released by
+	// Subscriber.Close (SSE renderer shutdown, HTTP request end, or an
+	// explicit test/production Close).
+	ErrSubscriberClosed = errors.New("control event subscriber closed")
 	// ErrInvalidCapacity is returned by NewControlEventHub when the
 	// replay capacity is zero.
 	ErrInvalidCapacity = errors.New("control event hub capacity must be > 0")
@@ -75,6 +79,9 @@ const (
 //     are assigned at Publish time when the caller left ID empty.
 //   - The replay ring is bounded by the configured capacity; older
 //     events are evicted silently (no error) when the ring fills.
+//   - Every subscriber is removed from hub.subs on Close() or eviction.
+//     hub.Close() drops whatever remains. Leaving dead SSE/poll clients
+//     in the map retains their 64-event queues forever.
 type ControlEventHub struct {
 	capacity uint64
 
@@ -101,6 +108,27 @@ func NewControlEventHub(capacity uint64) *ControlEventHub {
 		subs:        make(map[*Subscriber]struct{}),
 		bufferFirst: 1,
 	}
+}
+
+// dropSubscriber removes s from the live set. Safe on a closed or nil hub
+// (delete on a nil map is a no-op). Must NOT be called with h.mu held.
+func (h *ControlEventHub) dropSubscriber(s *Subscriber) {
+	if h == nil || s == nil {
+		return
+	}
+	h.mu.Lock()
+	delete(h.subs, s)
+	h.mu.Unlock()
+}
+
+// subscriberCount is the live registered subscriber set. Test + diagnostics.
+func (h *ControlEventHub) subscriberCount() int {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.subs)
 }
 
 // nextEventIDLocked returns the next monotonic event ID under the hub
@@ -259,6 +287,7 @@ func (h *ControlEventHub) subscribeInternal(ctx context.Context, lastEventID str
 	}
 	subCtx, subCancel := context.WithCancel(ctx)
 	sub := &Subscriber{
+		hub:    h,
 		ctx:    subCtx,
 		cancel: subCancel,
 		events: make(chan mtypes.ControlV2Event, bufSize),
@@ -366,6 +395,7 @@ func (h *ControlEventHub) ServeSSE(ctx context.Context, w interface {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
+		defer r.sub.Close()
 		r.run(rctx)
 	}()
 
@@ -381,6 +411,7 @@ func (h *ControlEventHub) ServeSSE(ctx context.Context, w interface {
 // hub lock, and the consumer drains it via Events(). Termination is
 // observed via Done() and Err().
 type Subscriber struct {
+	hub    *ControlEventHub
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -418,9 +449,16 @@ func (s *Subscriber) Err() error {
 	return nil
 }
 
-// Close cancels the subscriber's context. Idempotent.
+// Close cancels the subscriber's context, unregisters it from the hub,
+// and is idempotent.
 func (s *Subscriber) Close() {
-	s.cancel()
+	if s == nil {
+		return
+	}
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.markEvicted(ErrSubscriberClosed)
 }
 
 // signalResync closes the resync channel exactly once.
@@ -434,13 +472,24 @@ func (s *Subscriber) signalResync() {
 
 // markEvicted records the eviction reason and cancels the sub's
 // context so the consumer observes Done(). The done channel is closed
-// exactly once.
+// exactly once. The subscriber is dropped from the hub so its bounded
+// event queue can be garbage-collected.
 func (s *Subscriber) markEvicted(err error) {
 	if s.evict.CompareAndSwap(nil, &err) {
 		s.setErr(err)
-		s.cancel()
+		if s.cancel != nil {
+			s.cancel()
+		}
 		s.closeOnce.Do(func() { close(s.done) })
+		s.dropFromHub()
 	}
+}
+
+func (s *Subscriber) dropFromHub() {
+	if s == nil {
+		return
+	}
+	s.hub.dropSubscriber(s)
 }
 
 // markEvictedIfNotSet records err as the termination reason iff no

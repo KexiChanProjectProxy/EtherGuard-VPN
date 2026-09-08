@@ -42,6 +42,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"reflect"
@@ -94,6 +95,29 @@ type superConfig struct {
 
 	// Now is the clock used by the runtime. nil -> time.Now.
 	Now func() time.Time
+}
+
+// localPprofAddr is the loopback-only diagnostic endpoint. Heap/goroutine
+// profiles are how we catch Super control-plane leaks without exposing
+// pprof on the public nginx vhost.
+const localPprofAddr = "127.0.0.1:6060"
+
+var localPprofOnce sync.Once
+
+func startLocalPprof() {
+	localPprofOnce.Do(func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		go func() {
+			if err := http.ListenAndServe(localPprofAddr, mux); err != nil {
+				fmt.Fprintf(os.Stderr, "super: local pprof %s: %v\n", localPprofAddr, err)
+			}
+		}()
+	})
 }
 
 // superRuntime owns the wired services plus the goroutines and listeners
@@ -284,6 +308,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if now == nil {
 		now = time.Now
 	}
+	startLocalPprof()
 
 	// Build the Floyd-Warshall graph with the Super's recalculation
 	// settings. The graph is shared with ControlState so Report() latency
