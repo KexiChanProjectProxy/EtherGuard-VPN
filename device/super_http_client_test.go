@@ -481,6 +481,424 @@ func TestControlHTTPClientRegister(t *testing.T) {
 	}
 }
 
+func TestControlHTTPClientSwitchBaseResetsState(t *testing.T) {
+	// Given
+	env := &serverEnv{psKey: []byte("k")}
+	snapshotETag := make(chan string, 1)
+	eventID := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshotETag <- r.Header.Get("If-None-Match")
+		snapshot := env.snapshot(1)
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		eventID <- r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, "http://127.0.0.1:1", "edge/v2", vertexFromInt(t, 556), "k")
+	client.mu.Lock()
+	client.current = &mtypes.ControlV2Snapshot{Revision: 99, IssuedAt: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)}
+	client.lastEventID = "event-from-a"
+	client.mu.Unlock()
+
+	// When
+	epoch := client.SwitchBase(server.URL + "/")
+	snapshot, applied, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot after switch: %v", err)
+	}
+	if !applied || snapshot == nil || snapshot.Revision != 1 {
+		t.Fatalf("snapshot after switch = %+v, applied=%v", snapshot, applied)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	eventsDone := make(chan error, 1)
+	go func() { eventsDone <- client.Events(ctx, make(chan mtypes.ControlV2Event, 1)) }()
+
+	// Then
+	if epoch != 1 || client.Epoch() != epoch {
+		t.Fatalf("epoch=%d current=%d, want 1", epoch, client.Epoch())
+	}
+	if client.BaseURL != server.URL {
+		t.Fatalf("BaseURL=%q, want %q", client.BaseURL, server.URL)
+	}
+	select {
+	case got := <-snapshotETag:
+		if got != "" {
+			t.Fatalf("If-None-Match=%q after switch, want empty", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("snapshot request did not reach switched base: %v", ctx.Err())
+	}
+	select {
+	case got := <-eventID:
+		if got != "" {
+			t.Fatalf("Last-Event-ID=%q after switch, want empty", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("event request did not reach switched base: %v", ctx.Err())
+	}
+	cancel()
+	<-eventsDone
+}
+
+func TestControlHTTPClientStaleEpochResultDiscarded(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.January, 2, 0, 0, 0, 0, time.UTC)
+	startedA := make(chan struct{})
+	releaseA := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseA) }) })
+	envA := &serverEnv{psKey: []byte("k")}
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envA.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		close(startedA)
+		<-releaseA
+		snapshot := envA.snapshot(200)
+		snapshot.IssuedAt = issuedAt.Add(10 * time.Second)
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	}))
+	defer serverA.Close()
+	envB := &serverEnv{psKey: []byte("k")}
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envB.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := envB.snapshot(1)
+		snapshot.IssuedAt = issuedAt
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	}))
+	defer serverB.Close()
+	client := newTestClient(t, serverA.URL, "edge/v2", vertexFromInt(t, 557), "k")
+	type snapshotResult struct {
+		snapshot *mtypes.ControlV2Snapshot
+		applied  bool
+		err      error
+	}
+	staleResult := make(chan snapshotResult, 1)
+	go func() {
+		snapshot, applied, err := client.Snapshot(context.Background())
+		staleResult <- snapshotResult{snapshot: snapshot, applied: applied, err: err}
+	}()
+	select {
+	case <-startedA:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot request to A did not start")
+	}
+
+	// When
+	client.SwitchBase(serverB.URL)
+	snapshotB, appliedB, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot from B: %v", err)
+	}
+	if !appliedB || snapshotB == nil || snapshotB.Revision != 1 {
+		t.Fatalf("snapshot from B = %+v, applied=%v", snapshotB, appliedB)
+	}
+	releaseOnce.Do(func() { close(releaseA) })
+	resultA := <-staleResult
+
+	// Then
+	if !errors.Is(resultA.err, ErrControlEpochChanged) {
+		t.Fatalf("stale A result error=%v, want ErrControlEpochChanged", resultA.err)
+	}
+	if resultA.snapshot != nil || resultA.applied {
+		t.Fatalf("stale A result was exposed: snapshot=%+v applied=%v", resultA.snapshot, resultA.applied)
+	}
+	if current := client.Current(); current == nil || current.Revision != 1 {
+		t.Fatalf("current snapshot=%+v, want B revision 1", current)
+	}
+}
+
+func TestControlHTTPClientSyncSurvivesInitialSnapshotFailure(t *testing.T) {
+	// Given
+	env := &serverEnv{psKey: []byte("k")}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if env.snapshotCalls.Add(1) <= 3 {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snapshot := env.snapshot(1)
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "stream unavailable", http.StatusServiceUnavailable)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server.URL, "edge/v2", vertexFromInt(t, 558), "k")
+	client.MinBackoff = 5 * time.Millisecond
+	client.MaxBackoff = 10 * time.Millisecond
+	client.Jitter = func(delay time.Duration) time.Duration { return delay }
+	client.mu.Lock()
+	client.current = &mtypes.ControlV2Snapshot{
+		Revision: 0,
+		IssuedAt: time.Date(2026, time.January, 3, 0, 0, 0, 0, time.UTC),
+		Parameters: mtypes.ControlV2Parameters{
+			PollInterval: 10 * time.Millisecond,
+		},
+	}
+	client.mu.Unlock()
+	var logs atomic.Int32
+	client.Logf = func(string, ...any) { logs.Add(1) }
+	applied := make(chan struct{}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	syncDone := make(chan error, 1)
+
+	// When
+	go func() {
+		syncDone <- client.Sync(ctx, func(snapshot *mtypes.ControlV2Snapshot) {
+			if snapshot.Revision == 1 {
+				select {
+				case applied <- struct{}{}:
+				default:
+				}
+			}
+		})
+	}()
+
+	// Then
+	select {
+	case <-applied:
+	case <-ctx.Done():
+		t.Fatalf("Sync did not recover after initial snapshot failures: %v", ctx.Err())
+	}
+	if calls := env.snapshotCalls.Load(); calls < 4 {
+		t.Fatalf("snapshot calls=%d, want at least 4", calls)
+	}
+	if logs.Load() == 0 {
+		t.Fatal("initial snapshot failure was not logged")
+	}
+	cancel()
+	if err := <-syncDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sync returned %v, want context cancellation", err)
+	}
+}
+
+func TestControlHTTPClientSyncRestartsOnSwitch(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.January, 4, 0, 0, 0, 0, time.UTC)
+	envA := &serverEnv{psKey: []byte("k")}
+	aStream := make(chan struct{}, 1)
+	aCancelled := make(chan struct{}, 1)
+	muxA := http.NewServeMux()
+	muxA.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envA.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := envA.snapshot(100)
+		snapshot.IssuedAt = issuedAt
+		w.Header().Set("ETag", snapshot.ETag())
+		if r.Header.Get("If-None-Match") == snapshot.ETag() {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	muxA.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envA.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "id: event-a\nevent: revision\ndata: {\"revision\":100}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case aStream <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done()
+		select {
+		case aCancelled <- struct{}{}:
+		default:
+		}
+	})
+	serverA := httptest.NewServer(muxA)
+	defer serverA.Close()
+
+	envB := &serverEnv{psKey: []byte("k")}
+	bStreamEventID := make(chan string, 1)
+	muxB := http.NewServeMux()
+	muxB.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envB.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := envB.snapshot(1)
+		snapshot.IssuedAt = issuedAt
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	muxB.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !envB.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		bStreamEventID <- r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	serverB := httptest.NewServer(muxB)
+	defer serverB.Close()
+
+	client := newTestClient(t, serverA.URL, "edge/v2", vertexFromInt(t, 559), "k")
+	client.MinBackoff = 5 * time.Millisecond
+	client.MaxBackoff = 20 * time.Millisecond
+	client.Jitter = func(delay time.Duration) time.Duration { return delay }
+	bApplied := make(chan struct{}, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	syncDone := make(chan error, 1)
+	go func() {
+		syncDone <- client.Sync(ctx, func(snapshot *mtypes.ControlV2Snapshot) {
+			if snapshot.Revision == 1 {
+				select {
+				case bApplied <- struct{}{}:
+				default:
+				}
+			}
+		})
+	}()
+	select {
+	case <-aStream:
+	case <-ctx.Done():
+		t.Fatalf("A stream did not connect: %v", ctx.Err())
+	}
+	waitClientCondition(t, 200*time.Millisecond, func() bool { return client.LastEventID() == "event-a" })
+
+	// When
+	epoch := client.SwitchBase(serverB.URL)
+
+	// Then
+	if epoch != 1 {
+		t.Fatalf("switch epoch=%d, want 1", epoch)
+	}
+	select {
+	case <-bApplied:
+	case <-ctx.Done():
+		t.Fatalf("B snapshot was not immediately applied: %v", ctx.Err())
+	}
+	select {
+	case got := <-bStreamEventID:
+		if got != "" {
+			t.Fatalf("B stream Last-Event-ID=%q, want empty", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("B stream did not connect: %v", ctx.Err())
+	}
+	select {
+	case <-aCancelled:
+	case <-ctx.Done():
+		t.Fatalf("A stream was not cancelled: %v", ctx.Err())
+	}
+	if current := client.Current(); current == nil || current.Revision != 1 {
+		t.Fatalf("current snapshot=%+v, want B revision 1", current)
+	}
+	cancel()
+	if err := <-syncDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sync returned %v, want context cancellation", err)
+	}
+}
+
+func TestControlHTTPClientRegisterInstallsBaseline(t *testing.T) {
+	// Given
+	issuedAt := time.Date(2026, time.January, 5, 0, 0, 0, 0, time.UTC)
+	env := &serverEnv{psKey: []byte("k")}
+	snapshotETag := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/register", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshot := env.snapshot(10)
+		snapshot.IssuedAt = issuedAt
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		snapshotETag <- r.Header.Get("If-None-Match")
+		snapshot := env.snapshot(9)
+		snapshot.IssuedAt = issuedAt
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server.URL, "edge/v2", vertexFromInt(t, 560), "k")
+	request := &mtypes.ControlV2RegisterRequest{
+		NodeID:         vertexFromInt(t, 560),
+		NodeName:       "edge",
+		Version:        mtypes.ControlV2ProtocolVersion,
+		ListenPort:     51820,
+		RequestedAt:    issuedAt,
+		Implementation: "etherguard",
+	}
+
+	// When
+	registered, err := client.Register(context.Background(), request)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	afterSnapshot, applied, err := client.Snapshot(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	// Then
+	if registered == nil || registered.Revision != 10 {
+		t.Fatalf("registered snapshot=%+v, want revision 10", registered)
+	}
+	if current := client.Current(); current == nil || current.Revision != 10 {
+		t.Fatalf("current snapshot=%+v, want registered revision 10", current)
+	}
+	if applied {
+		t.Fatal("older snapshot was applied over the register baseline")
+	}
+	if afterSnapshot == nil || afterSnapshot.Revision != 10 {
+		t.Fatalf("snapshot result=%+v, want retained revision 10", afterSnapshot)
+	}
+	if got := <-snapshotETag; got != registered.ETag() {
+		t.Fatalf("If-None-Match=%q, want register baseline %q", got, registered.ETag())
+	}
+}
+
 // rejects bad signature.
 func TestControlHTTPClientBadSignature(t *testing.T) {
 	mux := http.NewServeMux()

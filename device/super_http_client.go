@@ -20,7 +20,10 @@ import (
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 )
 
-var ErrControlUnknownPeer = errors.New("control state: unknown peer")
+var (
+	ErrControlUnknownPeer  = errors.New("control state: unknown peer")
+	ErrControlEpochChanged = errors.New("control client epoch changed")
+)
 
 const (
 	HeaderNodeID    = "X-EG-NodeID"
@@ -44,6 +47,7 @@ type ControlHTTPClient struct {
 	Now             func() time.Time
 	Nonce           func() string
 	Jitter          func(time.Duration) time.Duration
+	Logf            func(string, ...any)
 
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
@@ -51,6 +55,8 @@ type ControlHTTPClient struct {
 	mu          sync.Mutex
 	current     *mtypes.ControlV2Snapshot
 	lastEventID string
+	epoch       uint64
+	switched    chan struct{}
 	refresh     chan struct{}
 }
 
@@ -66,8 +72,32 @@ func NewControlHTTPClient(base, prefix string, id mtypes.Vertex, key string) *Co
 		Jitter:     defaultJitter,
 		MinBackoff: defaultMinBackoff,
 		MaxBackoff: defaultMaxBackoff,
+		switched:   make(chan struct{}, 1),
 		refresh:    make(chan struct{}, 1),
 	}
+}
+
+func (c *ControlHTTPClient) SwitchBase(base string) uint64 {
+	c.mu.Lock()
+	c.BaseURL = strings.TrimRight(base, "/")
+	c.current = nil
+	c.lastEventID = ""
+	c.epoch++
+	epoch := c.epoch
+	c.mu.Unlock()
+
+	c.HTTP.CloseIdleConnections()
+	select {
+	case c.switched <- struct{}{}:
+	default:
+	}
+	return epoch
+}
+
+func (c *ControlHTTPClient) Epoch() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.epoch
 }
 
 // InvalidateHTTP drops cached TCP connections. After a WAN/NAT remap a
@@ -93,7 +123,14 @@ func defaultJitter(d time.Duration) time.Duration {
 }
 
 func (c *ControlHTTPClient) endpoint(n string) string {
-	return strings.TrimRight(c.BaseURL, "/") + "/" + strings.Trim(c.Prefix, "/") + "/" + n
+	c.mu.Lock()
+	base := c.BaseURL
+	c.mu.Unlock()
+	return c.endpointAt(base, n)
+}
+
+func (c *ControlHTTPClient) endpointAt(base, n string) string {
+	return strings.TrimRight(base, "/") + "/" + strings.Trim(c.Prefix, "/") + "/" + n
 }
 
 func (c *ControlHTTPClient) sign(r *http.Request, b []byte) {
@@ -111,8 +148,10 @@ func (c *ControlHTTPClient) sign(r *http.Request, b []byte) {
 func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snapshot, bool, error) {
 	c.mu.Lock()
 	old := c.current
+	epoch := c.epoch
+	base := c.BaseURL
 	c.mu.Unlock()
-	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint("snapshot"), nil)
+	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointAt(base, "snapshot"), nil)
 	if e != nil {
 		return nil, false, e
 	}
@@ -126,6 +165,11 @@ func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snap
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.epoch != epoch {
+			return nil, false, ErrControlEpochChanged
+		}
 		return old, false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -137,6 +181,9 @@ func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snap
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.epoch != epoch {
+		return nil, false, ErrControlEpochChanged
+	}
 	if c.current != nil && !c.current.Accepts(&in) {
 		return c.current, false, nil
 	}
@@ -188,11 +235,15 @@ func (e *reportStatusError) Is(target error) bool {
 }
 
 func (c *ControlHTTPClient) Register(ctx context.Context, x *mtypes.ControlV2RegisterRequest) (*mtypes.ControlV2Snapshot, error) {
+	c.mu.Lock()
+	epoch := c.epoch
+	base := c.BaseURL
+	c.mu.Unlock()
 	b, e := json.Marshal(x)
 	if e != nil {
 		return nil, e
 	}
-	r, e := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint("register"), bytes.NewReader(b))
+	r, e := http.NewRequestWithContext(ctx, http.MethodPost, c.endpointAt(base, "register"), bytes.NewReader(b))
 	if e != nil {
 		return nil, e
 	}
@@ -207,8 +258,19 @@ func (c *ControlHTTPClient) Register(ctx context.Context, x *mtypes.ControlV2Reg
 		return nil, fmt.Errorf("register: %s", resp.Status)
 	}
 	var s mtypes.ControlV2Snapshot
-	e = json.NewDecoder(resp.Body).Decode(&s)
-	return &s, e
+	if e = json.NewDecoder(resp.Body).Decode(&s); e != nil {
+		return &s, e
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.epoch != epoch {
+		return &s, ErrControlEpochChanged
+	}
+	if c.current != nil && !c.current.Accepts(&s) {
+		return c.current, nil
+	}
+	c.current = &s
+	return &s, nil
 }
 
 // BootstrapStatusError reports a non-200 status from the bootstrap
@@ -315,12 +377,15 @@ func (c *ControlHTTPClient) RequestSnapshotRefresh() {
 }
 
 // recordEventID tracks the most-recently delivered SSE event ID for replay on reconnect.
-func (c *ControlHTTPClient) recordEventID(id string) {
+func (c *ControlHTTPClient) recordEventID(id string, epoch uint64) {
 	if id == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.epoch != epoch {
+		return
+	}
 	c.lastEventID = id
 }
 
@@ -416,13 +481,16 @@ func (c *ControlHTTPClient) Events(ctx context.Context, out chan<- mtypes.Contro
 }
 
 func (c *ControlHTTPClient) events(ctx context.Context, out chan<- mtypes.ControlV2Event, connected chan<- struct{}) error {
-	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint("events"), nil)
+	c.mu.Lock()
+	epoch := c.epoch
+	base := c.BaseURL
+	lastEventID := c.lastEventID
+	c.mu.Unlock()
+	r, e := http.NewRequestWithContext(ctx, http.MethodGet, c.endpointAt(base, "events"), nil)
 	if e != nil {
 		return e
 	}
-	c.mu.Lock()
-	r.Header.Set("Last-Event-ID", c.lastEventID)
-	c.mu.Unlock()
+	r.Header.Set("Last-Event-ID", lastEventID)
 	c.sign(r, nil)
 	resp, e := c.HTTP.Do(r)
 	if e != nil {
@@ -439,7 +507,7 @@ func (c *ControlHTTPClient) events(ctx context.Context, out chan<- mtypes.Contro
 			return ctx.Err()
 		}
 	}
-	tracker := &eventTracker{client: c, out: out}
+	tracker := &eventTracker{client: c, out: out, epoch: epoch}
 	return sseParseTracked(ctx, resp.Body, tracker)
 }
 
@@ -450,10 +518,11 @@ type eventSink interface {
 type eventTracker struct {
 	client *ControlHTTPClient
 	out    chan<- mtypes.ControlV2Event
+	epoch  uint64
 }
 
 func (t *eventTracker) deliver(ctx context.Context, ev mtypes.ControlV2Event) error {
-	t.client.recordEventID(ev.ID)
+	t.client.recordEventID(ev.ID, t.epoch)
 	select {
 	case t.out <- ev:
 		return nil
@@ -493,8 +562,12 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 	if apply == nil {
 		return fmt.Errorf("apply callback is required")
 	}
+	initialSnapshotFailed := false
 	if snapshot, ok, err := c.Snapshot(ctx); err != nil {
-		return err
+		initialSnapshotFailed = true
+		if c.Logf != nil {
+			c.Logf("initial control snapshot failed: %v", err)
+		}
 	} else if ok {
 		apply(snapshot)
 	}
@@ -508,6 +581,7 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 	var streamErr <-chan error
 	var streamConnected <-chan struct{}
 	var streamEvents <-chan mtypes.ControlV2Event
+	streamHealthy := false
 
 	stopPolling := func() {
 		if pollTicker == nil {
@@ -540,18 +614,35 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 		streamConnected = connected
 		streamEvents = events
 	}
-	startStream()
-	defer func() {
-		stopPolling()
+	stopReconnect := func() {
 		if reconnectTimer != nil {
 			reconnectTimer.Stop()
 		}
+		reconnectTimer = nil
+		reconnect = nil
+	}
+	stopStream := func() {
 		if streamCancel != nil {
 			streamCancel()
 		}
 		if streamDone != nil {
 			<-streamDone
 		}
+		streamCancel = nil
+		streamDone = nil
+		streamErr = nil
+		streamConnected = nil
+		streamEvents = nil
+		streamHealthy = false
+	}
+	if initialSnapshotFailed {
+		startPolling()
+	}
+	startStream()
+	defer func() {
+		stopPolling()
+		stopReconnect()
+		stopStream()
 	}()
 
 	for {
@@ -559,7 +650,10 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-streamConnected:
-			stopPolling()
+			streamHealthy = true
+			if c.Current() != nil {
+				stopPolling()
+			}
 			streamConnected = nil
 			backoff = c.MinBackoff
 		case <-streamEvents:
@@ -574,7 +668,24 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 		case <-pollTick:
 			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
 				apply(snapshot)
+				if streamHealthy {
+					stopPolling()
+				}
 			}
+		case <-c.switched:
+			stopPolling()
+			stopReconnect()
+			stopStream()
+			backoff = c.MinBackoff
+			if snapshot, ok, err := c.Snapshot(ctx); err != nil {
+				if c.Logf != nil {
+					c.Logf("control snapshot after base switch failed: %v", err)
+				}
+				startPolling()
+			} else if ok {
+				apply(snapshot)
+			}
+			startStream()
 		case <-reconnect:
 			reconnectTimer = nil
 			reconnect = nil
@@ -586,6 +697,7 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 			streamCancel = nil
 			streamEvents = nil
 			streamConnected = nil
+			streamHealthy = false
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
