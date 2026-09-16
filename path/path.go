@@ -36,6 +36,7 @@ type IG struct {
 	Vert                 map[mtypes.Vertex]bool
 	edges                map[mtypes.Vertex]map[mtypes.Vertex]*Latency
 	edgelock             *sync.RWMutex
+	routelock            *sync.RWMutex
 	gsetting             mtypes.GraphRecalculateSetting
 	SuperNodeInfoTimeout time.Duration
 	RecalculateCoolDown  time.Duration
@@ -59,6 +60,7 @@ type IG struct {
 func NewGraph(num_node int, IsSuperMode bool, theconfig mtypes.GraphRecalculateSetting, ntpinfo mtypes.NTPInfo, loglevel mtypes.LoggerInfo) (*IG, error) {
 	g := IG{
 		edgelock:             &sync.RWMutex{},
+		routelock:            &sync.RWMutex{},
 		gsetting:             theconfig,
 		RecalculateCoolDown:  mtypes.S2TD(theconfig.RecalculateCoolDown),
 		TimeoutCheckInterval: mtypes.S2TD(theconfig.TimeoutCheckInterval),
@@ -84,6 +86,12 @@ func (g *IG) GetWeightType(x float64) (y float64) {
 }
 
 func (g *IG) ShouldUpdate(oldval float64, newval float64, withCooldown bool) bool {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
+	return g.shouldUpdateLocked(oldval, newval, withCooldown)
+}
+
+func (g *IG) shouldUpdateLocked(oldval float64, newval float64, withCooldown bool) bool {
 	if (oldval >= mtypes.Infinity) != (newval >= mtypes.Infinity) {
 		return true
 	}
@@ -109,13 +117,19 @@ func (g *IG) ShouldUpdate(oldval float64, newval float64, withCooldown bool) boo
 }
 
 func (g *IG) CheckAnyShouldUpdate(withCooldown bool) bool {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
+	return g.checkAnyShouldUpdateLocked(withCooldown)
+}
+
+func (g *IG) checkAnyShouldUpdateLocked(withCooldown bool) bool {
 	vert := g.Vertices()
 	for u := range vert {
 		for v := range vert {
 			if u != v {
 				newVal := g.Weight(u, v, false)
 				oldVal := g.OldWeight(u, v, false)
-				if g.ShouldUpdate(oldVal, newVal, withCooldown) {
+				if g.shouldUpdateLocked(oldVal, newVal, withCooldown) {
 					return true
 				}
 			}
@@ -125,23 +139,29 @@ func (g *IG) CheckAnyShouldUpdate(withCooldown bool) bool {
 }
 
 func (g *IG) RecalculateNhTable(checkchange bool) (changed bool) {
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
+	return g.recalculateNhTableLocked(checkchange)
+}
+
+func (g *IG) recalculateNhTableLocked(checkchange bool) (changed bool) {
 	if g.gsetting.StaticMode {
 		if g.changed {
 			changed = checkchange
 		}
 		return
 	}
-	if !g.CheckAnyShouldUpdate(true) {
+	if !g.checkAnyShouldUpdateLocked(true) {
 		return
 	}
 
-	dist, dist_noAC, next, _ := g.FloydWarshall(false)
+	dist, dist_noAC, next, _ := g.floydWarshallLocked(false)
 	changed = false
 	if checkchange {
 	CheckLoop:
 		for src, dsts := range next {
 			for dst, old_next := range dsts {
-				nexthop := g.Next(src, dst)
+				nexthop := g.nextLocked(src, dst)
 				if old_next != nexthop {
 					changed = true
 					break CheckLoop
@@ -156,6 +176,8 @@ func (g *IG) RecalculateNhTable(checkchange bool) (changed bool) {
 }
 
 func (g *IG) RemoveVirt(v mtypes.Vertex, recalculate bool, checkchange bool) (changed bool) { //Waiting for test
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
 	g.edgelock.Lock()
 	delete(g.Vert, v)
 	delete(g.edges, v)
@@ -165,7 +187,7 @@ func (g *IG) RemoveVirt(v mtypes.Vertex, recalculate bool, checkchange bool) (ch
 	g.edgelock.Unlock()
 	g.changed = true
 	if recalculate {
-		changed = g.RecalculateNhTable(checkchange)
+		changed = g.recalculateNhTableLocked(checkchange)
 	}
 	return
 }
@@ -181,6 +203,8 @@ func (g *IG) UpdateLatency(src mtypes.Vertex, dst mtypes.Vertex, val float64, Ti
 }
 
 func (g *IG) UpdateLatencyMulti(pong_info []mtypes.PongMsg, recalculate bool, checkchange bool) (changed bool) {
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
 	g.edgelock.Lock()
 	should_update := false
 	for _, pong_msg := range pong_info {
@@ -217,7 +241,7 @@ func (g *IG) UpdateLatencyMulti(pong_info []mtypes.PongMsg, recalculate bool, ch
 		g.edgelock.Unlock()
 		oldval := g.OldWeight(u, v, false)
 		g.edgelock.Lock()
-		should_update = should_update || g.ShouldUpdate(oldval, w, false)
+		should_update = should_update || g.shouldUpdateLocked(oldval, w, false)
 		if _, ok := g.edges[u][v]; ok {
 			g.edges[u][v].ping = w
 			g.edges[u][v].validUntil = time.Now().Add(mtypes.S2TD(pong_msg.TimeToAlive))
@@ -233,7 +257,7 @@ func (g *IG) UpdateLatencyMulti(pong_info []mtypes.PongMsg, recalculate bool, ch
 	}
 	g.edgelock.Unlock()
 	if should_update && recalculate {
-		changed = g.RecalculateNhTable(checkchange)
+		changed = g.recalculateNhTableLocked(checkchange)
 	}
 	return
 }
@@ -256,6 +280,12 @@ func (g *IG) Neighbors(v mtypes.Vertex) (vs []mtypes.Vertex) {
 }
 
 func (g *IG) Next(u, v mtypes.Vertex) mtypes.Vertex {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
+	return g.nextLocked(u, v)
+}
+
+func (g *IG) nextLocked(u, v mtypes.Vertex) mtypes.Vertex {
 	if _, ok := g.nhTable[u]; !ok {
 		return mtypes.NodeID_Invalid
 	}
@@ -352,6 +382,12 @@ func (g *IG) RemoveAllNegativeValue() {
 }
 
 func (g *IG) FloydWarshall(again bool) (dist mtypes.DistTable, dist_noAC mtypes.DistTable, next mtypes.NextHopTable, err error) {
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
+	return g.floydWarshallLocked(again)
+}
+
+func (g *IG) floydWarshallLocked(again bool) (dist mtypes.DistTable, dist_noAC mtypes.DistTable, next mtypes.NextHopTable, err error) {
 	if g.loglevel.LogInternal {
 		if !again {
 			fmt.Println("Internal: Start Floyd Warshall algorithm")
@@ -407,7 +443,7 @@ func (g *IG) FloydWarshall(again bool) (dist mtypes.DistTable, dist_noAC mtypes.
 				}
 				g.RemoveAllNegativeValue()
 				err = errors.New("negative cycle detected")
-				dist, dist_noAC, next, _ = g.FloydWarshall(true)
+				dist, dist_noAC, next, _ = g.floydWarshallLocked(true)
 				return
 			} else {
 				dist = make(mtypes.DistTable)
@@ -425,8 +461,8 @@ func (g *IG) FloydWarshall(again bool) (dist mtypes.DistTable, dist_noAC mtypes.
 }
 
 func (g *IG) Path(u, v mtypes.Vertex) (path []mtypes.Vertex, err error) {
-	g.edgelock.RLock()
-	defer g.edgelock.RUnlock()
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
 	footprint := make(map[mtypes.Vertex]bool)
 	for u != v {
 		if _, has := footprint[u]; has {
@@ -447,21 +483,25 @@ func (g *IG) Path(u, v mtypes.Vertex) (path []mtypes.Vertex, err error) {
 }
 
 func (g *IG) SetNHTable(nh mtypes.NextHopTable) { // set nhTable from supernode
-	g.edgelock.Lock()
-	defer g.edgelock.Unlock()
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
 	g.nhTable = nh
 	g.changed = true
 	g.NhTableExpire = time.Now().Add(g.SuperNodeInfoTimeout)
 }
 
 func (g *IG) GetNHTable(recalculate bool) mtypes.NextHopTable {
+	g.routelock.Lock()
+	defer g.routelock.Unlock()
 	if recalculate && time.Now().After(g.NhTableExpire) {
-		g.RecalculateNhTable(false)
+		g.recalculateNhTableLocked(false)
 	}
 	return g.nhTable
 }
 
 func (g *IG) GetDtst(withAC bool) mtypes.DistTable {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
 	if withAC {
 		return g.dlTable
 	} else {
@@ -489,6 +529,8 @@ func (g *IG) GetEdges(isOld bool, withAC bool) (edges map[mtypes.Vertex]map[mtyp
 }
 
 func (g *IG) GetBoardcastList(id mtypes.Vertex) (tosend map[mtypes.Vertex]bool) {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
 	tosend = make(map[mtypes.Vertex]bool)
 	for _, element := range g.nhTable[id] {
 		tosend[element] = true
@@ -578,7 +620,9 @@ func Solve(filePath string, pe bool) error {
 	if err != nil {
 		fmt.Println("Error:", err)
 	}
+	g.routelock.Lock()
 	g.dlTable, g.dlTable_noAC, g.nhTable = dist, dist_noAC, next
+	g.routelock.Unlock()
 
 	rr, _ := yaml.Marshal(Fullroute{
 		Dist:      dist,
