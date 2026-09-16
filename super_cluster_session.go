@@ -80,6 +80,8 @@ type clusterSession struct {
 	rxWire         atomic.Uint64
 	encoderCreates uint32
 	decoderCreates uint32
+	freezeReader   atomic.Bool
+	readerFrozen   atomic.Bool
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -208,6 +210,14 @@ func (s *clusterSession) Send(envelope clusterEnvelope) error {
 		return nil
 	default:
 		return ErrClusterSendQueueFull
+	}
+}
+
+// FreezeReaderForTest stops the session reader before it consumes another
+// message without closing the underlying connection.
+func (s *clusterSession) FreezeReaderForTest() {
+	if s != nil {
+		s.freezeReader.Store(true)
 	}
 }
 

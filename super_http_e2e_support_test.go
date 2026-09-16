@@ -361,6 +361,7 @@ type e2eClusterOptions struct {
 	grace       time.Duration
 	compression string
 	linkPairs   [][2]int
+	apiPrefix   string
 }
 
 type e2eMultiSuper struct {
@@ -371,6 +372,7 @@ type e2eMultiSuper struct {
 	edges           []*device.Device
 	edgeRuntimes    []*device.SuperHTTPRuntime
 	edgeCancels     []context.CancelFunc
+	apiPrefix       string
 	closeOnce       sync.Once
 	closeErr        error
 }
@@ -392,12 +394,16 @@ func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eM
 	if opts.compression == "" {
 		opts.compression = "zstd"
 	}
+	if opts.apiPrefix == "" {
+		opts.apiPrefix = mtypes.ControlV2APIPrefix
+	}
 
 	topology := &e2eMultiSuper{
 		supers:          make([]e2eSuper, n),
 		proxies:         make([]*httptest.Server, n),
 		edgeListeners:   make([]net.Listener, n),
 		manageListeners: make([]net.Listener, n),
+		apiPrefix:       opts.apiPrefix,
 	}
 	t.Cleanup(func() {
 		if err := topology.shutdown(); err != nil {
@@ -484,6 +490,7 @@ func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eM
 		base := validBaseConfig()
 		base.NodeName = "e2e-super-" + strconv.Itoa(index+1)
 		base.APIUrl = topology.supers[index].edgeURL
+		base.APIPrefix = opts.apiPrefix
 		base.ManagementAuth.PasswordHash = topology.supers[index].hash
 		base.STUNServers = nil
 		base.Peers = nil
@@ -643,6 +650,7 @@ type e2eRetryConfig struct {
 type e2eEdgeOptions struct {
 	startIndex int
 	logger     *device.Logger
+	apiPrefix  string
 }
 
 type e2eEdgeOption func(*e2eEdgeOptions)
@@ -656,6 +664,12 @@ func withE2EEdgeStartIndex(index int) e2eEdgeOption {
 func withE2EEdgeLogger(logger *device.Logger) e2eEdgeOption {
 	return func(options *e2eEdgeOptions) {
 		options.logger = logger
+	}
+}
+
+func withE2EEdgeAPIPrefix(apiPrefix string) e2eEdgeOption {
+	return func(options *e2eEdgeOptions) {
+		options.apiPrefix = apiPrefix
 	}
 }
 
@@ -803,7 +817,7 @@ func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTop
 
 func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func(), baseURLs []string, optionValues ...e2eEdgeOption) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc) {
 	t.Helper()
-	options := e2eEdgeOptions{}
+	options := e2eEdgeOptions{apiPrefix: mtypes.ControlV2APIPrefix}
 	for _, option := range optionValues {
 		option(&options)
 	}
@@ -848,7 +862,7 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 		SuperNodeV2: mtypes.SuperNodeV2Ref{
 			APIUrl:       baseURL,
 			APIUrls:      append([]string(nil), baseURLs...),
-			APIPrefix:    mtypes.ControlV2APIPrefix,
+			APIPrefix:    options.apiPrefix,
 			NodeID:       1,
 			ControlPSKey: controlKey,
 		},

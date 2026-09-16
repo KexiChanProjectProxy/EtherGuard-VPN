@@ -31,6 +31,11 @@ func (s *clusterSession) writerLoop(ctx context.Context) error {
 
 func (s *clusterSession) readerLoop() error {
 	for {
+		if s.freezeReader.Load() {
+			s.readerFrozen.Store(true)
+			<-s.done
+			return nil
+		}
 		message, err := s.dec.ReadMessage()
 		if err != nil {
 			if s.closed() {

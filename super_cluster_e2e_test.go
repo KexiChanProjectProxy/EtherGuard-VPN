@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,9 +15,11 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -281,7 +284,10 @@ func startMultiSuperE2EEdge(t *testing.T, topology *e2eMultiSuper, fabric *e2eFa
 	privateKey, publicKey := device.RandomKeyPair()
 	ip := net.ParseIP(fmt.Sprintf("198.51.100.%d", id))
 	bind := newE2EBind(fabric, ip, ip, uint16(id), true)
-	edge, runtime, cancel := newE2EEdge(t, id, name, key, "", bind, newE2ETap(), privateKey, e2eRetryConfig{}, nil, urls)
+	edge, runtime, cancel := newE2EEdge(
+		t, id, name, key, "", bind, newE2ETap(), privateKey, e2eRetryConfig{}, nil, urls,
+		withE2EEdgeAPIPrefix(topology.apiPrefix),
+	)
 	topology.edges = append(topology.edges, edge)
 	topology.edgeRuntimes = append(topology.edgeRuntimes, runtime)
 	topology.edgeCancels = append(topology.edgeCancels, cancel)
@@ -1257,4 +1263,97 @@ func TestMultiSuperE2EEdge401OnMissingKeyRotates(t *testing.T) {
 		t.Fatal("edge runtime stopped instead of recovering after A restart")
 	default:
 	}
+}
+
+func TestMultiSuperE2EShutdownWithBlockedLink(t *testing.T) {
+	baselineGoroutines := runtime.NumGoroutine()
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+
+	bManager := topology.supers[1].runtime.Cluster()
+	bManager.mu.Lock()
+	bPeer := bManager.peers[topology.supers[0].id]
+	var bSession *clusterSession
+	if bPeer != nil {
+		bSession = bPeer.session
+	}
+	bManager.mu.Unlock()
+	if bSession == nil {
+		t.Fatal("B has no established cluster session to A")
+	}
+	bSession.FreezeReaderForTest()
+	awaitE2E(t, time.Second, func() bool { return bSession.readerFrozen.Load() })
+	if bSession.closed() {
+		t.Fatal("freezing B's cluster reader closed the underlying session")
+	}
+
+	edgeAddress := topology.supers[0].edgeLn.Addr().String()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 3*time.Second)
+	shutdownErr := topology.supers[0].runtime.Shutdown(shutdownCtx)
+	cancelShutdown()
+	if shutdownErr != nil {
+		t.Fatalf("shutdown A with B reader frozen: %v", shutdownErr)
+	}
+	aManager := topology.supers[0].runtime.Cluster()
+	aManager.mu.Lock()
+	remainingSessions := len(aManager.sessions)
+	aPeer := aManager.peers[topology.supers[1].id]
+	var activeSession *clusterSession
+	if aPeer != nil {
+		activeSession = aPeer.session
+	}
+	aManager.mu.Unlock()
+	if remainingSessions != 0 || activeSession != nil {
+		t.Fatalf("A retained hijacked cluster sessions after shutdown: tracked=%d active=%v", remainingSessions, activeSession != nil)
+	}
+
+	dialCtx, cancelDial := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	connection, dialErr := (&net.Dialer{}).DialContext(dialCtx, "tcp", edgeAddress)
+	cancelDial()
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatalf("dial to A edge listener %s succeeded after shutdown", edgeAddress)
+	}
+	if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		t.Fatalf("dial to A edge listener after shutdown error = %v, want connection refused", dialErr)
+	}
+
+	if err := topology.shutdown(); err != nil {
+		t.Fatalf("shutdown remaining topology: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	lastGoroutines := runtime.NumGoroutine()
+	for {
+		runtime.GC()
+		lastGoroutines = runtime.NumGoroutine()
+		delta := lastGoroutines - baselineGoroutines
+		if delta >= -3 && delta <= 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine count after shutdown = %d, baseline = %d, delta = %d; want within ±3", lastGoroutines, baselineGoroutines, delta)
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		<-timer.C
+	}
+}
+
+func TestMultiSuperE2EUpgradeThroughProxyNonDefaultPrefix(t *testing.T) {
+	const apiPrefix = "/api/x"
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{apiPrefix: apiPrefix})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+
+	fabric := newE2EFabric()
+	edge101 := newMultiSuperE2EEdge(t, topology, fabric, 1, 101, []string{
+		topology.supers[1].edgeURL,
+		topology.supers[0].edgeURL,
+	})
+	WaitApplied(t, topology, 1, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge101.publicKey.ToString()
+	}, 3*time.Second)
+	WaitApplied(t, topology, 0, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge101.publicKey.ToString()
+	}, 3*time.Second)
 }
