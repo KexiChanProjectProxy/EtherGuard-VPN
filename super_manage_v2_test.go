@@ -711,7 +711,7 @@ func TestManageV2AddPeerInstallsPreAuthorizedKeyOnRegistry(t *testing.T) {
 	if !ok || key != "registry-key-1" {
 		t.Fatalf("ControlKeyFor(1): (%q, %v), want (\"registry-key-1\", true)", key, ok)
 	}
-	if _, exists := state.preauthorized[1]; !exists {
+	if _, exists := state.registry[1]; !exists {
 		t.Fatalf("registry entry for peer 1 missing")
 	}
 }
@@ -732,8 +732,8 @@ func TestManageV2UpdatePeerRotationReplacesRegistryKey(t *testing.T) {
 	if !ok || key != "rotated-key" {
 		t.Fatalf("ControlKeyFor(1) post-rotation: (%q, %v), want (\"rotated-key\", true)", key, ok)
 	}
-	if state.preauthorized[1] != "rotated-key" {
-		t.Fatalf("registry key: %q, want \"rotated-key\"", state.preauthorized[1])
+	if state.registry[1].ControlPSKey != "rotated-key" {
+		t.Fatalf("registry key: %q, want \"rotated-key\"", state.registry[1].ControlPSKey)
 	}
 }
 
@@ -749,8 +749,8 @@ func TestManageV2DeletePeerRemovesRegistryKey(t *testing.T) {
 	if err := mgr.DeletePeer(context.Background(), ManageDeletePeerRequest{NodeID: 1}); err != nil {
 		t.Fatalf("DeletePeer: %v", err)
 	}
-	if _, exists := state.preauthorized[1]; exists {
-		t.Fatalf("registry entry for deleted peer 1 still present: %q", state.preauthorized[1])
+	if entry, exists := state.registry[1]; exists {
+		t.Fatalf("registry entry for deleted peer 1 still present: %#v", entry)
 	}
 	if key, ok := state.ControlKeyFor(1); ok {
 		t.Fatalf("ControlKeyFor(1) after delete: (%q, true), want ('', false)", key)
@@ -779,8 +779,8 @@ func TestManageV2YamlWriteFailureRollsBackRegistryKeyAdd(t *testing.T) {
 		t.Fatalf("AddPeer under read-only dir must fail")
 	}
 	// The registry must NOT carry an entry for the rolled-back peer.
-	if _, exists := state.preauthorized[2]; exists {
-		t.Fatalf("rolled-back AddPeer still in registry: %q", state.preauthorized[2])
+	if entry, exists := state.registry[2]; exists {
+		t.Fatalf("rolled-back AddPeer still in registry: %#v", entry)
 	}
 	if key, ok := state.ControlKeyFor(2); ok {
 		t.Fatalf("ControlKeyFor(2) after rollback: (%q, true), want ('', false)", key)
@@ -839,7 +839,7 @@ func TestManageV2YamlWriteFailureRollsBackRegistryKeyDelete(t *testing.T) {
 	if err := mgr.DeletePeer(context.Background(), ManageDeletePeerRequest{NodeID: 1}); err == nil {
 		t.Fatalf("DeletePeer under read-only dir must fail")
 	}
-	if _, exists := state.preauthorized[1]; !exists {
+	if _, exists := state.registry[1]; !exists {
 		t.Fatalf("rolled-back DeletePeer missing registry entry")
 	}
 	if key, ok := state.ControlKeyFor(1); !ok || key != "delete-rollback-key" {

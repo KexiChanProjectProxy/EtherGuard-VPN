@@ -1302,11 +1302,10 @@ func TestControlHTTPV2BootstrapSweptActiveRecordAuthenticatesViaRegistry(t *test
 	const nodeID mtypes.Vertex = 29
 	h.state.SetPreAuthorized(nodeID, pskey)
 
-	// Populate the active record (with a different key so the active
-	// path would fail), then remove the active record directly. The
-	// registry fallback is the only way bootstrap can succeed.
 	const wrongActiveKey = "transient-active-key"
-	h.state.setControlKeyForTest(nodeID, wrongActiveKey)
+	if _, err := h.state.Register(context.Background(), controlRegisterRequest(nodeID, "edge-swept"), wrongActiveKey); err != nil {
+		t.Fatalf("Register stale active record: %v", err)
+	}
 	h.state.mu.Lock()
 	delete(h.state.peers, nodeID)
 	h.state.mu.Unlock()

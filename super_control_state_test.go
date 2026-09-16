@@ -728,8 +728,8 @@ func TestControlStateSetPreAuthorizedInvalidatesOldKeyImmediately(t *testing.T) 
 		t.Fatalf("rotate: (%q, %v), want (\"new-key\", true)", key, ok)
 	}
 	// Old key must NOT be resolvable through any secondary lookup.
-	if _, ok := svc.preauthorized[5]; !ok || svc.preauthorized[5] != "new-key" {
-		t.Fatalf("preauthorized[5]=%q ok=%v, want \"new-key\" true", svc.preauthorized[5], ok)
+	if entry, ok := svc.registry[5]; !ok || entry.ControlPSKey != "new-key" {
+		t.Fatalf("registry[5]=%#v ok=%v, want key \"new-key\"", entry, ok)
 	}
 }
 

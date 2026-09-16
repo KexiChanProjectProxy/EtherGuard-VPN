@@ -32,6 +32,7 @@ var ErrControlStateInvalidParameters = errors.New("control state: invalid parame
 type ControlStateConfig struct {
 	Parameters         mtypes.ControlV2Parameters
 	PeerAliveTimeout   time.Duration
+	RemoteStaleGrace   time.Duration
 	UsePSKForInterEdge bool
 	Graph              *graphpath.IG
 	Now                func() time.Time
@@ -56,33 +57,31 @@ type controlObservedVote struct {
 }
 
 type ControlState struct {
-	mu    sync.RWMutex
-	peers map[mtypes.Vertex]*controlPeerRecord
-	// preauthorized is the liveness-independent configured-key registry:
-	// each NodeID holds AT MOST ONE control PSKey, installed directly from
-	// SuperConfigV2.Peers at startup or via the ManageV2 service. The
-	// registry exists so authentication can resolve credentials for an
-	// Edge whose active peer record has been swept by SweepTimeouts (or
-	// has never registered at all). SweepTimeouts MUST NOT mutate it.
-	preauthorized      map[mtypes.Vertex]string
-	observedVotes      map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote
-	parameters         mtypes.ControlV2Parameters
-	graph              *graphpath.IG
-	peerAliveTimeout   time.Duration
-	usePSKForInterEdge bool
-	now                func() time.Time
-	publish            func(mtypes.ControlV2Event)
-	revision           uint64
-	selfID             mtypes.Vertex
-	hlc                *hlcClock
-	outbox             []clusterMutation
-	outboxCap          int
-	outboxNotify       chan struct{}
-	outboxSeq          uint64
-	resyncNeeded       bool
-	originLinks        map[mtypes.Vertex]originLinkStatus
-	liveTombstones     map[mtypes.Vertex]ClusterVersion
-	liveTombstoneTimes map[mtypes.Vertex]time.Time
+	mu                     sync.RWMutex
+	peers                  map[mtypes.Vertex]*controlPeerRecord
+	registry               map[mtypes.Vertex]clusterRegistryEntry
+	registryTombstones     map[mtypes.Vertex]ClusterVersion
+	registryTombstoneTimes map[mtypes.Vertex]time.Time
+	observedVotes          map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote
+	parameters             mtypes.ControlV2Parameters
+	paramsVersion          ClusterVersion
+	graph                  *graphpath.IG
+	peerAliveTimeout       time.Duration
+	remoteStaleGrace       time.Duration
+	usePSKForInterEdge     bool
+	now                    func() time.Time
+	publish                func(mtypes.ControlV2Event)
+	revision               uint64
+	selfID                 mtypes.Vertex
+	hlc                    *hlcClock
+	outbox                 []clusterMutation
+	outboxCap              int
+	outboxNotify           chan struct{}
+	outboxSeq              uint64
+	resyncNeeded           bool
+	originLinks            map[mtypes.Vertex]originLinkStatus
+	liveTombstones         map[mtypes.Vertex]ClusterVersion
+	liveTombstoneTimes     map[mtypes.Vertex]time.Time
 }
 
 func NewControlState(config ControlStateConfig) *ControlState {
@@ -90,24 +89,31 @@ func NewControlState(config ControlStateConfig) *ControlState {
 	if now == nil {
 		now = time.Now
 	}
+	remoteStaleGrace := config.RemoteStaleGrace
+	if remoteStaleGrace <= 0 {
+		remoteStaleGrace = 10 * time.Minute
+	}
 	return &ControlState{
-		peers:              make(map[mtypes.Vertex]*controlPeerRecord),
-		preauthorized:      make(map[mtypes.Vertex]string),
-		observedVotes:      make(map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote),
-		parameters:         cloneParameters(config.Parameters),
-		graph:              config.Graph,
-		peerAliveTimeout:   config.PeerAliveTimeout,
-		usePSKForInterEdge: config.UsePSKForInterEdge,
-		now:                now,
-		publish:            config.Publish,
-		selfID:             config.SelfID,
-		hlc:                newHLCClock(now, config.HLCHighWater),
-		outbox:             make([]clusterMutation, 0, clusterOutboxCapacity),
-		outboxCap:          clusterOutboxCapacity,
-		outboxNotify:       make(chan struct{}, 1),
-		originLinks:        make(map[mtypes.Vertex]originLinkStatus),
-		liveTombstones:     make(map[mtypes.Vertex]ClusterVersion),
-		liveTombstoneTimes: make(map[mtypes.Vertex]time.Time),
+		peers:                  make(map[mtypes.Vertex]*controlPeerRecord),
+		registry:               make(map[mtypes.Vertex]clusterRegistryEntry),
+		registryTombstones:     make(map[mtypes.Vertex]ClusterVersion),
+		registryTombstoneTimes: make(map[mtypes.Vertex]time.Time),
+		observedVotes:          make(map[mtypes.Vertex]map[mtypes.Vertex]controlObservedVote),
+		parameters:             cloneParameters(config.Parameters),
+		graph:                  config.Graph,
+		peerAliveTimeout:       config.PeerAliveTimeout,
+		remoteStaleGrace:       remoteStaleGrace,
+		usePSKForInterEdge:     config.UsePSKForInterEdge,
+		now:                    now,
+		publish:                config.Publish,
+		selfID:                 config.SelfID,
+		hlc:                    newHLCClock(now, config.HLCHighWater),
+		outbox:                 make([]clusterMutation, 0, clusterOutboxCapacity),
+		outboxCap:              clusterOutboxCapacity,
+		outboxNotify:           make(chan struct{}, 1),
+		originLinks:            make(map[mtypes.Vertex]originLinkStatus),
+		liveTombstones:         make(map[mtypes.Vertex]ClusterVersion),
+		liveTombstoneTimes:     make(map[mtypes.Vertex]time.Time),
 	}
 }
 
@@ -204,18 +210,20 @@ func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) err
 		return ErrControlStateSpecialNodeID
 	}
 	s.mu.Lock()
-	peer, ok := s.peers[nodeID]
+	_, ok := s.peers[nodeID]
 	if !ok {
 		s.mu.Unlock()
 		return ErrControlStateUnknownPeer
 	}
-	delete(s.peers, nodeID)
-	delete(s.preauthorized, nodeID)
-	s.clearObservedVotesForObserverLocked(nodeID)
-	delete(s.observedVotes, nodeID)
-	name := peer.view.NodeName
+	name := s.effectiveNodeNameLocked(nodeID)
 	deletedAt := s.now()
 	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	delete(s.peers, nodeID)
+	delete(s.registry, nodeID)
+	s.registryTombstones[nodeID] = version
+	s.registryTombstoneTimes[nodeID] = deletedAt
+	s.clearObservedVotesForObserverLocked(nodeID)
+	delete(s.observedVotes, nodeID)
 	evictedTombstone, tombstoneEvicted := s.setLiveTombstoneLocked(nodeID, version, deletedAt)
 	s.appendMutationLocked(clusterMutation{
 		Kind:    "peer_delete",
@@ -248,23 +256,9 @@ func (s *ControlState) UpdateParameters(ctx context.Context, p mtypes.ControlV2P
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := p.Validate(); err != nil {
+	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	if _, err := s.commitParameters(p, version, 0); err != nil {
 		return ErrControlStateInvalidParameters
-	}
-	s.mu.Lock()
-	s.parameters = cloneParameters(p)
-	s.revision++
-	rev := s.revision
-	s.mu.Unlock()
-	if s.publish != nil {
-		s.publish(mtypes.ControlV2Event{
-			Type:     mtypes.ControlV2EventParamsChange,
-			Revision: rev,
-			// Data carries the new parameter stream so SSE consumers
-			// can observe the change without an extra snapshot fetch.
-			// (Task 7's SSEParser caveat: data must be non-empty.)
-			Data: cloneParameters(p),
-		})
 	}
 	return nil
 }
@@ -278,50 +272,38 @@ func (s *ControlState) SnapshotFor(nodeID mtypes.Vertex) mtypes.ControlV2Snapsho
 func (s *ControlState) ControlKeyFor(nodeID mtypes.Vertex) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// The pre-authorized registry is the liveness-independent source of
-	// truth for credentials — it survives SweepTimeouts and lets an Edge
-	// re-authenticate after being offline longer than PeerAliveTimeout.
-	// The active peer map may carry a fresher copy while the Edge is
-	// online; prefer it when present so key rotation in the registry has
-	// already propagated by the time auth runs.
+	if entry, ok := s.registry[nodeID]; ok {
+		return entry.ControlPSKey, true
+	}
 	if peer, ok := s.peers[nodeID]; ok {
 		return peer.controlKey, true
-	}
-	if key, ok := s.preauthorized[nodeID]; ok && key != "" {
-		return key, true
 	}
 	return "", false
 }
 
-// SetPreAuthorized installs or replaces the configured control PSKey for
-// the given NodeID. It holds the write lock; callers MUST NOT be holding
-// any ControlState lock already. An empty pskey removes the entry (so
-// deletion and rollback paths share the same seam). The operation never
-// touches the active peer record — the Edge's own Register call is the
-// only way to publish an active record.
 func (s *ControlState) SetPreAuthorized(nodeID mtypes.Vertex, pskey string) {
 	if s == nil || nodeID.IsSpecial() {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if pskey == "" {
-		delete(s.preauthorized, nodeID)
-		return
+	s.mu.RLock()
+	entry := s.registry[nodeID]
+	if peer, ok := s.peers[nodeID]; ok {
+		entry.NodeName = peer.view.NodeName
 	}
-	s.preauthorized[nodeID] = pskey
+	s.mu.RUnlock()
+	entry.NodeID = nodeID
+	entry.ControlPSKey = pskey
+	entry.Version = ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	entry.Origin = s.selfID
+	s.CommitRegistry(entry, 0)
 }
 
-// RemovePreAuthorized drops any configured key for the given NodeID. It
-// is a no-op when the NodeID is absent, so ManageV2 delete/rollback
-// paths can call it unconditionally.
 func (s *ControlState) RemovePreAuthorized(nodeID mtypes.Vertex) {
 	if s == nil || nodeID.IsSpecial() {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.preauthorized, nodeID)
+	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	s.RevokeRegistry(nodeID, version, 0)
 }
 
 func (s *ControlState) Revision() uint64 {
@@ -344,10 +326,10 @@ func (s *ControlState) SweepTimeouts() int {
 	beforeObserved := s.observedHintsForTargetsLocked(observedVoteTargets(s.observedVotes))
 	for target, votes := range s.observedVotes {
 		for observer, vote := range votes {
-			if s.peerAliveTimeout > 0 && !vote.receivedAt.Add(s.peerAliveTimeout).After(now) {
+			if s.observedVoteExpiredLocked(observer, vote, now) {
 				delete(votes, observer)
 				if peer, ok := s.peers[target]; ok {
-					affected[target] = affectedPeer{name: peer.view.NodeName, kind: mtypes.ControlV2EventPeerChange}
+					affected[target] = affectedPeer{name: s.effectiveNodeNameLocked(peer.view.NodeID), kind: mtypes.ControlV2EventPeerChange}
 				}
 			}
 		}
@@ -356,8 +338,8 @@ func (s *ControlState) SweepTimeouts() int {
 		}
 	}
 	for id, peer := range s.peers {
-		if s.peerAliveTimeout > 0 && !peer.view.LastSeen.Add(s.peerAliveTimeout).After(now) {
-			affected[id] = affectedPeer{name: peer.view.NodeName, kind: mtypes.ControlV2EventPeerGone}
+		if s.peerExpiredLocked(peer, now) {
+			affected[id] = affectedPeer{name: s.effectiveNodeNameLocked(id), kind: mtypes.ControlV2EventPeerGone}
 			if peer.origin == s.selfID {
 				version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
 				if evicted, ok := s.setLiveTombstoneLocked(id, version, now); ok {
@@ -408,6 +390,7 @@ func (s *ControlState) snapshotLocked(requester mtypes.Vertex, revision uint64) 
 			continue
 		}
 		peer := record.view
+		peer.NodeName = s.effectiveNodeNameLocked(id)
 		peer.PSKey = ""
 		peer.LocalV4 = append([]string{}, peer.LocalV4...)
 		peer.LocalV6 = append([]string{}, peer.LocalV6...)

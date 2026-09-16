@@ -423,28 +423,25 @@ func (a *ControlAuthenticator) SweepNoncesForTest() int { return a.SweepNonces()
 // Internal helper on ControlState (test wiring)
 // ---------------------------------------------------------------------------
 
-// setControlKeyForTest directly installs a control PSKey in the ControlState
-// for tests. It mirrors Register's write path: takes the write lock, clones
-// the key, and emits a peer_change event outside the lock.
 func (s *ControlState) setControlKeyForTest(nodeID mtypes.Vertex, pskey string) {
 	if s == nil || nodeID.IsSpecial() || pskey == "" {
 		return
 	}
 	s.mu.Lock()
-	rec, exists := s.peers[nodeID]
+	record, exists := s.peers[nodeID]
 	now := s.now()
 	if exists {
-		rec.controlKey = pskey
-		rec.view.LastSeen = now
+		record.view.LastSeen = now
 	} else {
 		s.peers[nodeID] = &controlPeerRecord{
 			view:       mtypes.ControlV2Peer{NodeID: nodeID, NodeName: fmt.Sprintf("test-%d", nodeID), LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: now},
 			controlKey: pskey,
 		}
 	}
-	rev := s.revision
+	revision := s.revision
 	s.mu.Unlock()
+	s.SetPreAuthorized(nodeID, pskey)
 	if !exists {
-		s.emit(mtypes.ControlV2EventPeerChange, nodeID, fmt.Sprintf("test-%d", nodeID), rev)
+		s.emit(mtypes.ControlV2EventPeerChange, nodeID, fmt.Sprintf("test-%d", nodeID), revision)
 	}
 }
