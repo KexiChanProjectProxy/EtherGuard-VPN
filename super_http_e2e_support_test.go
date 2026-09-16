@@ -1028,29 +1028,18 @@ func TestE2EMultiSuperTopologySmoke(t *testing.T) {
 		}
 		awaitE2E(t, 3*time.Second, func() bool {
 			for index := range topology.supers {
+				links := topology.supers[index].runtime.Cluster().Status().Links
 				connected := 0
-				for _, link := range topology.supers[index].runtime.Cluster().Status().Links {
+				for _, link := range links {
 					if link.State == "connected" {
 						connected++
 					}
 				}
-				if connected != 2 {
+				if len(links) != 2 || connected != 2 {
 					return false
 				}
 			}
 			return true
 		})
-		for index := range topology.supers {
-			links := topology.supers[index].runtime.Cluster().Status().Links
-			connected := 0
-			for _, link := range links {
-				if link.State == "connected" {
-					connected++
-				}
-			}
-			if len(links) != 2 || connected != 2 {
-				t.Fatalf("super %d links = %d total, %d connected; want 2/2", index, len(links), connected)
-			}
-		}
 	})
 }
