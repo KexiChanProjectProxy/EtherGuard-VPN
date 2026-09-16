@@ -12,8 +12,8 @@ func (s *clusterSession) writerLoop(ctx context.Context) error {
 	if err := s.drainSendQueue(); err != nil {
 		return err
 	}
-	ticker := time.NewTicker(s.heartbeat)
-	defer ticker.Stop()
+	tickerC, stopTicker := s.heartbeatTicker()
+	defer stopTicker()
 	for {
 		select {
 		case <-s.done:
@@ -24,12 +24,20 @@ func (s *clusterSession) writerLoop(ctx context.Context) error {
 			if err := s.writeEnvelope(envelope); err != nil {
 				return err
 			}
-		case <-ticker.C:
+		case <-tickerC:
 			if err := s.writeEnvelope(clusterEnvelope{T: clusterMessagePing, HLC: s.hlc()}); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (s *clusterSession) heartbeatTicker() (<-chan time.Time, func()) {
+	if s.newHeartbeatTicker != nil {
+		return s.newHeartbeatTicker(s.heartbeat)
+	}
+	ticker := time.NewTicker(s.heartbeat)
+	return ticker.C, ticker.Stop
 }
 
 func (s *clusterSession) drainSendQueue() error {

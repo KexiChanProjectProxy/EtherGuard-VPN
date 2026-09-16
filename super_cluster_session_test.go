@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -251,4 +252,47 @@ func TestClusterSessionSendQueueFull(t *testing.T) {
 	if err := session.Send(clusterEnvelope{T: clusterMessagePing, HLC: 257}); !errors.Is(err, ErrClusterSendQueueFull) {
 		t.Fatalf("257th Send error = %v, want ErrClusterSendQueueFull", err)
 	}
+}
+
+func TestClusterSessionDrainsQueuedHelloBeforeHeartbeatTicker(t *testing.T) {
+	// Given: hello and a follow-up envelope are already queued, and the heartbeat
+	// channel is fireable from the first select (buffered tick waiting).
+	session, peer := newClusterSessionTestEndpoint(t, clusterSessionTestEndpointConfig{mode: "none", heartbeat: time.Hour, deadAfter: 2 * time.Hour})
+	defer peer.Close()
+	go func() { _, _ = io.Copy(io.Discard, peer) }()
+	queueClusterSessionHello(t, session, 2)
+	if err := session.Send(clusterEnvelope{
+		T:      clusterMessagePeerDelete,
+		Delete: &clusterDelete{NodeID: 7, Version: ClusterVersion{HLC: 2, Origin: 1}},
+		HLC:    2,
+	}); err != nil {
+		t.Fatalf("queue follow-up envelope: %v", err)
+	}
+	if queued := len(session.sendCh); queued != 2 {
+		t.Fatalf("queued envelopes = %d, want 2", queued)
+	}
+	readyTick := make(chan time.Time, 1)
+	readyTick <- time.Time{}
+	tickerCreated := make(chan int, 1)
+	session.newHeartbeatTicker = func(time.Duration) (<-chan time.Time, func()) {
+		tickerCreated <- len(session.sendCh)
+		return readyTick, func() {}
+	}
+
+	// When: Run starts the writer, which must drain sendCh before creating the ticker.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	run := runClusterSession(ctx, session)
+
+	// Then: the ticker factory observes an empty sendCh, so hello cannot lose a select to ping.
+	select {
+	case queued := <-tickerCreated:
+		if queued != 0 {
+			t.Fatalf("heartbeat ticker created with %d envelopes still queued; drainSendQueue must empty sendCh first", queued)
+		}
+	case err := <-run:
+		t.Fatalf("session exited before heartbeat ticker was created: %v", err)
+	}
+	_ = session.Close()
+	_ = waitClusterSessionRun(t, run, time.Second)
 }

@@ -55,3 +55,25 @@ Fix: `Send(hello)` (and `close(helloDone)`) **before** starting `session.Run`. `
 Writer loop also `drainSendQueue()` before `time.NewTicker`: a short heartbeat can make `ticker.C` ready on the first `select`, and Go would then pick ping vs hello at random even with hello already queued. Draining pre-queued envelopes (the hello) before the ticker exists makes hello-first hold for any positive `HeartbeatSeconds`. Hello-first enforcement itself is unchanged.
 
 Regression: `TestClusterManagerHelloSentBeforeHeartbeat` (1ms heartbeat, simultaneous dial, first inbound type is `hello` on both sides).
+
+---
+
+## 2026-09-16 — Deterministic drain-before-ticker proof + device failover wait
+
+### Drain-before-ticker is now a session-level unit test (red-then-green)
+
+`TestClusterManagerHelloSentBeforeHeartbeat` still covers the adopt path, but a 1ms heartbeat cannot *force* `ticker.C` ready on the first `select`. The new `TestClusterSessionDrainsQueuedHelloBeforeHeartbeatTicker` does:
+
+- Pre-queue hello + a follow-up envelope (proves drain empties the *whole* `sendCh`, not just one item).
+- Inject `newHeartbeatTicker` that records `len(sendCh)` at ticker-creation time and returns a channel that already has a tick buffered.
+- Assert the factory sees `len(sendCh)==0`. That is independent of Go `select` fairness.
+
+Red-then-green: temporarily removing the `drainSendQueue()` call before `heartbeatTicker()` failed 3/3 with `heartbeat ticker created with 2 envelopes still queued`. Restored drain: 10/10 pass under `-race`.
+
+### `TestSuperHTTPRuntimeReregisterBypassesThrottleOnSwitch` (device)
+
+Failed once during a full-suite `-race -shuffle=on` run at `waitRuntimeCondition(..., b.registerCalls == 1)` (1s). Isolated `go test -race -count=20` of that test and `./device` with `-shuffle=on -count=10` both passed.
+
+Cause: `go test $(go list ./...)` runs packages in parallel. The root package's ~100s race suite starves the device package. After `close(allowReports)`, failover still needs three wall-clock `ReportInterval` (20ms) ticks plus B's register; those timers stretch under load and can miss a 1s deadline. Not a production logic bug — the 30s per-epoch reregister throttle is correctly bypassed on `SwitchBase` (new epoch).
+
+Fix: widen the B-register wait to 5s (matches the production report HTTP timeout) in this test and the sibling `TestSuperHTTPRuntimeFailoverAfterThreeReportFailures`, which uses the same close-reports-then-wait-for-B pattern.

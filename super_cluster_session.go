@@ -74,21 +74,22 @@ type clusterSession struct {
 	observeHLC func(uint64)
 	onPing     func(uint64)
 
-	compression    string
-	heartbeat      time.Duration
-	deadAfter      time.Duration
-	now            func() time.Time
-	wallNow        func() time.Time
-	connectedSince atomic.Int64
-	lastRX         atomic.Int64
-	txWire         atomic.Uint64
-	rxWire         atomic.Uint64
-	encoderCreates uint32
-	decoderCreates uint32
-	freezeReader   atomic.Bool
-	readerFrozen   atomic.Bool
-	helloReceived  bool
-	firstInbound   atomic.Value
+	compression        string
+	heartbeat          time.Duration
+	deadAfter          time.Duration
+	now                func() time.Time
+	wallNow            func() time.Time
+	connectedSince     atomic.Int64
+	lastRX             atomic.Int64
+	txWire             atomic.Uint64
+	rxWire             atomic.Uint64
+	encoderCreates     uint32
+	decoderCreates     uint32
+	freezeReader       atomic.Bool
+	readerFrozen       atomic.Bool
+	helloReceived      bool
+	firstInbound       atomic.Value
+	newHeartbeatTicker func(time.Duration) (<-chan time.Time, func())
 
 	done      chan struct{}
 	closeOnce sync.Once
