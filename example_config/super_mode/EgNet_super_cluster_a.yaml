@@ -1,0 +1,53 @@
+# Runtime Super A of a two-super active-active pair.
+# Pair with EgNet_super_cluster_b.yaml. This is a runtime SuperConfigV2, not
+# generator input; gensuper_cluster.yaml is the gencfg input that produces a
+# similar pair (different listen ports).
+#
+# Replace Cluster.Secret before production use. The placeholder
+# REPLACE_WITH_32_RANDOM_CHARS is syntactically valid (>=16 bytes) but is not
+# a real secret.
+NodeName: EgNetSNA
+APIUrl: http://127.0.0.1:3456
+APIPrefix: /edge/v2
+ManagementAuth:
+  User: admin
+  PasswordHash: passwd_hash_example
+STUNServers:
+- stun:203.0.113.10:3478
+- 'stuns:[2001:db8::10]:5349'
+STUNRequestTimeoutSeconds: 3
+STUNRefreshIntervalSeconds: 60
+PollIntervalSeconds: 15
+ReportIntervalSeconds: 15
+HeartbeatIntervalSeconds: 10
+EventReplay: 256
+PeerAliveTimeoutSeconds: 70
+UsePSKForInterEdge: true
+DampingFilterRadius: 4
+ListenPortPriority:
+- Port: 16386
+Peers:
+- NodeID: 1
+  NodeName: EgNet001
+  ControlPSKey: Ld8FN/TNcmR21xdhMTCSeZBxrJ1z+FFvnQSnTwSxgUE=
+  AdditionalCost: 10
+- NodeID: 2
+  NodeName: EgNet002
+  ControlPSKey: Wmhz6SvUNBGczD0iJjHn7gUGy15ahjQsr4lKJAqDE3A=
+  AdditionalCost: 10
+- NodeID: 100
+  NodeName: EgNet100
+  ControlPSKey: Ffe8veAmFX/L8lmNxbb2sofBx/K1CCY3u1osKh0sL2g=
+  AdditionalCost: 10
+Cluster:
+  SelfID: 1
+  Secret: REPLACE_WITH_32_RANDOM_CHARS
+  Peers:
+  - SuperID: 2
+    APIUrl: http://127.0.0.1:3457
+  HeartbeatSeconds: 10
+  DeadAfterSeconds: 30
+  ReconnectMinSeconds: 1
+  ReconnectMaxSeconds: 30
+  RemoteStaleGraceSeconds: 600
+  Compression: zstd

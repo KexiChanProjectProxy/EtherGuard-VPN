@@ -70,6 +70,7 @@ b1aaaaaaaaaa
 | POST | `/edge/v2/report` | Edge發送pong、候選位址刷新、心跳 |
 | GET | `/edge/v2/snapshot` | Edge取得當前peer快照（ETag/304） |
 | GET | `/edge/v2/events` | SSE串流，推送狀態變更事件 |
+| GET | `/edge/v2/cluster/link` | HTTP Upgrade，僅 Super 對 Super；HMAC(`Cluster.Secret`) |
 
 ### HMAC請求簽名
 
@@ -101,6 +102,15 @@ server {
     ssl_certificate /etc/ssl/etherguard.crt;
     ssl_certificate_key /etc/ssl/etherguard.key;
 
+    location /edge/v2/cluster/link {
+        proxy_pass http://127.0.0.1:3456/edge/v2/cluster/link;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
     location /edge/v2/ {
         proxy_pass http://127.0.0.1:3456/edge/v2/;
         proxy_set_header X-Real-IP $remote_addr;
@@ -214,6 +224,7 @@ Edge透過每次`register`／`snapshot`抓取，從Super繼承策略。在Edge p
 | DampingFilterRadius | 延遲平滑的低通濾波器window半徑 |
 | ListenPortPriority | 僅屬於Super的有序UDP listen-port候選清單（參見[Super獨佔的listen port策略](#super獨佔的listen-port策略)）；Edge不應攜帶本機複本 |
 | Peers | 預授權的Edge peer列表 |
+| Cluster | 可選的 active-active Super 叢集（參見[多 Super 控制平面（active-active）](#多-super-控制平面active-active)）；單 Super 請省略 |
 
 ### Peers（Super端）
 
@@ -235,6 +246,7 @@ Edge v2設定用`SuperNodeV2`參照取代舊版`DynamicRoute.SuperNode`區塊。
 | Key | 說明 |
 |-----|------|
 | APIUrl | SuperNode的Edge API URL |
+| APIUrls | 有序的 Super API URL 清單，用於 sticky failover。設定 `Cluster` 時，產生的 profile 會把 `APIUrl` 留空，並把 `APIUrls` 設成此 Super，再接上各 `Cluster.Peers[].APIUrl`（依設定順序） |
 | APIPrefix | API路徑前綴（必須與Super的`APIPrefix`一致） |
 | NodeID | SuperNode的非特殊NodeID |
 | ControlPSKey | 此Edge的HMAC簽名密鑰（必須與Super的peer entry一致） |
@@ -242,6 +254,139 @@ Edge v2設定用`SuperNodeV2`參照取代舊版`DynamicRoute.SuperNode`區塊。
 ### Interface、LogLevel、Peers
 
 與[Static Mode](../static_mode/README_zh.md)設定相同。在Super模式下，`Peers`列表通常為空，因為peer資訊從SuperNode下載。
+
+## 多 Super 控制平面（active-active）
+
+可選的 `Cluster` 區塊讓兩台以上 SuperNode 並排運作。每台 Super 都能獨立服務 Edge。Super 之間維持一條持久、加密、壓縮的 HTTP Upgrade 連線，並複製控制平面狀態。單 Super 部署省略 `Cluster`，行為與從前相同。
+
+叢集是 eventually consistent; converges within one ReportInterval after connectivity is restored。不提供 strong consistency、leader election 或共用資料庫。Super 之間不會轉發 VPN 資料平面流量。
+
+### 什麼會複製、什麼留在本機
+
+會複製（依 hybrid logical clock 最後寫入獲勝）：
+
+- 線上 Edge 紀錄（候選位址、延遲、observed-endpoint 投票、last-seen）
+- Registry，包含 `ControlPSKey`
+- 參數：`STUNServers`、`STUNRequestTimeoutSeconds`、`STUNRefreshIntervalSeconds`、`PollIntervalSeconds`、`ReportIntervalSeconds`、`HeartbeatIntervalSeconds`、`EventReplay`、`RelayCostMS`、`ListenPortPriority`、`EndpointBlacklist`
+
+每台 Super 本機保留（replica apply 不會覆寫）：
+
+- `NodeName`、`APIUrl`、`APIPrefix`、`ManagementAuth`、`Cluster`
+- `PeerAliveTimeoutSeconds`、`UsePSKForInterEdge`、`DampingFilterRadius`
+
+### Cluster
+
+單 Super 請省略整個區塊。出現時 `SelfID` 和 `Secret` 為必填。
+
+| Key | 預設 | 說明 |
+|-----|------|------|
+| SelfID | （必填） | 此 Super 的 `Vertex`。非零、非特殊，叢集內唯一 |
+| Secret | （必填） | 共用的叢集 HMAC 密鑰，`json:"-"`。至少 16 bytes。不會出現在 `/manage/super/state` |
+| Peers | `[]` | 叢集中的其他 Super。`SuperID` 必須唯一且不等於 `SelfID` |
+| HeartbeatSeconds | 10 | 叢集連線 ping 間隔；必須為正數 |
+| DeadAfterSeconds | 30 | 超過這麼多秒沒有通過驗證的 record 就視為連線死亡；必須大於 `HeartbeatSeconds` |
+| ReconnectMinSeconds | 1 | 重撥 backoff 下限 |
+| ReconnectMaxSeconds | 30 | 重撥 backoff 上限；必須至少等於 `ReconnectMinSeconds` |
+| RemoteStaleGraceSeconds | 600 | 與遠端 Super 的連線中斷後，保留該 Super 的 live records 這麼多秒（必須至少等於 `PeerAliveTimeoutSeconds`）。填 0 時變成 `max(600, PeerAliveTimeoutSeconds)` |
+| Compression | `zstd` | 內層串流壓縮：`zstd` 或 `none` |
+
+### Cluster peers
+
+| Key | 說明 |
+|-----|------|
+| SuperID | 對等 Super 的 `Vertex`。非零、非特殊，且不等於 `SelfID` |
+| APIUrl | 對等 Super 的 Edge API URL（`http` 或 `https`，必須有 host）。用來撥號 `GET {APIPrefix}/cluster/link` |
+
+可直接使用的配對：`EgNet_super_cluster_a.yaml`（SelfID 1，`http://127.0.0.1:3456`）和 `EgNet_super_cluster_b.yaml`（SelfID 2，`http://127.0.0.1:3457`）。兩邊都使用佔位密鑰 `REPLACE_WITH_32_RANDOM_CHARS`，語法上合法（`>=16` bytes），但不是生產用密鑰。
+
+`gensuper_cluster.yaml` 是 `-mode gencfg -cfgmode super` 的產生器輸入，不是 runtime Super YAML。它會把 `Cluster` 複製進產生的 Super 設定，並讓 Edge profile 的 `APIUrls` 列出每一台 Super。產生器範例使用埠 3000/3001；上面的 runtime 配對使用 3456/3457。
+
+### Edge failover
+
+每個 Edge 同一時間只跟一台 Super 說話。`SuperNodeV2.APIUrls` 是 sticky failover 清單（`ResolveAPIUrls()` 在有填時把舊的 `APIUrl` 放在最前面，去掉結尾 `/`，並依先出現順序去重）。
+
+只有 report loop 會輪換，而且只有設定了超過一個 URL 時才會：
+
+- 連續 3 次合格的 report 失敗，或
+- 在 `max(3×ReportInterval, 15s)` 內沒有任何合格成功
+
+合格成功：Register 200、Report 2xx、Snapshot 200/304、SSE 200 connected。`ErrControlUnknownPeer` 不計入失敗次數（Edge 會改走重新註冊）。
+
+選擇是 sticky-current：Edge 留在它輪換到的那台 Super。先前那台 Super 回來時，沒有 automatic fail-back。
+
+Bootstrap 依序走訪 `APIUrls`，每次預算 `max(2s, remaining/len)`，並在第一台回傳合法策略的 Super 上啟動 runtime。
+
+### 分割語意
+
+Inter-Super 連線還在時，即使那些 Edge 沒有向本機 Super 回報，遠端 origin 的 live records 仍會保留。
+
+連線中斷後，遠端 origin 的 records 只在 `max(receivedAt, linkDownSince)` 超過 `RemoteStaleGraceSeconds` 時才會被清掉。這次清掉是本機行為：不寫 tombstone，也不進 outbox。本機 origin 的 records 仍依 `PeerAliveTimeoutSeconds` 掃掉。
+
+如果 Edge 在連線中斷期間換到另一台 Super，它在另一半會消失，直到連線恢復並跑完 `full_sync`。新 Super 會鑄造更新的版本；連線回來後 last-write-wins 合併會收斂成單一視圖。
+
+### 一致性
+
+叢集是 eventually consistent; converges within one ReportInterval after connectivity is restored。不要把 `/manage/super/state` 或 Edge snapshot 當成叢集範圍的線性化讀取。
+
+### 安全性
+
+Super 之間的連線使用應用層 X25519 金鑰協定、HKDF 和 ChaCha20-Poly1305 records（內層可選連續 zstd）。這是疊在反向代理已經終止的 TLS 之上的多一層防護。仍然必須透過代理提供 TLS。應用層加密不是 TLS 的替代品。Super 本身仍然只提供 HTTP。
+
+Handshake 驗證是以 `Cluster.Secret` 為 key 的 HMAC-SHA256，簽的是 canonical string。請求路徑是這串字的一部分，所以反向代理不得改寫 `/edge/v2/cluster/link`。
+
+### 已接受的風險
+
+一份被截獲、已簽名的 Edge 請求，在 ±60s 時戳偏差視窗內重放到另一台 Super（兩邊時鐘再偏一點，最長大約 120s），可以重新主張該 Edge 自己的欄位和它的 observed-endpoint 投票。Edge 下一次合法 report 會鑄造更新的版本，覆蓋這次重放。影響有界，而且會自行痊癒。
+
+### 叢集連線的 nginx Upgrade
+
+請原樣複製這個 `location`。路徑是簽名 canonical string 的一部分，不得改寫。`proxy_read_timeout` 應至少為 `3×HeartbeatSeconds`（90s 足以覆蓋預設 10s heartbeat，並留餘量）：
+
+```nginx
+location /edge/v2/cluster/link {
+    proxy_pass http://127.0.0.1:3456/edge/v2/cluster/link;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 90s;
+    proxy_send_timeout 90s;
+}
+```
+
+### 診斷：`/manage/cluster/state`
+
+`GET {APIPrefix}/manage/cluster/state?Password=<hash>` 與會改狀態的 `/manage/*` 路由一樣用 password 把關。
+
+沒有設定 `Cluster` 時，回應本體正好是 `{"enabled":false}`。
+
+有叢集時，本體是 `clusterStatus`（沒有另外的 `enabled` 欄位）：
+
+```json
+{
+  "self_id": 1,
+  "links": [
+    {
+      "super_id": 2,
+      "api_url": "http://127.0.0.1:3457",
+      "state": "connected",
+      "dialer": true,
+      "compression": "zstd",
+      "connected_since": "2026-09-16T00:00:00Z",
+      "last_rx_at": "2026-09-16T00:00:00Z",
+      "last_full_sync_at": "2026-09-16T00:00:00Z",
+      "tx": {"messages": 0, "inner_bytes": 0, "compressed_bytes": 0, "wire_bytes": 0},
+      "rx": {"messages": 0, "inner_bytes": 0, "compressed_bytes": 0, "wire_bytes": 0}
+    }
+  ],
+  "hlc": 0,
+  "outbox_len": 0,
+  "live_records": 0,
+  "registry_entries": 0
+}
+```
+
+`state` 為 `connected`、`connecting` 或 `down`。`/manage/super/state` 不變，仍會隱藏 `Cluster.Secret`。
 
 ## v1設定檔遷移
 
@@ -277,7 +422,10 @@ curl "http://127.0.0.1:3456/edge/v2/manage/super/state?Password=passwd_hash_exam
 | 檔案 | 說明 |
 |------|------|
 | `gensuper.yaml` | 用於產生v2設定的輸入檔 |
+| `gensuper_cluster.yaml` | 兩台 Super 叢集的產生器輸入（不是 runtime Super YAML） |
 | `EgNet_super.yaml` | 產生的SuperNode v2設定 |
+| `EgNet_super_cluster_a.yaml` | Super A 的 runtime 範例（`Cluster.SelfID` 1） |
+| `EgNet_super_cluster_b.yaml` | Super B 的 runtime 範例（`Cluster.SelfID` 2） |
 | `EgNet_edge001.yaml` | 產生的EdgeNode 1 v2設定 |
 | `EgNet_edge002.yaml` | 產生的EdgeNode 2 v2設定 |
 | `EgNet_edge100.yaml` | 產生的EdgeNode 100 v2設定 |

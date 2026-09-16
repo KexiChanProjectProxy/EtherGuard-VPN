@@ -70,10 +70,11 @@ func TestDocsNoServerUpdateUDPConcept(t *testing.T) {
 func TestDocsReferenceV2APIRoutes(t *testing.T) {
 	t.Parallel()
 	validRoutes := map[string]bool{
-		"/edge/v2/register": true,
-		"/edge/v2/report":   true,
-		"/edge/v2/snapshot": true,
-		"/edge/v2/events":   true,
+		"/edge/v2/register":     true,
+		"/edge/v2/report":       true,
+		"/edge/v2/snapshot":     true,
+		"/edge/v2/events":       true,
+		"/edge/v2/cluster/link": true,
 	}
 	for _, doc := range superDocFiles {
 		content := readFile(t, doc)
@@ -86,7 +87,7 @@ func TestDocsReferenceV2APIRoutes(t *testing.T) {
 			}
 			rest := trimmed[idx:]
 			endIdx := len(rest)
-			for _, ch := range []string{" ", "\t", "\"", "'", ")", "`", "|", "<"} {
+			for _, ch := range []string{" ", "\t", "\"", "'", ")", "`", "|", "<", "{"} {
 				if pos := strings.Index(rest, ch); pos >= 0 && pos < endIdx {
 					endIdx = pos
 				}
@@ -117,7 +118,7 @@ func TestDocsReferenceValidYAMLKeys(t *testing.T) {
 		"HeartbeatIntervalSeconds": true, "EventReplay": true,
 		"PeerAliveTimeoutSeconds": true, "UsePSKForInterEdge": true,
 		"DampingFilterRadius": true, "RelayCostMS": true,
-		"EndpointBlacklist": true, "Peers": true,
+		"EndpointBlacklist": true, "Peers": true, "Cluster": true,
 	}
 	validEdgeKeys := map[string]bool{
 		"Interface": true, "NodeID": true, "NodeName": true,
@@ -129,21 +130,47 @@ func TestDocsReferenceValidYAMLKeys(t *testing.T) {
 	}
 	validV2RefKeys := map[string]bool{
 		"APIUrl": true, "APIPrefix": true, "NodeID": true, "ControlPSKey": true,
+		"APIUrls": true,
 	}
-	allValid := mergeMaps(validSuperKeys, validEdgeKeys, validPeerKeys, validV2RefKeys)
+	validClusterKeys := map[string]bool{
+		"SelfID": true, "Secret": true, "Peers": true,
+		"HeartbeatSeconds": true, "DeadAfterSeconds": true,
+		"ReconnectMinSeconds": true, "ReconnectMaxSeconds": true,
+		"RemoteStaleGraceSeconds": true, "Compression": true,
+	}
+	validClusterPeerKeys := map[string]bool{
+		"SuperID": true, "APIUrl": true,
+	}
+	allValid := mergeMaps(validSuperKeys, validEdgeKeys, validPeerKeys, validV2RefKeys, validClusterKeys, validClusterPeerKeys)
 
 	for _, doc := range superDocFiles {
 		content := readFile(t, doc)
 		lines := strings.Split(content, "\n")
 		inSuperConfigSection := false
+		inClusterTable := false
+		inClusterPeerTable := false
+		seenClusterKeys := map[string]bool{}
+		seenClusterPeerKeys := map[string]bool{}
 		for i, line := range lines {
 			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "### ") {
+				inClusterTable = false
+				inClusterPeerTable = false
+			}
+			if trimmed == "### Cluster" {
+				inClusterTable = true
+			}
+			if trimmed == "### Cluster peers" {
+				inClusterPeerTable = true
+			}
 			if strings.Contains(trimmed, "SuperNode Config Parameter") ||
 				strings.Contains(trimmed, "SuperNode設定參數") ||
-				strings.Contains(trimmed, "Super-side") {
+				strings.Contains(trimmed, "Super-side") ||
+				strings.Contains(trimmed, "SuperNodeV2") {
 				inSuperConfigSection = true
 			} else if strings.HasPrefix(trimmed, "## ") || strings.HasPrefix(trimmed, "### ") {
-				if !strings.Contains(trimmed, "Config") && !strings.Contains(trimmed, "設定") {
+				if !strings.Contains(trimmed, "Config") && !strings.Contains(trimmed, "設定") &&
+					!strings.Contains(trimmed, "SuperNodeV2") {
 					inSuperConfigSection = false
 				}
 			}
@@ -163,7 +190,80 @@ func TestDocsReferenceValidYAMLKeys(t *testing.T) {
 					}
 				}
 			}
+			if !strings.Contains(trimmed, "|") || (!inClusterTable && !inClusterPeerTable) {
+				continue
+			}
+			parts := strings.Split(trimmed, "|")
+			if len(parts) < 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			if key == "" {
+				key = strings.TrimSpace(parts[1])
+			}
+			if key == "" || key == "Key" || key == "---" || strings.HasPrefix(key, "[") {
+				continue
+			}
+			if strings.Contains(key, " ") && !strings.Contains(key, "PSKey") {
+				continue
+			}
+			if inClusterTable && isLikelyYAMLKey(key) {
+				if !validClusterKeys[key] {
+					t.Errorf("%s line %d: Cluster table key %q is not in validClusterKeys",
+						doc, i+1, key)
+				} else {
+					seenClusterKeys[key] = true
+				}
+			}
+			if inClusterPeerTable && isLikelyYAMLKey(key) {
+				if !validClusterPeerKeys[key] {
+					t.Errorf("%s line %d: Cluster peers table key %q is not in validClusterPeerKeys",
+						doc, i+1, key)
+				} else {
+					seenClusterPeerKeys[key] = true
+				}
+			}
 		}
+		for _, key := range []string{
+			"SelfID", "Secret", "Peers", "HeartbeatSeconds", "DeadAfterSeconds",
+			"ReconnectMinSeconds", "ReconnectMaxSeconds", "RemoteStaleGraceSeconds", "Compression",
+		} {
+			if !seenClusterKeys[key] {
+				t.Errorf("%s: ### Cluster table missing audited key %q", doc, key)
+			}
+		}
+		for _, key := range []string{"SuperID", "APIUrl"} {
+			if !seenClusterPeerKeys[key] {
+				t.Errorf("%s: ### Cluster peers table missing audited key %q", doc, key)
+			}
+		}
+	}
+}
+
+func TestDocsClusterExamplesValidate(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{
+		"example_config/super_mode/EgNet_super_cluster_a.yaml",
+		"example_config/super_mode/EgNet_super_cluster_b.yaml",
+	} {
+		rel := rel
+		t.Run(rel, func(t *testing.T) {
+			t.Parallel()
+			data, err := os.ReadFile(rel)
+			if err != nil {
+				t.Fatalf("read %s: %v", rel, err)
+			}
+			var cfg mtypes.SuperConfigV2
+			if err := yaml.Unmarshal(data, &cfg); err != nil {
+				t.Fatalf("%s: yaml.Unmarshal: %v", rel, err)
+			}
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("%s: SuperConfigV2.Validate(): %v", rel, err)
+			}
+			if cfg.Cluster == nil {
+				t.Fatalf("%s: Cluster block is required", rel)
+			}
+		})
 	}
 }
 

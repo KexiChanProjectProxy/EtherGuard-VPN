@@ -70,6 +70,7 @@ All routes are served under the `APIPrefix` configured in the Super YAML (defaul
 | POST | `/edge/v2/report` | Edge sends pongs, candidate refreshes, heartbeat |
 | GET | `/edge/v2/snapshot` | Edge fetches current peer snapshot (ETag/304) |
 | GET | `/edge/v2/events` | SSE stream of state-change events |
+| GET | `/edge/v2/cluster/link` | HTTP Upgrade, super-to-super only; HMAC(`Cluster.Secret`) |
 
 ### HMAC request signing
 
@@ -101,6 +102,15 @@ server {
     ssl_certificate /etc/ssl/etherguard.crt;
     ssl_certificate_key /etc/ssl/etherguard.key;
 
+    location /edge/v2/cluster/link {
+        proxy_pass http://127.0.0.1:3456/edge/v2/cluster/link;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
     location /edge/v2/ {
         proxy_pass http://127.0.0.1:3456/edge/v2/;
         proxy_set_header X-Real-IP $remote_addr;
@@ -248,6 +258,7 @@ If you need connectivity between Edges that cannot hole-punch, deploy a relay no
 | DampingFilterRadius | Low-pass filter window radius for latency smoothing |
 | ListenPortPriority | Ordered, Super-owned UDP listen-port candidate list (see [Super-owned listen port policy](#super-owned-listen-port-policy)); Edges MUST NOT carry a local copy |
 | Peers | List of pre-authorized Edge peers |
+| Cluster | Optional active-active Super cluster (see [Multi-super control plane (active-active)](#multi-super-control-plane-active-active)); omit for a single Super |
 
 ### Peers (Super-side)
 
@@ -269,6 +280,7 @@ The Edge v2 config replaces the old `DynamicRoute.SuperNode` block with a `Super
 | Key | Description |
 |-----|-------------|
 | APIUrl | SuperNode's Edge API URL |
+| APIUrls | Ordered Super API URLs for sticky failover. When `Cluster` is set, generated profiles leave `APIUrl` empty and set `APIUrls` to this Super, then each `Cluster.Peers[].APIUrl` in config order |
 | APIPrefix | API path prefix (must match Super's `APIPrefix`) |
 | NodeID | SuperNode's non-special NodeID |
 | ControlPSKey | This Edge's HMAC signing secret (must match Super's peer entry) |
@@ -276,6 +288,139 @@ The Edge v2 config replaces the old `DynamicRoute.SuperNode` block with a `Super
 ### Interface, LogLevel, Peers
 
 These are identical to [Static Mode](../static_mode/README.md) configuration. In Super mode, the `Peers` list is typically empty since peer information is downloaded from the SuperNode.
+
+## Multi-super control plane (active-active)
+
+An optional `Cluster` block runs two or more SuperNodes side by side. Each Super fully serves Edges on its own. Supers keep a persistent, encrypted, compressed HTTP Upgrade link and replicate control-plane state. Single-Super setups omit `Cluster` and stay unchanged.
+
+The cluster is eventually consistent; converges within one ReportInterval after connectivity is restored. It does not provide strong consistency, leader election, or a shared database. VPN data-plane traffic is never relayed between Supers.
+
+### What replicates vs what stays local
+
+Replicated (last-write-wins by hybrid logical clock):
+
+- Live Edge records (candidates, latency, observed-endpoint votes, last-seen)
+- Registry, including `ControlPSKey` values
+- Parameters: `STUNServers`, `STUNRequestTimeoutSeconds`, `STUNRefreshIntervalSeconds`, `PollIntervalSeconds`, `ReportIntervalSeconds`, `HeartbeatIntervalSeconds`, `EventReplay`, `RelayCostMS`, `ListenPortPriority`, `EndpointBlacklist`
+
+Local to each Super (never overwritten by a replica apply):
+
+- `NodeName`, `APIUrl`, `APIPrefix`, `ManagementAuth`, `Cluster`
+- `PeerAliveTimeoutSeconds`, `UsePSKForInterEdge`, `DampingFilterRadius`
+
+### Cluster
+
+Omit the whole block for a single Super. When present, `SelfID` and `Secret` are required.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| SelfID | (required) | This Super's `Vertex`. Non-zero, non-special, unique in the cluster |
+| Secret | (required) | Shared cluster HMAC secret, `json:"-"`. At least 16 bytes. Never appears in `/manage/super/state` |
+| Peers | `[]` | Other Supers in this cluster. `SuperID` must be unique and different from `SelfID` |
+| HeartbeatSeconds | 10 | Cluster-link ping interval; must be positive |
+| DeadAfterSeconds | 30 | Link dead after this many seconds without an authenticated record; must be greater than `HeartbeatSeconds` |
+| ReconnectMinSeconds | 1 | Dial backoff floor |
+| ReconnectMaxSeconds | 30 | Dial backoff ceiling; must be at least `ReconnectMinSeconds` |
+| RemoteStaleGraceSeconds | 600 | After the link to a remote Super drops, keep that Super's live records for this many seconds (must be at least `PeerAliveTimeoutSeconds`). A zero value becomes `max(600, PeerAliveTimeoutSeconds)` |
+| Compression | `zstd` | Inner stream compression: `zstd` or `none` |
+
+### Cluster peers
+
+| Key | Description |
+|-----|-------------|
+| SuperID | Peer's Super `Vertex`. Non-zero, non-special, not equal to `SelfID` |
+| APIUrl | Peer's Edge API URL (`http` or `https`, host required). Used to dial `GET {APIPrefix}/cluster/link` |
+
+Ready-to-run pair: `EgNet_super_cluster_a.yaml` (SelfID 1, `http://127.0.0.1:3456`) and `EgNet_super_cluster_b.yaml` (SelfID 2, `http://127.0.0.1:3457`). Both use the placeholder secret `REPLACE_WITH_32_RANDOM_CHARS`, which validates (`>=16` bytes) but is not a production secret.
+
+`gensuper_cluster.yaml` is generator input for `-mode gencfg -cfgmode super`, not a runtime Super YAML. It copies `Cluster` into the generated Super config and emits Edge profiles with `APIUrls` listing every Super. The example generator input uses ports 3000/3001; the runtime pair above uses 3456/3457.
+
+### Edge failover
+
+Each Edge talks to one Super at a time. `SuperNodeV2.APIUrls` is the sticky failover list (`ResolveAPIUrls()` prepends legacy `APIUrl` when set, trims trailing `/`, and deduplicates in first-seen order).
+
+Rotation happens only in the report loop, and only when more than one URL is configured:
+
+- 3 consecutive qualifying report failures, or
+- no qualifying success for `max(3×ReportInterval, 15s)`
+
+Qualifying successes: Register 200, Report 2xx, Snapshot 200/304, SSE 200 connected. `ErrControlUnknownPeer` does not increment the failure counter (the Edge re-registers instead).
+
+Selection is sticky-current: the Edge stays on the Super it rotated to. There is no automatic fail-back when a previous Super returns.
+
+Bootstrap walks `APIUrls` in order with per-attempt budget `max(2s, remaining/len)` and starts the runtime on the first Super that returns a valid policy.
+
+### Partition semantics
+
+While the inter-Super link is up, remote-origin live records are kept even if those Edges are not reporting locally.
+
+When the link is down, remote-origin records are evicted only after `RemoteStaleGraceSeconds` from `max(receivedAt, linkDownSince)`. That eviction is local: no tombstone, no outbox mutation. Local-origin records still sweep with `PeerAliveTimeoutSeconds`.
+
+If an Edge switches Supers during a link outage, it disappears from the other half until the link heals and a `full_sync` runs. The Edge's new Super mints newer versions; after the link returns, last-write-wins merge restores a single view.
+
+### Consistency
+
+The cluster is eventually consistent; converges within one ReportInterval after connectivity is restored. Do not treat `/manage/super/state` or an Edge snapshot as a linearizable cluster-wide read.
+
+### Security
+
+The inter-Super link uses app-layer X25519 key agreement, HKDF, and ChaCha20-Poly1305 records (optional continuous zstd inside). That is defense-in-depth on top of whatever TLS the reverse proxy already terminates. TLS via the proxy is still required. App-layer encryption is not a TLS replacement. The Super itself still speaks only HTTP.
+
+Handshake auth is HMAC-SHA256 of a canonical string keyed by `Cluster.Secret`. The request path is part of that canonical string, so a reverse proxy must not rewrite `/edge/v2/cluster/link`.
+
+### Accepted risk
+
+A captured signed Edge request replayed to the other Super within the ±60s timestamp-skew window (up to about 120s once clock skew between the two Supers is included) can re-assert that same Edge's own fields and its observed-endpoint votes. The Edge's next legitimate report mints a newer version and supersedes the replay. Impact is bounded and self-healing.
+
+### nginx Upgrade for the cluster link
+
+Copy this `location` verbatim. The path is part of the signed canonical string and must not be rewritten. `proxy_read_timeout` should be at least `3×HeartbeatSeconds` (90s covers the default 10s heartbeat with margin):
+
+```nginx
+location /edge/v2/cluster/link {
+    proxy_pass http://127.0.0.1:3456/edge/v2/cluster/link;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_buffering off;
+    proxy_read_timeout 90s;
+    proxy_send_timeout 90s;
+}
+```
+
+### Diagnostics: `/manage/cluster/state`
+
+`GET {APIPrefix}/manage/cluster/state?Password=<hash>` is password-gated like mutating `/manage/*` routes.
+
+With no `Cluster` configured the body is exactly `{"enabled":false}`.
+
+With a cluster the body is `clusterStatus` (no separate `enabled` field):
+
+```json
+{
+  "self_id": 1,
+  "links": [
+    {
+      "super_id": 2,
+      "api_url": "http://127.0.0.1:3457",
+      "state": "connected",
+      "dialer": true,
+      "compression": "zstd",
+      "connected_since": "2026-09-16T00:00:00Z",
+      "last_rx_at": "2026-09-16T00:00:00Z",
+      "last_full_sync_at": "2026-09-16T00:00:00Z",
+      "tx": {"messages": 0, "inner_bytes": 0, "compressed_bytes": 0, "wire_bytes": 0},
+      "rx": {"messages": 0, "inner_bytes": 0, "compressed_bytes": 0, "wire_bytes": 0}
+    }
+  ],
+  "hlc": 0,
+  "outbox_len": 0,
+  "live_records": 0,
+  "registry_entries": 0
+}
+```
+
+`state` is `connected`, `connecting`, or `down`. `/manage/super/state` is unchanged and still redacts `Cluster.Secret`.
 
 ## V1 config migration
 
@@ -311,7 +456,10 @@ See the [legacy Manage API documentation](#http-manage-api) below for the full e
 | File | Description |
 |------|-------------|
 | `gensuper.yaml` | Generator input for creating v2 configs |
+| `gensuper_cluster.yaml` | Generator input for a two-Super cluster (not a runtime Super YAML) |
 | `EgNet_super.yaml` | Generated SuperNode v2 config |
+| `EgNet_super_cluster_a.yaml` | Example runtime Super A (`Cluster.SelfID` 1) |
+| `EgNet_super_cluster_b.yaml` | Example runtime Super B (`Cluster.SelfID` 2) |
 | `EgNet_edge001.yaml` | Generated EdgeNode 1 v2 config |
 | `EgNet_edge002.yaml` | Generated EdgeNode 2 v2 config |
 | `EgNet_edge100.yaml` | Generated EdgeNode 100 v2 config |
