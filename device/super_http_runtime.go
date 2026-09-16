@@ -115,7 +115,7 @@ func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2, options ...
 	if startIndex < 0 || startIndex >= len(urls) {
 		startIndex = 0
 	}
-	baseURL := config.SuperNodeV2.APIUrl
+	baseURL := ""
 	if len(urls) > 0 {
 		baseURL = urls[startIndex]
 	}
@@ -780,10 +780,10 @@ func (device *Device) superHTTPPongs() []mtypes.ControlV2Pong {
 }
 
 // EnableSuperHTTP configures and starts the HTTP control runtime. It waits for SuperHTTPReady before network I/O.
-func (device *Device) EnableSuperHTTP(config mtypes.EdgeConfigV2) {
+func (device *Device) EnableSuperHTTP(config mtypes.EdgeConfigV2, startIdx int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	device.controlCancel = cancel
-	device.superHTTP = NewSuperHTTPRuntime(device, config)
+	device.superHTTP = NewSuperHTTPRuntime(device, config, WithStartIndex(startIdx))
 	device.superHTTP.Start(ctx)
 }
 

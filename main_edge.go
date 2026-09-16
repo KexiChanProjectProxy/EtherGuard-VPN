@@ -61,6 +61,10 @@ func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfi
 	hydrateV2DirectConnectivity(econfig, econfigV2)
 }
 
+func edgeSuperNodeV2Enabled(config mtypes.EdgeConfigV2) bool {
+	return len(config.SuperNodeV2.ResolveAPIUrls()) > 0
+}
+
 func bootstrapInitialBind(ctx context.Context, config mtypes.EdgeConfigV2) (ports []uint16, startIdx int, err error) {
 	urls := config.SuperNodeV2.ResolveAPIUrls()
 	var lastErr error
@@ -152,7 +156,7 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 	if err != nil {
 		return fmt.Errorf("parse v2 edge config %q: %w", runConfig.configPath, err)
 	}
-	superNodeV2Enabled := econfigV2.SuperNodeV2.APIUrl != ""
+	superNodeV2Enabled := edgeSuperNodeV2Enabled(econfigV2)
 	if superNodeV2Enabled {
 		if err := econfigV2.Validate(); err != nil {
 			return fmt.Errorf("validate v2 edge config %q: %w", runConfig.configPath, err)
@@ -276,9 +280,7 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 		if err != nil {
 			return err
 		}
-		// TODO(super-multi-control-plane/19): pass initialSuperIndex once EnableSuperHTTP accepts the bootstrap-selected URL index.
-		_ = initialSuperIndex
-		the_device.EnableSuperHTTP(econfigV2)
+		the_device.EnableSuperHTTP(econfigV2, initialSuperIndex)
 	} else {
 		the_device.IpcSet("listen_port=" + strconv.Itoa(econfig.ListenPort) + "\n")
 	}

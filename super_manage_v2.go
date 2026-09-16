@@ -160,8 +160,10 @@ func NewManageV2(cfg ManageV2Config) (*ManageV2, error) {
 	clusterState = pruneClusterStateTombstones(clusterState, cfg.State.now())
 	// EdgeTemplate must validate with a placeholder SuperNodeV2 filled in.
 	tpl := cfg.EdgeTemplate
-	if tpl.SuperNodeV2.APIUrl == "" {
-		tpl.SuperNodeV2.APIUrl = cfg.BaseConfig.APIUrl
+	superRef := tpl.SuperNodeV2
+	if len(superRef.ResolveAPIUrls()) == 0 {
+		superRef.APIUrl = cfg.BaseConfig.APIUrl
+		tpl.SuperNodeV2 = superRef
 	}
 	if tpl.SuperNodeV2.APIPrefix == "" {
 		tpl.SuperNodeV2.APIPrefix = cfg.BaseConfig.APIPrefix
