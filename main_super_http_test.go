@@ -736,6 +736,107 @@ func TestSuperTickerSweepRemovesInactivePeer(t *testing.T) {
 	fx.assertNoGoroutineLeak(before, 3*time.Second)
 }
 
+// TestManageHandlerTwoRuntimesIndependentPasswords proves the typed
+// /manage/* gate is scoped to the runtime that owns the hash. Two
+// RunWithListeners instances in one process used to clobber a process-
+// global password; posting B's password at A (or A's at B) must 401
+// while each runtime still accepts its own hash.
+func TestManageHandlerTwoRuntimesIndependentPasswords(t *testing.T) {
+	// Given
+	const passwordA = "runtime-a-password-hash-aaaa"
+	const passwordB = "runtime-b-password-hash-bbbb"
+	fxA := newRuntimeTestFixture(t, func(c *superConfig) {
+		c.BaseConfig.ManagementAuth.PasswordHash = passwordA
+	})
+	defer fxA.Shutdown(context.Background())
+	fxB := newRuntimeTestFixture(t, func(c *superConfig) {
+		c.BaseConfig.ManagementAuth.PasswordHash = passwordB
+	})
+	defer fxB.Shutdown(context.Background())
+
+	// When / Then: A's password on B is rejected (no shared global).
+	status, body := postManagePeerAdd(t, fxB.manageURL, passwordA, `{"NodeID":1,"NodeName":"edge-from-a"}`)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("B with A's password: status=%d want 401 body=%s", status, body)
+	}
+
+	// When / Then: B accepts B's own password.
+	status, body = postManagePeerAdd(t, fxB.manageURL, passwordB, `{"NodeID":2,"NodeName":"edge-from-b"}`)
+	if status != http.StatusOK {
+		t.Fatalf("B with B's password: status=%d want 200 body=%s", status, body)
+	}
+
+	// When / Then: B's password on A is rejected even if B started last
+	// and would have overwritten a process-global password table.
+	status, body = postManagePeerAdd(t, fxA.manageURL, passwordB, `{"NodeID":3,"NodeName":"edge-cross-b"}`)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("A with B's password: status=%d want 401 body=%s", status, body)
+	}
+
+	// When / Then: A still accepts A's own password after B has started.
+	status, body = postManagePeerAdd(t, fxA.manageURL, passwordA, `{"NodeID":4,"NodeName":"edge-from-a-ok"}`)
+	if status != http.StatusOK {
+		t.Fatalf("A with A's password: status=%d want 200 body=%s", status, body)
+	}
+}
+
+// TestManageSuperStateRedactsClusterSecret proves GET /manage/super/state
+// stays unauthenticated and never leaks Cluster.Secret (json:"-") through
+// the live HTTP handler.
+func TestManageSuperStateRedactsClusterSecret(t *testing.T) {
+	// Given
+	const secret = "super-secret-cluster-key-1234"
+	fx := newRuntimeTestFixture(t, func(c *superConfig) {
+		c.BaseConfig.Cluster = &mtypes.SuperConfigV2Cluster{
+			SelfID:                  1,
+			Secret:                  secret,
+			Peers:                   []mtypes.SuperConfigV2ClusterPeer{{SuperID: 2, APIUrl: "https://super-2.example.com"}},
+			HeartbeatSeconds:        10,
+			DeadAfterSeconds:        30,
+			ReconnectMinSeconds:     1,
+			ReconnectMaxSeconds:     30,
+			RemoteStaleGraceSeconds: 600,
+			Compression:             "zstd",
+		}
+	})
+	defer fx.Shutdown(context.Background())
+
+	// When: unauthenticated GET (this route has no password gate).
+	resp, err := http.Get(fx.manageURL + "/edge/v2/manage/super/state")
+	if err != nil {
+		t.Fatalf("GET /manage/super/state: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := ioutil.ReadAll(resp.Body)
+
+	// Then
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d want 200 (route must stay unauthenticated) body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"SelfID"`) {
+		t.Fatalf("expected Cluster.SelfID in state body, got %s", body)
+	}
+	if strings.Contains(string(body), secret) {
+		t.Fatalf("cluster secret leaked in /manage/super/state body: %s", body)
+	}
+}
+
+func postManagePeerAdd(t *testing.T, manageURL, password, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, manageURL+"/edge/v2/manage/peer/add?Password="+password, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := ioutil.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
+}
+
 // TestSuperRunWithServersSharesListenerWhenAddressesMatch proves the production
 // string-address entry point binds once when both APIs use the same address,
 // supplies its default Edge template, and serves both path families.

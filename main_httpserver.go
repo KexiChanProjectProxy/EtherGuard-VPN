@@ -6,6 +6,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -131,7 +132,7 @@ func newHTTPMux(apiprefix string, v2 http.Handler, manage *ManageV2) *http.Serve
 		// Mount the typed ManageV2 service routes for the legacy
 		// paths task 8 owns. They keep the original /manage/* URL
 		// surface so existing tooling continues to work.
-		mux.Handle(apiprefix+"/manage/", manageHandler(manage))
+		mux.Handle(apiprefix+"/manage/", manageHandler(manage, manage.Snapshot().ManagementAuth.PasswordHash))
 	} else {
 		mux.HandleFunc(apiprefix+"/manage/peer/add", manage_peeradd)
 		mux.HandleFunc(apiprefix+"/manage/peer/del", manage_peerdel)
@@ -149,13 +150,12 @@ func newHTTPMux(apiprefix string, v2 http.Handler, manage *ManageV2) *http.Serve
 // manageHandler adapts *ManageV2 to the legacy /manage/* HTTP surface so
 // existing tooling continues to work. Each path is mapped to the typed
 // service method that performs the same mutation. Password-based
-// authentication is preserved verbatim — ManageV2 does NOT add its own
-// auth check (per task 8's design) — so we keep the legacy checkPassword
-// gate here against mtypes.SuperConfigV2ManagementAuth.PasswordHash.
-func manageHandler(m *ManageV2) http.Handler {
+// authentication uses the per-runtime passwordHash (ManagementAuth.PasswordHash)
+// so two Super runtimes in one process cannot clobber each other's gate.
+func manageHandler(m *ManageV2, passwordHash string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/manage/peer/add", func(w http.ResponseWriter, r *http.Request) {
-		if !manageAuthOK(w, r) {
+		if !manageAuthOKWithHash(w, r, passwordHash) {
 			return
 		}
 		var req ManageAddPeerRequest
@@ -170,7 +170,7 @@ func manageHandler(m *ManageV2) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/manage/peer/del", func(w http.ResponseWriter, r *http.Request) {
-		if !manageAuthOK(w, r) {
+		if !manageAuthOKWithHash(w, r, passwordHash) {
 			return
 		}
 		var req ManageDeletePeerRequest
@@ -185,7 +185,7 @@ func manageHandler(m *ManageV2) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/manage/peer/update", func(w http.ResponseWriter, r *http.Request) {
-		if !manageAuthOK(w, r) {
+		if !manageAuthOKWithHash(w, r, passwordHash) {
 			return
 		}
 		var req ManageUpdatePeerRequest
@@ -200,7 +200,7 @@ func manageHandler(m *ManageV2) http.Handler {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/manage/super/update", func(w http.ResponseWriter, r *http.Request) {
-		if !manageAuthOK(w, r) {
+		if !manageAuthOKWithHash(w, r, passwordHash) {
 			return
 		}
 		var req ManageUpdateParametersRequest
@@ -225,6 +225,22 @@ func manageHandler(m *ManageV2) http.Handler {
 		_, _ = w.Write(data)
 	})
 	return mux
+}
+
+// manageAuthOKWithHash compares r's Password query parameter to hash with
+// subtle.ConstantTimeCompare. An empty hash rejects every request (401),
+// including an empty Password — unconfigured auth fails closed.
+func manageAuthOKWithHash(w http.ResponseWriter, r *http.Request, hash string) bool {
+	if hash == "" {
+		http.Error(w, "manage auth not configured", http.StatusUnauthorized)
+		return false
+	}
+	candidate := r.URL.Query().Get("Password")
+	if subtle.ConstantTimeCompare([]byte(candidate), []byte(hash)) != 1 {
+		http.Error(w, "wrong password", http.StatusUnauthorized)
+		return false
+	}
+	return true
 }
 
 // manageAuthOK validates the legacy password query parameter. Returns

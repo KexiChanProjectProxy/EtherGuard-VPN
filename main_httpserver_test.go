@@ -72,3 +72,33 @@ func TestManageAuthOK_acceptsConfiguredPassword_andRejectsLegacyFailures(t *test
 		})
 	}
 }
+
+func TestManageAuthOKWithHash(t *testing.T) {
+	const hash = "per-runtime-hash"
+	tests := []struct {
+		name       string
+		hash       string
+		requestURL string
+		wantOK     bool
+	}{
+		{name: "empty hash rejects empty password", hash: "", requestURL: "/manage/peer/add", wantOK: false},
+		{name: "empty hash rejects any password", hash: "", requestURL: "/manage/peer/add?Password=x", wantOK: false},
+		{name: "wrong password", hash: hash, requestURL: "/manage/peer/add?Password=nope", wantOK: false},
+		{name: "matching password", hash: hash, requestURL: "/manage/peer/add?Password=" + hash, wantOK: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			// When
+			response := httptest.NewRecorder()
+			ok := manageAuthOKWithHash(response, httptest.NewRequest(http.MethodPost, test.requestURL, nil), test.hash)
+
+			// Then
+			if ok != test.wantOK {
+				t.Fatalf("manageAuthOKWithHash()=%t, want %t", ok, test.wantOK)
+			}
+			if !test.wantOK && response.Code != http.StatusUnauthorized {
+				t.Fatalf("status=%d, want 401", response.Code)
+			}
+		})
+	}
+}

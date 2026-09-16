@@ -398,17 +398,17 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if apiprefix[0] != '/' {
 		apiprefix = "/" + apiprefix
 	}
-	mux.Handle(apiprefix+"/manage/", http.StripPrefix(apiprefix, manageHandler(manage)))
+	mux.Handle(apiprefix+"/manage/", http.StripPrefix(apiprefix, manageHandler(manage, cfg.BaseConfig.ManagementAuth.PasswordHash)))
 	// The v2 handler owns its full path table; mount at apiprefix so a
 	// request for /edge/v2/snapshot reaches the handler with
 	// r.URL.Path == "/edge/v2/snapshot" (which is what the handler's
 	// switch matches).
 	mux.Handle(apiprefix+"/", handler)
 
-	// Initialize the legacy httpobj.http_passwords so the manageAuthOK
-	// gate in main_httpserver.go accepts the v2 ManagementAuth.PasswordHash.
-	// The same value is used across all four buckets because v2 only carries
-	// one password; legacy operators get the same gate behaviour.
+	// Keep the legacy httpobj.http_passwords populated so manageAuthOK
+	// (newHTTPMux / HttpServer path) still accepts v2 operators. Typed
+	// manageHandler routes above use the per-runtime hash argument, not
+	// this global.
 	initHTTPObjectPasswords(cfg.BaseConfig.ManagementAuth.PasswordHash)
 
 	// Build the two http.Servers and start serving on the supplied
