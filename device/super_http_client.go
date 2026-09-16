@@ -684,7 +684,13 @@ func (c *ControlHTTPClient) Sync(ctx context.Context, apply func(*mtypes.Control
 			backoff = c.MinBackoff
 		case <-streamEvents:
 			stopPolling()
-			if snapshot, ok, err := c.Snapshot(ctx); err == nil && ok {
+			snapshot, ok, err := c.Snapshot(ctx)
+			if err != nil {
+				if c.Logf != nil {
+					c.Logf("control snapshot after stream event failed: %v", err)
+				}
+				startPolling()
+			} else if ok {
 				apply(snapshot)
 			}
 		case <-c.refresh:

@@ -1,0 +1,14 @@
+exit code: 0
+command: go test -race -shuffle=on -count=1 -run 'TestHLC|TestClusterVersion' -v . 2>&1 | grep -c '^--- PASS'
+started: 2026-09-16T16:41:48-04:00
+pass_count=7
+output:
+7
+--- PASS lines ---
+--- PASS: TestHLCCounterOverflowRollsWall (0.00s)
+--- PASS: TestHLCHighWaterRestart (0.00s)
+--- PASS: TestClusterVersionTotalOrder (0.00s)
+--- PASS: TestHLCConcurrentNextIsMonotonic (0.02s)
+--- PASS: TestHLCMonotonicWithFrozenClock (0.00s)
+--- PASS: TestHLCObserveClampsExcessiveSkew (0.00s)
+--- PASS: TestHLCObserveJumpsForward (0.00s)

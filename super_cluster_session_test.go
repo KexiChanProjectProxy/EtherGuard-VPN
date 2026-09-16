@@ -39,11 +39,11 @@ func TestClusterSessionPipeRoundTrip(t *testing.T) {
 		}
 	}
 
-	if got := a.Stats().TX.Messages; got != 1000 {
-		t.Fatalf("A TX messages = %d, want 1000", got)
+	if got := a.Stats().TX.Messages; got != 1001 {
+		t.Fatalf("A TX messages = %d, want 1001 (hello + 1000 payloads)", got)
 	}
-	if got := b.Stats().TX.Messages; got != 1000 {
-		t.Fatalf("B TX messages = %d, want 1000", got)
+	if got := b.Stats().TX.Messages; got != 1001 {
+		t.Fatalf("B TX messages = %d, want 1001 (hello + 1000 payloads)", got)
 	}
 	closeClusterSessionPair(t, a, b, runA, runB)
 	assertClusterSessionGoroutines(t, baseline)
@@ -175,6 +175,67 @@ func TestClusterSessionTamperCloses(t *testing.T) {
 		t.Fatalf("tampered session errors = (%v, %v), want one ErrClusterAuthFailed", errA, errB)
 	}
 	assertClusterSessionGoroutines(t, baseline)
+}
+
+func TestClusterSessionRejectsNonHelloFirstMessage(t *testing.T) {
+	t.Run("non_hello_first_closes", func(t *testing.T) {
+		// Given: a live session pair that has not exchanged hello.
+		received := make(chan clusterEnvelope, 1)
+		a, b := newClusterSessionTestPair(t, clusterSessionTestPairConfig{
+			mode: "none", heartbeat: time.Hour, deadAfter: 2 * time.Hour, inboxB: received, skipHello: true,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		runA := runClusterSession(ctx, a)
+		runB := runClusterSession(ctx, b)
+
+		// When: the first inbound envelope is a ping rather than hello.
+		if err := a.Send(clusterEnvelope{T: clusterMessagePing, HLC: 1}); err != nil {
+			t.Fatalf("send non-hello first message: %v", err)
+		}
+
+		// Then: the receiver closes with ErrClusterFirstMessageNotHello and does not inbox the ping.
+		errB := waitClusterSessionRun(t, runB, time.Second)
+		if !errors.Is(errB, ErrClusterFirstMessageNotHello) {
+			t.Fatalf("B Run error = %v, want ErrClusterFirstMessageNotHello", errB)
+		}
+		select {
+		case envelope := <-received:
+			t.Fatalf("inbox received %q after non-hello first message", envelope.T)
+		default:
+		}
+		_ = a.Close()
+		_ = waitClusterSessionRun(t, runA, time.Second)
+	})
+
+	t.Run("hello_first_then_payload_continues", func(t *testing.T) {
+		// Given: both sides queue hello as the first inner message.
+		received := make(chan clusterEnvelope, 1)
+		a, b := newClusterSessionTestPair(t, clusterSessionTestPairConfig{
+			mode: "none", heartbeat: time.Hour, deadAfter: 2 * time.Hour, inboxB: received,
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		runA := runClusterSession(ctx, a)
+		runB := runClusterSession(ctx, b)
+
+		// When: a non-hello payload follows the hello exchange.
+		payload := clusterEnvelope{
+			T:      clusterMessagePeerDelete,
+			Delete: &clusterDelete{NodeID: 7, Version: ClusterVersion{HLC: 2, Origin: 1}},
+			HLC:    2,
+		}
+		if err := a.Send(payload); err != nil {
+			t.Fatalf("send payload after hello: %v", err)
+		}
+
+		// Then: the session stays up and delivers the payload.
+		got := waitClusterEnvelope(t, received, time.Second)
+		if got.T != clusterMessagePeerDelete || got.HLC != 2 {
+			t.Fatalf("payload = %+v, want peer_delete HLC 2", got)
+		}
+		closeClusterSessionPair(t, a, b, runA, runB)
+	})
 }
 
 func TestClusterSessionSendQueueFull(t *testing.T) {

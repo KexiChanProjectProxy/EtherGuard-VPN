@@ -1,0 +1,79 @@
+exit code: 0
+command: go test -race -shuffle=on -count=1 -run 'TestControlState|TestClusterOutbox' -v .
+started: 2026-09-16T16:41:52-04:00
+output:
+-test.shuffle 1789591313576987005
+=== RUN   TestClusterOutboxOrderMatchesVersion
+--- PASS: TestClusterOutboxOrderMatchesVersion (0.34s)
+=== RUN   TestControlStateObservedVoteRemovalIsRevisionSafe
+--- PASS: TestControlStateObservedVoteRemovalIsRevisionSafe (0.00s)
+=== RUN   TestControlStateSweepRemovesActiveButRetainsConfigured
+--- PASS: TestControlStateSweepRemovesActiveButRetainsConfigured (0.00s)
+=== RUN   TestControlStateRegisterCandidateSourceLabels
+--- PASS: TestControlStateRegisterCandidateSourceLabels (0.00s)
+=== RUN   TestControlStateReportRejectsMismatchedPongSourceWithoutMutation
+--- PASS: TestControlStateReportRejectsMismatchedPongSourceWithoutMutation (0.00s)
+=== RUN   TestControlStateReportPongsReplaceCompleteLatencySet
+--- PASS: TestControlStateReportPongsReplaceCompleteLatencySet (0.00s)
+=== RUN   TestControlStateSetPreAuthorizedInvalidatesOldKeyImmediately
+--- PASS: TestControlStateSetPreAuthorizedInvalidatesOldKeyImmediately (0.00s)
+=== RUN   TestControlStateRegistrationAndReport
+--- PASS: TestControlStateRegistrationAndReport (0.00s)
+=== RUN   TestClusterOutboxRegisterReportAliveDelete
+--- PASS: TestClusterOutboxRegisterReportAliveDelete (0.00s)
+=== RUN   TestControlStateReportRelayCostMSReachesOtherEdges
+--- PASS: TestControlStateReportRelayCostMSReachesOtherEdges (0.00s)
+=== RUN   TestControlStateParametersCloneRelayCostMSPointeeIsolation
+--- PASS: TestControlStateParametersCloneRelayCostMSPointeeIsolation (0.00s)
+=== RUN   TestControlStateRemovePreAuthorizedDropsLookup
+--- PASS: TestControlStateRemovePreAuthorizedDropsLookup (0.00s)
+=== RUN   TestControlStateConcurrentMutation
+--- PASS: TestControlStateConcurrentMutation (0.01s)
+=== RUN   TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps
+--- PASS: TestControlStateObservedSnapshotConcurrentWithReportsAndSweeps (0.02s)
+=== RUN   TestControlStateObservedReportReplacesCompleteVoteSet
+--- PASS: TestControlStateObservedReportReplacesCompleteVoteSet (0.00s)
+=== RUN   TestControlStateTimeoutAndRevisionSemantics
+--- PASS: TestControlStateTimeoutAndRevisionSemantics (0.00s)
+=== RUN   TestClusterOutboxNoIOUnderLock
+--- PASS: TestClusterOutboxNoIOUnderLock (0.00s)
+=== RUN   TestControlStateReRegistrationAfterSweepWorks
+--- PASS: TestControlStateReRegistrationAfterSweepWorks (0.00s)
+=== RUN   TestControlStateObservedVotesClearWhenObserverDeletes
+--- PASS: TestControlStateObservedVotesClearWhenObserverDeletes (0.00s)
+=== RUN   TestClusterOutboxOverflowSetsResync
+--- PASS: TestClusterOutboxOverflowSetsResync (0.05s)
+=== RUN   TestControlStateParametersCloneIsolationEndpointBlacklist
+--- PASS: TestControlStateParametersCloneIsolationEndpointBlacklist (0.00s)
+=== RUN   TestControlStateControlKeyForDoesNotResurrectPeer
+--- PASS: TestControlStateControlKeyForDoesNotResurrectPeer (0.00s)
+=== RUN   TestControlStateSnapshotWithoutRelayCostMSReportsNil
+--- PASS: TestControlStateSnapshotWithoutRelayCostMSReportsNil (0.00s)
+=== RUN   TestControlStateObservedSnapshotCapsAndSuppressesSelfCandidates
+--- PASS: TestControlStateObservedSnapshotCapsAndSuppressesSelfCandidates (0.02s)
+=== RUN   TestControlStateReportWithoutRelayCostMSRetainsPreviousValue
+--- PASS: TestControlStateReportWithoutRelayCostMSRetainsPreviousValue (0.00s)
+=== RUN   TestControlStateParamsChangeCarriesEndpointBlacklistOrdering
+--- PASS: TestControlStateParamsChangeCarriesEndpointBlacklistOrdering (0.00s)
+=== RUN   TestControlStateParametersCloneIsolationPointeeMutation
+--- PASS: TestControlStateParametersCloneIsolationPointeeMutation (0.00s)
+=== RUN   TestControlStateSnapshotPeersAreSortedByNodeID
+--- PASS: TestControlStateSnapshotPeersAreSortedByNodeID (0.00s)
+=== RUN   TestControlStatePreAuthorizedRegistryRetainsKeysAcrossSweep
+--- PASS: TestControlStatePreAuthorizedRegistryRetainsKeysAcrossSweep (0.00s)
+=== RUN   TestControlStateSeededPeersAbsentFromSnapshots
+--- PASS: TestControlStateSeededPeersAbsentFromSnapshots (0.00s)
+=== RUN   TestControlStateDeleteRemovesPreAuthorized
+--- PASS: TestControlStateDeleteRemovesPreAuthorized (0.00s)
+=== RUN   TestControlStateSuppressedVoteExpiryIsSilent
+--- PASS: TestControlStateSuppressedVoteExpiryIsSilent (0.00s)
+=== RUN   TestControlStateObservedVotesAggregateReplaceAndRemainAnonymous
+--- PASS: TestControlStateObservedVotesAggregateReplaceAndRemainAnonymous (0.00s)
+=== RUN   TestControlStateReportedCandidateReachesOtherEdges
+--- PASS: TestControlStateReportedCandidateReachesOtherEdges (0.00s)
+=== RUN   TestControlStateReportFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished
+--- PASS: TestControlStateReportFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished (0.00s)
+=== RUN   TestControlStateRegisterFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished
+--- PASS: TestControlStateRegisterFiltersBlacklistedCandidatesWhenPolicyAlreadyPublished (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.643s

@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 )
 
 type clusterSessionTestKeys struct {
@@ -28,6 +30,7 @@ type clusterSessionTestPairConfig struct {
 	inboxB    chan<- clusterEnvelope
 	onPingA   func(uint64)
 	onPingB   func(uint64)
+	skipHello bool
 }
 
 type clusterSessionTestEndpointConfig struct {
@@ -81,6 +84,10 @@ func newClusterSessionTestPair(
 		_ = a.Close()
 		_ = b.Close()
 	})
+	if !cfg.skipHello {
+		queueClusterSessionHello(t, a, 2)
+		queueClusterSessionHello(t, b, 1)
+	}
 	return a, b
 }
 
@@ -109,7 +116,19 @@ func newTamperedClusterSessionTestPair(t *testing.T) (*clusterSession, *clusterS
 		_ = a.Close()
 		_ = b.Close()
 	})
+	queueClusterSessionHello(t, a, 2)
+	queueClusterSessionHello(t, b, 1)
 	return a, b
+}
+
+func queueClusterSessionHello(t *testing.T, session *clusterSession, superID mtypes.Vertex) {
+	t.Helper()
+	if err := session.Send(clusterEnvelope{
+		T:     clusterMessageHello,
+		Hello: &clusterHello{SuperID: superID, Proto: clusterProtoVersion},
+	}); err != nil {
+		t.Fatalf("queue hello from %d: %v", superID, err)
+	}
 }
 
 func clusterSessionTestInbox(ch chan<- clusterEnvelope) func(clusterEnvelope) error {
@@ -117,6 +136,9 @@ func clusterSessionTestInbox(ch chan<- clusterEnvelope) func(clusterEnvelope) er
 		return nil
 	}
 	return func(envelope clusterEnvelope) error {
+		if envelope.T == clusterMessageHello {
+			return nil
+		}
 		ch <- envelope
 		return nil
 	}

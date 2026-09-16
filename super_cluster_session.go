@@ -16,9 +16,10 @@ import (
 )
 
 var (
-	ErrClusterLinkDead      = errors.New("cluster session: link dead")
-	ErrClusterSendQueueFull = errors.New("cluster session: send queue full")
-	ErrClusterSessionClosed = errors.New("cluster session: closed")
+	ErrClusterLinkDead             = errors.New("cluster session: link dead")
+	ErrClusterSendQueueFull        = errors.New("cluster session: send queue full")
+	ErrClusterSessionClosed        = errors.New("cluster session: closed")
+	ErrClusterFirstMessageNotHello = errors.New("cluster session: first inner message must be hello")
 )
 
 type clusterDirectionStats struct {
@@ -82,6 +83,7 @@ type clusterSession struct {
 	decoderCreates uint32
 	freezeReader   atomic.Bool
 	readerFrozen   atomic.Bool
+	helloReceived  bool
 
 	done      chan struct{}
 	closeOnce sync.Once

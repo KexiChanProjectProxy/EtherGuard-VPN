@@ -1,0 +1,22 @@
+exit_code=0
+command: go test -race -shuffle=on -count=1 -run 'TestBootstrap|TestMainEdgeBootstrap' -v . 2>&1 | grep -E '^--- FAIL'
+started: 2026-09-16T16:42:02-04:00
+grep_fail_exit=1
+grep_fail_stdout:
+(empty — no FAIL lines)
+named_tests:
+--- PASS: TestBootstrapFirstURLHangsSecondHealthy (2.03s)
+--- PASS: TestBootstrapDecodeErrorStopsIteration (0.00s)
+--- PASS: TestBootstrapAllURLsFail (0.02s)
+interpretation: expected grep of '^--- FAIL' to be empty; named tests TestBootstrapFirstURLHangsSecondHealthy, TestBootstrapAllURLsFail, TestBootstrapDecodeErrorStopsIteration must PASS
+full_test_exit_code=0
+--- full verbose output ---
+-test.shuffle 1789591319422068815
+=== RUN   TestBootstrapFirstURLHangsSecondHealthy
+--- PASS: TestBootstrapFirstURLHangsSecondHealthy (2.03s)
+=== RUN   TestBootstrapDecodeErrorStopsIteration
+--- PASS: TestBootstrapDecodeErrorStopsIteration (0.00s)
+=== RUN   TestBootstrapAllURLsFail
+--- PASS: TestBootstrapAllURLsFail (0.02s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	3.231s

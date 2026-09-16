@@ -1172,6 +1172,84 @@ func TestControlHTTPClientSyncPollsOnlyWhileSSEUnavailable(t *testing.T) {
 	}
 }
 
+func TestControlHTTPClientSyncRestartsPollingWhenStreamEventSnapshotFails(t *testing.T) {
+	// Given: initial snapshot succeeds, SSE is healthy, and the snapshot driven by
+	// the first stream event fails. Polling must resume so the client is not left stale.
+	env := &serverEnv{psKey: []byte("k")}
+	streamUp := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/edge/v2/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		call := env.snapshotCalls.Add(1)
+		if call == 2 {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		snapshot := env.snapshot(uint64(call))
+		snapshot.Parameters.PollInterval = 10 * time.Millisecond
+		_ = json.NewEncoder(w).Encode(&snapshot)
+	})
+	mux.HandleFunc("/edge/v2/events", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if !env.verify(t, r, body) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		_, _ = io.WriteString(w, "id: stream-1\nevent: revision\ndata: {\"revision\":2}\n\n")
+		flusher.Flush()
+		close(streamUp)
+		<-r.Context().Done()
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := newTestClient(t, server.URL, "edge/v2", vertexFromInt(t, 881), "k")
+	var logs atomic.Int32
+	client.Logf = func(string, ...any) { logs.Add(1) }
+	applied := make(chan uint64, 8)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	syncDone := make(chan error, 1)
+
+	// When
+	go func() {
+		syncDone <- client.Sync(ctx, func(snapshot *mtypes.ControlV2Snapshot) {
+			select {
+			case applied <- snapshot.Revision:
+			default:
+			}
+		})
+	}()
+	select {
+	case <-streamUp:
+	case <-ctx.Done():
+		t.Fatalf("SSE stream was not established: %v", ctx.Err())
+	}
+
+	// Then: the failed stream-event snapshot is logged and polling fetches a later snapshot.
+	waitClientCondition(t, time.Second, func() bool { return env.snapshotCalls.Load() >= 3 })
+	if logs.Load() == 0 {
+		t.Fatal("stream-event snapshot failure was not logged")
+	}
+	select {
+	case rev := <-applied:
+		if rev == 0 {
+			t.Fatalf("applied revision %d, want a successful snapshot", rev)
+		}
+	case <-ctx.Done():
+		t.Fatalf("Sync did not apply a snapshot after polling resumed: %v", ctx.Err())
+	}
+	cancel()
+	if err := <-syncDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Sync returned %v, want context cancellation", err)
+	}
+}
+
 func TestControlHTTPClientSyncSerializesApplyWhenEventAndPollOverlap(t *testing.T) {
 	// Given
 	env := &serverEnv{psKey: []byte("k")}

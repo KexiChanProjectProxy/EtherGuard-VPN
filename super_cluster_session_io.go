@@ -51,6 +51,12 @@ func (s *clusterSession) readerLoop() error {
 		if err != nil {
 			return err
 		}
+		if !s.helloReceived {
+			if envelope.T != clusterMessageHello {
+				return fmt.Errorf("cluster session: first message %q: %w", envelope.T, ErrClusterFirstMessageNotHello)
+			}
+			s.helloReceived = true
+		}
 		if s.observeHLC != nil {
 			s.observeHLC(envelope.HLC)
 		}
