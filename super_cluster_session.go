@@ -78,6 +78,8 @@ type clusterSession struct {
 	lastRX         atomic.Int64
 	txWire         atomic.Uint64
 	rxWire         atomic.Uint64
+	encoderCreates uint32
+	decoderCreates uint32
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -129,10 +131,13 @@ func newClusterSession(cfg clusterSessionConfig) *clusterSession {
 		s.initErr = err
 		return s
 	}
+	s.encoderCreates++
 	s.dec, err = NewClusterStreamDecoder(cfg.Compression, s.readRecord)
 	if err != nil {
 		s.initErr = err
+		return s
 	}
+	s.decoderCreates++
 	return s
 }
 

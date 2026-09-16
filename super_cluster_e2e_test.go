@@ -572,3 +572,254 @@ func drainE2ETransports(transports <-chan path.Usage) {
 		}
 	}
 }
+
+type clusterCounterEdgeWorkload struct {
+	register   mtypes.ControlV2RegisterRequest
+	controlKey string
+	reports    []mtypes.ControlV2ReportRequest
+}
+
+type clusterCompressionRun struct {
+	live       []clusterPeerRecord
+	tombstones []clusterDelete
+	stats      clusterLinkStats
+}
+
+func TestClusterCompressionCounters(t *testing.T) {
+	workload := buildClusterCounterWorkload()
+	var zstdRun, noneRun clusterCompressionRun
+
+	t.Run("zstd", func(t *testing.T) {
+		zstdRun = runClusterCompressionCounterMode(t, "zstd", workload)
+	})
+	t.Run("none", func(t *testing.T) {
+		noneRun = runClusterCompressionCounterMode(t, "none", workload)
+	})
+
+	if !reflect.DeepEqual(zstdRun.live, noneRun.live) || !reflect.DeepEqual(zstdRun.tombstones, noneRun.tombstones) {
+		t.Fatalf("compression modes produced different decoded state: zstd=%+v/%+v none=%+v/%+v", zstdRun.live, zstdRun.tombstones, noneRun.live, noneRun.tombstones)
+	}
+	if zstdRun.stats.TX.InnerBytes != noneRun.stats.TX.InnerBytes {
+		t.Fatalf("TX inner bytes differ for identical workload: zstd=%d none=%d", zstdRun.stats.TX.InnerBytes, noneRun.stats.TX.InnerBytes)
+	}
+	if zstdRun.stats.TX.CompressedBytes >= noneRun.stats.TX.CompressedBytes/3 {
+		t.Fatalf("zstd compressed bytes = %d, want < one third of none bytes %d", zstdRun.stats.TX.CompressedBytes, noneRun.stats.TX.CompressedBytes)
+	}
+}
+
+func buildClusterCounterWorkload() []clusterCounterEdgeWorkload {
+	const (
+		edgeCount       = 20
+		reportsPerEdge  = 30
+		firstEdgeNodeID = 1001
+	)
+	fixedTime := time.Date(2040, time.January, 2, 3, 4, 5, 0, time.UTC)
+	workload := make([]clusterCounterEdgeWorkload, edgeCount)
+	for edgeIndex := range edgeCount {
+		nodeID := mtypes.Vertex(firstEdgeNodeID + edgeIndex)
+		targetIndex := (edgeIndex + 1) % edgeCount
+		targetID := mtypes.Vertex(firstEdgeNodeID + targetIndex)
+		localAddress := fmt.Sprintf("10.40.0.%d:%d", edgeIndex+1, 20000+edgeIndex)
+		publicAddress := fmt.Sprintf("198.51.100.%d:%d", edgeIndex+1, 30000+edgeIndex)
+		observedAddress := fmt.Sprintf("203.0.113.%d:%d", targetIndex+1, 32000+targetIndex)
+		candidates := []mtypes.ControlV2Candidate{
+			{Address: localAddress, Source: mtypes.ControlV2CandidateLocal},
+			{Address: publicAddress, Source: mtypes.ControlV2CandidateSTUN},
+		}
+		reports := make([]mtypes.ControlV2ReportRequest, reportsPerEdge)
+		for reportIndex := range reportsPerEdge {
+			reports[reportIndex] = mtypes.ControlV2ReportRequest{
+				NodeID: nodeID,
+				Pongs: []mtypes.ControlV2Pong{{
+					RequestID:    uint32(edgeIndex + 1),
+					SourceNode:   nodeID,
+					DestNode:     targetID,
+					TimediffMS:   0.5,
+					LatencyMS:    float64(reportIndex + 1),
+					AliveSeconds: 60,
+				}},
+				Candidates: append([]mtypes.ControlV2Candidate(nil), candidates...),
+				Observed: []mtypes.ControlV2ObservedEndpoint{{
+					TargetNodeID: targetID,
+					Address:      observedAddress,
+				}},
+				ReportedAt: fixedTime,
+			}
+		}
+		workload[edgeIndex] = clusterCounterEdgeWorkload{
+			register: mtypes.ControlV2RegisterRequest{
+				NodeID:         nodeID,
+				NodeName:       fmt.Sprintf("compression-edge-%04d", nodeID),
+				PubKey:         fmt.Sprintf("compression-public-key-%04d-repetitive-fixture", nodeID),
+				Version:        mtypes.ControlV2ProtocolVersion,
+				ListenPort:     20000 + edgeIndex,
+				LocalV4:        []string{localAddress},
+				PublicV4:       []string{publicAddress},
+				DesiredTTL:     64,
+				RequestedAt:    fixedTime,
+				Implementation: "cluster-compression-counter-fixture",
+			},
+			controlKey: fmt.Sprintf("compression-control-key-%04d-repetitive-fixture", nodeID),
+			reports:    reports,
+		}
+	}
+	return workload
+}
+
+func runClusterCompressionCounterMode(t *testing.T, compression string, workload []clusterCounterEdgeWorkload) clusterCompressionRun {
+	t.Helper()
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{
+		heartbeat:   time.Hour,
+		deadAfter:   2 * time.Hour,
+		compression: compression,
+	})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	setE2EClusterClocks(topology, time.Date(2040, time.January, 2, 3, 4, 5, 0, time.UTC))
+
+	baselineLeft, baselineRight := waitClusterCounterMeasurementStart(t, topology)
+
+	for _, edge := range workload {
+		if _, err := topology.supers[0].runtime.State().Register(context.Background(), edge.register, edge.controlKey); err != nil {
+			t.Fatalf("register deterministic edge %d in %s topology: %v", edge.register.NodeID, compression, err)
+		}
+		WaitApplied(t, topology, 1, edge.register.NodeID, func(peer mtypes.ControlV2Peer) bool {
+			return peer.PubKey == edge.register.PubKey
+		}, 3*time.Second)
+		for _, report := range edge.reports {
+			if err := topology.supers[0].runtime.State().Report(context.Background(), report); err != nil {
+				t.Fatalf("report deterministic edge %d in %s topology: %v", report.NodeID, compression, err)
+			}
+			targetID := report.Pongs[0].DestNode
+			latencyMS := report.Pongs[0].LatencyMS
+			WaitApplied(t, topology, 1, report.NodeID, func(peer mtypes.ControlV2Peer) bool {
+				return peer.LatencyMS[targetID] == latencyMS
+			}, 3*time.Second)
+		}
+	}
+
+	lastEdge := workload[len(workload)-1]
+	lastReport := lastEdge.reports[len(lastEdge.reports)-1]
+	lastTargetID := lastReport.Pongs[0].DestNode
+	lastLatencyMS := lastReport.Pongs[0].LatencyMS
+	WaitApplied(t, topology, 1, lastReport.NodeID, func(peer mtypes.ControlV2Peer) bool {
+		return peer.LatencyMS[lastTargetID] == lastLatencyMS
+	}, 3*time.Second)
+
+	leftLive, leftTombstones := topology.supers[0].runtime.State().ExportLive()
+	rightLive, rightTombstones := topology.supers[1].runtime.State().ExportLive()
+	leftLive = normalizeClusterPeerRecordTimes(leftLive)
+	rightLive = normalizeClusterPeerRecordTimes(rightLive)
+	if !reflect.DeepEqual(leftLive, rightLive) || !reflect.DeepEqual(leftTombstones, rightTombstones) {
+		t.Fatalf("decoded %s state differs (receivedAt is not exported): left=%+v/%+v right=%+v/%+v", compression, leftLive, leftTombstones, rightLive, rightTombstones)
+	}
+
+	left := clusterLinkStatsDelta(t, LinkStats(topology, 0, 1), baselineLeft)
+	right := clusterLinkStatsDelta(t, LinkStats(topology, 1, 0), baselineRight)
+	if left.TX.Messages != right.RX.Messages {
+		t.Fatalf("%s link message counts are asymmetric: A TX=%d B RX=%d", compression, left.TX.Messages, right.RX.Messages)
+	}
+	wantMessages := uint64(len(workload) * (1 + len(workload[0].reports)))
+	if left.TX.Messages != wantMessages {
+		t.Fatalf("%s workload messages = %d, want %d", compression, left.TX.Messages, wantMessages)
+	}
+	assertClusterWireOverhead(t, compression, left.TX)
+	return clusterCompressionRun{live: leftLive, tombstones: leftTombstones, stats: left}
+}
+
+func normalizeClusterPeerRecordTimes(records []clusterPeerRecord) []clusterPeerRecord {
+	normalized := append([]clusterPeerRecord(nil), records...)
+	for index := range normalized {
+		normalized[index].LastSeen = normalized[index].LastSeen.Round(0).UTC()
+	}
+	return normalized
+}
+
+func setE2EClusterClocks(topology *e2eMultiSuper, fixed time.Time) {
+	for index := range topology.supers {
+		clock := topology.supers[index].clock
+		clock.Advance(fixed.Sub(clock.Now()))
+	}
+}
+
+func clusterLinkStatsDelta(t *testing.T, after, before clusterLinkStats) clusterLinkStats {
+	t.Helper()
+	return clusterLinkStats{
+		TX:          clusterDirectionStatsDelta(t, after.TX, before.TX),
+		RX:          clusterDirectionStatsDelta(t, after.RX, before.RX),
+		Dialer:      after.Dialer,
+		Compression: after.Compression,
+	}
+}
+
+func clusterDirectionStatsDelta(t *testing.T, after, before clusterDirectionStats) clusterDirectionStats {
+	t.Helper()
+	if after.Messages < before.Messages || after.InnerBytes < before.InnerBytes || after.CompressedBytes < before.CompressedBytes || after.WireBytes < before.WireBytes {
+		t.Fatalf("cluster link counters decreased: before=%+v after=%+v", before, after)
+	}
+	return clusterDirectionStats{
+		Messages:        after.Messages - before.Messages,
+		InnerBytes:      after.InnerBytes - before.InnerBytes,
+		CompressedBytes: after.CompressedBytes - before.CompressedBytes,
+		WireBytes:       after.WireBytes - before.WireBytes,
+	}
+}
+
+func waitClusterCounterMeasurementStart(t *testing.T, topology *e2eMultiSuper) (clusterLinkStats, clusterLinkStats) {
+	t.Helper()
+	var previousLeft, previousRight clusterLinkStats
+	stablePolls := 0
+	awaitE2E(t, 3*time.Second, func() bool {
+		if !clusterCounterEndpointIdle(&topology.supers[0], topology.supers[1].id) ||
+			!clusterCounterEndpointIdle(&topology.supers[1], topology.supers[0].id) {
+			stablePolls = 0
+			return false
+		}
+		currentLeft := LinkStats(topology, 0, 1)
+		currentRight := LinkStats(topology, 1, 0)
+		if currentLeft.TX.Messages < 2 || currentRight.TX.Messages < 2 ||
+			currentLeft.TX.Messages != currentRight.RX.Messages || currentRight.TX.Messages != currentLeft.RX.Messages {
+			stablePolls = 0
+			return false
+		}
+		if currentLeft == previousLeft && currentRight == previousRight {
+			stablePolls++
+		} else {
+			stablePolls = 0
+			previousLeft, previousRight = currentLeft, currentRight
+		}
+		return stablePolls >= 5
+	})
+	return previousLeft, previousRight
+}
+
+func clusterCounterEndpointIdle(super *e2eSuper, peerID mtypes.Vertex) bool {
+	state := super.runtime.State()
+	state.mu.RLock()
+	stateIdle := len(state.outbox) == 0 && !state.resyncNeeded
+	state.mu.RUnlock()
+	if !stateIdle {
+		return false
+	}
+
+	manager := super.runtime.Cluster()
+	manager.mu.Lock()
+	peer := manager.peers[peerID]
+	var queue *clusterOutQueue
+	var session *clusterSession
+	if peer != nil {
+		queue = peer.queue
+		session = peer.session
+	}
+	manager.mu.Unlock()
+	return queue != nil && session != nil && !session.closed() && queue.Len() == 0 &&
+		!queue.NeedsFullSync() && len(session.sendCh) == 0
+}
+
+func assertClusterWireOverhead(t *testing.T, compression string, stats clusterDirectionStats) {
+	t.Helper()
+	minimumWireBytes := stats.CompressedBytes + 20*stats.Messages
+	if stats.WireBytes < minimumWireBytes {
+		t.Fatalf("%s wire bytes = %d, want at least compressed bytes %d + 20*messages %d", compression, stats.WireBytes, stats.CompressedBytes, stats.Messages)
+	}
+}
