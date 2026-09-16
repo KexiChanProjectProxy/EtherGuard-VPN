@@ -27,6 +27,7 @@ type superSelector struct {
 	epoch                     uint64
 	consecutiveReportFailures int
 	lastSuccess               time.Time
+	minFailoverWindow         time.Duration
 	now                       func() time.Time
 }
 
@@ -49,9 +50,13 @@ func (selector *superSelector) shouldRotate(reportInterval time.Duration) bool {
 	if selector.consecutiveReportFailures >= 3 {
 		return true
 	}
+	minimum := selector.minFailoverWindow
+	if minimum <= 0 {
+		minimum = 15 * time.Second
+	}
 	window := 3 * reportInterval
-	if window < 15*time.Second {
-		window = 15 * time.Second
+	if window < minimum {
+		window = minimum
 	}
 	return selector.now().Sub(selector.lastSuccess) >= window
 }
@@ -151,6 +156,18 @@ func (runtime *SuperHTTPRuntime) SetClockForTest(now func() time.Time) {
 	runtime.now = now
 	runtime.selector.now = now
 	runtime.selector.lastSuccess = now()
+	runtime.mu.Unlock()
+}
+
+// SetFailoverThresholdsForTest overrides the production 15-second minimum
+// failover window for deterministic integration tests. A non-positive value
+// restores the production floor.
+func (runtime *SuperHTTPRuntime) SetFailoverThresholdsForTest(minWindow time.Duration) {
+	if runtime == nil {
+		return
+	}
+	runtime.mu.Lock()
+	runtime.selector.minFailoverWindow = minWindow
 	runtime.mu.Unlock()
 }
 

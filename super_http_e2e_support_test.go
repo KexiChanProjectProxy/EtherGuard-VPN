@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -349,6 +350,9 @@ type e2eSuper struct {
 	clock     *e2eClock
 	dir       string
 	hash      string
+	proxy     *httptest.Server
+	edgeLn    net.Listener
+	manageLn  net.Listener
 }
 
 type e2eClusterOptions struct {
@@ -428,6 +432,9 @@ func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eM
 			clock:     newE2EClock(),
 			dir:       t.TempDir(),
 			hash:      "e2e-management-hash-" + strconv.Itoa(index+1),
+			proxy:     proxy,
+			edgeLn:    edgeListener,
+			manageLn:  manageListener,
 		}
 	}
 
@@ -498,6 +505,57 @@ func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eM
 		topology.supers[index].runtime = runtime
 	}
 	return topology
+}
+
+func newE2ESuperFrom(t *testing.T, dir string, id mtypes.Vertex, clock *e2eClock) *e2eSuper {
+	t.Helper()
+	base, err := loadSuperConfigV2(filepath.Join(dir, "super.yaml"))
+	if err != nil {
+		t.Fatalf("load restarted super %d config: %v", id, err)
+	}
+	if base.Cluster == nil || base.Cluster.SelfID != id {
+		t.Fatalf("restarted super cluster identity = %+v, want %d", base.Cluster, id)
+	}
+	edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen restarted super %d edge API: %v", id, err)
+	}
+	manageListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		_ = edgeListener.Close()
+		t.Fatalf("listen restarted super %d management API: %v", id, err)
+	}
+	upstreamURL, err := url.Parse("http://" + edgeListener.Addr().String())
+	if err != nil {
+		_ = edgeListener.Close()
+		_ = manageListener.Close()
+		t.Fatalf("parse restarted super %d edge URL: %v", id, err)
+	}
+	proxy := httptest.NewServer(httputil.NewSingleHostReverseProxy(upstreamURL))
+	base.APIUrl = proxy.URL
+	runtime, err := RunWithListeners(&superConfig{
+		BaseConfig:      base,
+		EdgeTemplate:    validEdgeTemplate(),
+		ClusterOverride: base.Cluster,
+		ConfigDir:       dir,
+		EdgeListen:      edgeListener,
+		ManageListen:    manageListener,
+		ShutdownTimeout: 5 * time.Second,
+		TickInterval:    10 * time.Millisecond,
+		Now:             clock.Now,
+	})
+	if err != nil {
+		proxy.Close()
+		_ = edgeListener.Close()
+		_ = manageListener.Close()
+		t.Fatalf("restart super %d: %v", id, err)
+	}
+	return &e2eSuper{
+		id: id, runtime: runtime, edgeURL: proxy.URL,
+		manageURL: "http://" + manageListener.Addr().String(), clock: clock,
+		dir: dir, hash: base.ManagementAuth.PasswordHash,
+		proxy: proxy, edgeLn: edgeListener, manageLn: manageListener,
+	}
 }
 
 func (topology *e2eMultiSuper) shutdown() error {
