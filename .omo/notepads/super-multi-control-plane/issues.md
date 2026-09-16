@@ -29,3 +29,29 @@ Two F2 findings **were** genuine and are fixed:
 
 - Issue B: §E "First inner message in each direction MUST be `hello`; anything else → close." `readerLoop` now rejects a non-hello first inbound envelope (`ErrClusterFirstMessageNotHello`). Regression: `TestClusterSessionRejectsNonHelloFirstMessage`.
 - Issue C: Sync `streamEvents` swallowed `Snapshot` errors after `stopPolling()`, leaving the client with neither a stream-driven update nor active polling. On that error path we now `Logf` and `startPolling()`. Regression: `TestControlHTTPClientSyncRestartsPollingWhenStreamEventSnapshotFails`.
+
+---
+
+## 2026-09-16 — F1/F2 re-review (post-67f238c): wall clock vs hello-before-Run
+
+Two genuine, small findings on top of `67f238c`. Neither reverts the earlier flake fixes.
+
+### F1 — `time.Now()` in `readRecord` for OS socket deadlines
+
+Commit `18905ac` (todo 25) correctly stopped using the injected logical clock `s.now()` for `net.Conn.SetReadDeadline`. Frozen e2e clocks made that deadline expire immediately and produced spurious `ErrClusterLinkDead`. Regression: `TestClusterSessionStaleLogicalClockKeepsSocketDeadlineAlive`.
+
+The F1 guardrail still wants no `time.Now()` *calls* in cluster method bodies — only constructor defaults. Resolution: add `clusterSessionConfig.WallNow` / `clusterSession.wallNow`, defaulted to `time.Now` in `newClusterSession`, and use `s.wallNow().Add(s.deadAfter)` in `readRecord`. Tests continue to freeze only the logical `Now` clock; they do not override `WallNow`, so OS deadlines stay on real wall time in production and in e2e.
+
+Do **not** point `wallNow` at `s.now` — that reintroduces the 18905ac flake.
+
+`grep -n 'time.Now()' super_cluster_*.go` still hits `clusterAuthenticator.currentTime`'s nil-fallback (`super_cluster_handshake.go`). That is a pre-existing constructor-equivalent default (`newClusterManager` already injects `now`); it is not a new method-body clock. Session files now only *assign* `time.Now` as `Now`/`WallNow` defaults.
+
+### F2 — hello queued after `session.Run()` started
+
+`adoptSession` launched `session.Run` before `session.Send(hello)`. `Run` starts the writer loop, whose heartbeat ticker can fire a `ping` as the first outbound envelope. Combined with the new hello-first reader (`ErrClusterFirstMessageNotHello` from 67f238c), a validly-short `HeartbeatSeconds` could make the peer reject a legitimate link.
+
+Fix: `Send(hello)` (and `close(helloDone)`) **before** starting `session.Run`. `sendCh` is buffered (256), so the hello sits in FIFO until the writer starts. `helloDone`, winner/loser close, and the Send-error path are unchanged in meaning; `Run` still starts after Send so `wg.Add(1)` stays balanced even if Send fails (Run sees the closed session and returns).
+
+Writer loop also `drainSendQueue()` before `time.NewTicker`: a short heartbeat can make `ticker.C` ready on the first `select`, and Go would then pick ping vs hello at random even with hello already queued. Draining pre-queued envelopes (the hello) before the ticker exists makes hello-first hold for any positive `HeartbeatSeconds`. Hello-first enforcement itself is unchanged.
+
+Regression: `TestClusterManagerHelloSentBeforeHeartbeat` (1ms heartbeat, simultaneous dial, first inbound type is `hello` on both sides).

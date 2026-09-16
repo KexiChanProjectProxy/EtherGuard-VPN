@@ -53,6 +53,9 @@ type clusterSessionConfig struct {
 	Heartbeat   time.Duration
 	DeadAfter   time.Duration
 	Now         func() time.Time
+	// WallNow is the OS wall clock for net.Conn deadlines. Distinct from Now,
+	// the logical clock used for HLC, last-RX, and dead-peer checks.
+	WallNow func() time.Time
 }
 
 type clusterSession struct {
@@ -75,6 +78,7 @@ type clusterSession struct {
 	heartbeat      time.Duration
 	deadAfter      time.Duration
 	now            func() time.Time
+	wallNow        func() time.Time
 	connectedSince atomic.Int64
 	lastRX         atomic.Int64
 	txWire         atomic.Uint64
@@ -84,6 +88,7 @@ type clusterSession struct {
 	freezeReader   atomic.Bool
 	readerFrozen   atomic.Bool
 	helloReceived  bool
+	firstInbound   atomic.Value
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -94,6 +99,9 @@ type clusterSession struct {
 func newClusterSession(cfg clusterSessionConfig) *clusterSession {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.WallNow == nil {
+		cfg.WallNow = time.Now
 	}
 	if cfg.Inbox == nil {
 		cfg.Inbox = func(clusterEnvelope) error { return nil }
@@ -108,7 +116,7 @@ func newClusterSession(cfg clusterSessionConfig) *clusterSession {
 		peerID: cfg.PeerID, dialer: cfg.Dialer, conn: cfg.Conn, br: cfg.Reader,
 		sendCh: make(chan clusterEnvelope, 256), inbox: cfg.Inbox, hlc: cfg.HLC,
 		observeHLC: cfg.ObserveHLC, onPing: cfg.OnPing, compression: cfg.Compression,
-		heartbeat: cfg.Heartbeat, deadAfter: cfg.DeadAfter, now: cfg.Now, done: make(chan struct{}),
+		heartbeat: cfg.Heartbeat, deadAfter: cfg.DeadAfter, now: cfg.Now, wallNow: cfg.WallNow, done: make(chan struct{}),
 	}
 	if cfg.Conn == nil || cfg.Reader == nil {
 		s.initErr = errors.New("cluster session: connection and reader are required")

@@ -9,6 +9,9 @@ import (
 )
 
 func (s *clusterSession) writerLoop(ctx context.Context) error {
+	if err := s.drainSendQueue(); err != nil {
+		return err
+	}
 	ticker := time.NewTicker(s.heartbeat)
 	defer ticker.Stop()
 	for {
@@ -25,6 +28,19 @@ func (s *clusterSession) writerLoop(ctx context.Context) error {
 			if err := s.writeEnvelope(clusterEnvelope{T: clusterMessagePing, HLC: s.hlc()}); err != nil {
 				return err
 			}
+		}
+	}
+}
+
+func (s *clusterSession) drainSendQueue() error {
+	for {
+		select {
+		case envelope := <-s.sendCh:
+			if err := s.writeEnvelope(envelope); err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
 	}
 }
@@ -52,6 +68,7 @@ func (s *clusterSession) readerLoop() error {
 			return err
 		}
 		if !s.helloReceived {
+			s.firstInbound.Store(envelope.T)
 			if envelope.T != clusterMessageHello {
 				return fmt.Errorf("cluster session: first message %q: %w", envelope.T, ErrClusterFirstMessageNotHello)
 			}
@@ -107,7 +124,7 @@ func (s *clusterSession) readRecord() ([]byte, error) {
 	now := s.now()
 	s.lastRX.Store(now.UnixNano())
 	if netConn, ok := s.conn.(net.Conn); ok {
-		if err := netConn.SetReadDeadline(time.Now().Add(s.deadAfter)); err != nil {
+		if err := netConn.SetReadDeadline(s.wallNow().Add(s.deadAfter)); err != nil {
 			return nil, fmt.Errorf("cluster session: set read deadline: %w", err)
 		}
 	}

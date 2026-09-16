@@ -304,6 +304,23 @@ func clusterManagerEstablishedSessions(manager *clusterManager) int {
 	return count
 }
 
+func clusterManagerSession(manager *clusterManager, peerID mtypes.Vertex) *clusterSession {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if peer := manager.peers[peerID]; peer != nil {
+		return peer.session
+	}
+	return nil
+}
+
+func clusterSessionFirstInbound(session *clusterSession) string {
+	if session == nil {
+		return ""
+	}
+	value, _ := session.firstInbound.Load().(string)
+	return value
+}
+
 func clusterManagerSnapshotPeer(state *ControlState, nodeID mtypes.Vertex) (mtypes.ControlV2Peer, bool) {
 	for _, peer := range state.SnapshotFor(60000).Peers {
 		if peer.NodeID == nodeID {
@@ -610,4 +627,35 @@ func TestClusterManagerShutdownClosesSessions(t *testing.T) {
 	waitClusterManagerCondition(t, 2*time.Second, func() bool {
 		return runtime.NumGoroutine() <= baseline+3
 	}, "cluster manager goroutines to return to baseline")
+}
+
+func TestClusterManagerHelloSentBeforeHeartbeat(t *testing.T) {
+	// Given two managers whose heartbeat is shorter than a typical dial/adopt cycle.
+	topology := newClusterManagerTestTopology(t, []mtypes.Vertex{1, 2}, [][2]mtypes.Vertex{{1, 2}}, clusterManagerTestOptions{
+		heartbeat: time.Millisecond,
+		deadAfter: 50 * time.Millisecond,
+	})
+
+	// When both sides dial and adopt at once.
+	topology.startTogether(t, 1, 2)
+	waitClusterManagerLinked(t, topology, 1, 2)
+	waitClusterManagerCondition(t, 2*time.Second, func() bool {
+		return clusterSessionFirstInbound(clusterManagerSession(topology.node(t, 1).manager, 2)) == clusterMessageHello &&
+			clusterSessionFirstInbound(clusterManagerSession(topology.node(t, 2).manager, 1)) == clusterMessageHello
+	}, "hello to be the first inbound message on both sessions")
+
+	// Then the first inbound type is hello on both sides, and the link survives several heartbeats.
+	timer := time.NewTimer(20 * time.Millisecond)
+	defer timer.Stop()
+	<-timer.C
+	if clusterManagerLinkState(topology.node(t, 1).manager.Status(), 2) != "connected" ||
+		clusterManagerLinkState(topology.node(t, 2).manager.Status(), 1) != "connected" {
+		t.Fatal("link dropped after short-heartbeat intervals; hello was not first on the wire")
+	}
+	if got := clusterSessionFirstInbound(clusterManagerSession(topology.node(t, 1).manager, 2)); got != clusterMessageHello {
+		t.Fatalf("super 1 first inbound = %q, want %q", got, clusterMessageHello)
+	}
+	if got := clusterSessionFirstInbound(clusterManagerSession(topology.node(t, 2).manager, 1)); got != clusterMessageHello {
+		t.Fatalf("super 2 first inbound = %q, want %q", got, clusterMessageHello)
+	}
 }

@@ -458,11 +458,6 @@ func (m *clusterManager) adoptSession(ctx context.Context, peerID mtypes.Vertex,
 	m.mu.Unlock()
 
 	m.state.SetOriginLinkStatus(peerID, true, m.now())
-	go func() {
-		defer m.wg.Done()
-		err := session.Run(ctx)
-		m.sessionEnded(peerID, session, err)
-	}()
 	hello := clusterEnvelope{
 		T:     clusterMessageHello,
 		Hello: &clusterHello{SuperID: m.selfID, Proto: clusterProtoVersion, HLC: m.hlc.Current()},
@@ -470,6 +465,11 @@ func (m *clusterManager) adoptSession(ctx context.Context, peerID mtypes.Vertex,
 	}
 	err := session.Send(hello)
 	close(helloDone)
+	go func() {
+		defer m.wg.Done()
+		runErr := session.Run(ctx)
+		m.sessionEnded(peerID, session, runErr)
+	}()
 	if loser != nil {
 		_ = loser.Close()
 	}
