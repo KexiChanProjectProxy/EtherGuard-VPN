@@ -321,34 +321,18 @@ func TestManageV2AddPeerRejectsSpecialNodeID(t *testing.T) {
 	}
 }
 
-// TestManageV2AddPeerPublishesPeerChange — exactly one peer_change event
-// fires for each successful AddPeer; revision bumps by exactly one.
-func TestManageV2AddPeerPublishesPeerChange(t *testing.T) {
+func TestManageV2AddPeerPublishesNoEvent(t *testing.T) {
 	mgr, state, pub, _ := newManageV2UnderTest(t)
 	before := state.Revision()
 	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 4, NodeName: "delta"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
 	after := state.Revision()
-	if after != before+1 {
-		t.Fatalf("revision: got %d, want %d", after, before+1)
+	if after != before {
+		t.Fatalf("revision: got %d, want unchanged %d", after, before)
 	}
-	if pub.count() != 1 {
-		t.Fatalf("events: got %d, want 1", pub.count())
-	}
-	last := pub.last()
-	if last.Type != mtypes.ControlV2EventPeerChange {
-		t.Fatalf("event type: got %q, want peer_change", last.Type)
-	}
-	if last.Revision != after {
-		t.Fatalf("event revision: got %d, want %d", last.Revision, after)
-	}
-	payload, ok := last.Data.(mtypes.ControlV2PeerChangePayload)
-	if !ok {
-		t.Fatalf("event data type: got %T", last.Data)
-	}
-	if payload.NodeID != 4 || payload.NodeName != "delta" {
-		t.Fatalf("event payload: %+v", payload)
+	if pub.count() != 0 {
+		t.Fatalf("events: got %d, want 0", pub.count())
 	}
 }
 
@@ -359,21 +343,58 @@ func TestManageV2UpdatePeerRotatesPSKey(t *testing.T) {
 	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 11, NodeName: "zulu"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
+	oldKey, ok := state.ControlKeyFor(11)
+	if !ok {
+		t.Fatal("ControlKeyFor(11) missing after AddPeer")
+	}
+	if _, err := state.Register(context.Background(), mtypes.ControlV2RegisterRequest{
+		NodeID:   11,
+		NodeName: "zulu",
+		Version:  mtypes.ControlV2ProtocolVersion,
+	}, oldKey); err != nil {
+		t.Fatalf("Register active peer: %v", err)
+	}
 	pub.mu.Lock()
 	pub.all = pub.all[:0]
 	pub.mu.Unlock()
 	if err := mgr.UpdatePeer(context.Background(), ManageUpdatePeerRequest{NodeID: 11, ControlPSKey: "rotated-key-fresh"}); err != nil {
 		t.Fatalf("UpdatePeer: %v", err)
 	}
-	if pub.count() != 1 {
-		t.Fatalf("events: got %d, want 1 (peer_change)", pub.count())
-	}
-	if pub.last().Type != mtypes.ControlV2EventPeerChange {
-		t.Fatalf("event type: %s", pub.last().Type)
+	if pub.count() != 0 {
+		t.Fatalf("events: got %d, want 0", pub.count())
 	}
 	got, ok := state.ControlKeyFor(11)
 	if !ok || got != "rotated-key-fresh" {
 		t.Fatalf("ControlKeyFor(11): (%q, %v)", got, ok)
+	}
+}
+
+func TestManageV2UpdatePeerNameChangeOnActivePublishesPeerChange(t *testing.T) {
+	mgr, state, pub, _ := newManageV2UnderTest(t)
+	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 13, NodeName: "old-name"}); err != nil {
+		t.Fatalf("AddPeer: %v", err)
+	}
+	key, ok := state.ControlKeyFor(13)
+	if !ok {
+		t.Fatal("ControlKeyFor(13) missing after AddPeer")
+	}
+	if _, err := state.Register(context.Background(), mtypes.ControlV2RegisterRequest{
+		NodeID:   13,
+		NodeName: "old-name",
+		Version:  mtypes.ControlV2ProtocolVersion,
+	}, key); err != nil {
+		t.Fatalf("Register active peer: %v", err)
+	}
+	pub.mu.Lock()
+	pub.all = pub.all[:0]
+	pub.mu.Unlock()
+
+	if err := mgr.UpdatePeer(context.Background(), ManageUpdatePeerRequest{NodeID: 13, NodeName: "new-name"}); err != nil {
+		t.Fatalf("UpdatePeer: %v", err)
+	}
+
+	if pub.count() != 1 || pub.last().Type != mtypes.ControlV2EventPeerChange {
+		t.Fatalf("events: count=%d last=%s, want one peer_change", pub.count(), pub.last().Type)
 	}
 }
 
@@ -418,6 +439,17 @@ func TestManageV2DeletePeerRevokesAndPersists(t *testing.T) {
 	mgr, state, pub, dir := newManageV2UnderTest(t)
 	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 31, NodeName: "thirty-one"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
+	}
+	key, ok := state.ControlKeyFor(31)
+	if !ok {
+		t.Fatal("ControlKeyFor(31) missing after AddPeer")
+	}
+	if _, err := state.Register(context.Background(), mtypes.ControlV2RegisterRequest{
+		NodeID:   31,
+		NodeName: "thirty-one",
+		Version:  mtypes.ControlV2ProtocolVersion,
+	}, key); err != nil {
+		t.Fatalf("Register active peer: %v", err)
 	}
 	pub.mu.Lock()
 	pub.all = pub.all[:0]
@@ -551,7 +583,7 @@ func TestManageV2AtomicWriteFailureLeavesPriorState(t *testing.T) {
 // TestManageV2DeletePeerRemovesEdgeFile — after DeletePeer, the per-Edge
 // file is removed (no orphan left behind).
 func TestManageV2DeletePeerRemovesEdgeFile(t *testing.T) {
-	mgr, _, _, dir := newManageV2UnderTest(t)
+	mgr, _, pub, dir := newManageV2UnderTest(t)
 	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 21, NodeName: "twenty-one"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
@@ -564,6 +596,9 @@ func TestManageV2DeletePeerRemovesEdgeFile(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "edge_21.yaml")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("edge_21.yaml should be gone, got err=%v", err)
 	}
+	if pub.count() != 0 {
+		t.Fatalf("DeletePeer for never-active peer emitted %d events, want 0", pub.count())
+	}
 }
 
 // TestManageV2SnapshotIsAuthorative — Snapshot() returns a copy of the
@@ -573,15 +608,41 @@ func TestManageV2SnapshotIsAuthorative(t *testing.T) {
 	if _, err := mgr.AddPeer(context.Background(), ManageAddPeerRequest{NodeID: 60, NodeName: "sixty"}); err != nil {
 		t.Fatalf("AddPeer: %v", err)
 	}
+	relayCost := 12.5
+	port := 51820
+	mgr.mu.Lock()
+	mgr.baseConfig.EndpointBlacklist = []string{"192.0.2.10"}
+	mgr.baseConfig.ListenPortPriority = mtypes.ListenPortPriority{{Port: &port}}
+	mgr.baseConfig.RelayCostMS = &relayCost
+	mgr.baseConfig.Cluster = &mtypes.SuperConfigV2Cluster{
+		SelfID: 1,
+		Secret: "0123456789abcdef0123456789abcdef",
+		Peers:  []mtypes.SuperConfigV2ClusterPeer{{SuperID: 2, APIUrl: "https://super-2.example"}},
+	}
+	mgr.mu.Unlock()
 	snap := mgr.Snapshot()
 	if len(snap.Peers) != 1 || snap.Peers[0].NodeID != 60 {
 		t.Fatalf("snapshot peers: %+v", snap.Peers)
 	}
 	// Mutating the returned slice must not affect future Snapshot() calls.
 	snap.Peers[0].NodeID = 999
+	snap.STUNServers[0] = "stun:198.51.100.9:3478"
+	snap.EndpointBlacklist[0] = "198.51.100.9"
+	*snap.ListenPortPriority[0].Port = 12345
+	*snap.RelayCostMS = 99
+	snap.Cluster.Peers[0].SuperID = 3
 	snap2 := mgr.Snapshot()
 	if snap2.Peers[0].NodeID != 60 {
 		t.Fatalf("Snapshot leaked reference: %d", snap2.Peers[0].NodeID)
+	}
+	if snap2.STUNServers[0] != "stun:203.0.113.10:3478" || snap2.EndpointBlacklist[0] != "192.0.2.10" {
+		t.Fatalf("Snapshot leaked slice references: STUN=%v blacklist=%v", snap2.STUNServers, snap2.EndpointBlacklist)
+	}
+	if *snap2.ListenPortPriority[0].Port != 51820 || *snap2.RelayCostMS != 12.5 {
+		t.Fatalf("Snapshot leaked pointer references: priority=%v relay=%v", *snap2.ListenPortPriority[0].Port, *snap2.RelayCostMS)
+	}
+	if snap2.Cluster.Peers[0].SuperID != 2 {
+		t.Fatalf("Snapshot leaked Cluster.Peers reference: %+v", snap2.Cluster.Peers)
 	}
 }
 
