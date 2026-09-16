@@ -132,7 +132,7 @@ func newHTTPMux(apiprefix string, v2 http.Handler, manage *ManageV2) *http.Serve
 		// Mount the typed ManageV2 service routes for the legacy
 		// paths task 8 owns. They keep the original /manage/* URL
 		// surface so existing tooling continues to work.
-		mux.Handle(apiprefix+"/manage/", manageHandler(manage, manage.Snapshot().ManagementAuth.PasswordHash))
+		mux.Handle(apiprefix+"/manage/", manageHandler(manage, manage.Snapshot().ManagementAuth.PasswordHash, nil))
 	} else {
 		mux.HandleFunc(apiprefix+"/manage/peer/add", manage_peeradd)
 		mux.HandleFunc(apiprefix+"/manage/peer/del", manage_peerdel)
@@ -152,7 +152,7 @@ func newHTTPMux(apiprefix string, v2 http.Handler, manage *ManageV2) *http.Serve
 // service method that performs the same mutation. Password-based
 // authentication uses the per-runtime passwordHash (ManagementAuth.PasswordHash)
 // so two Super runtimes in one process cannot clobber each other's gate.
-func manageHandler(m *ManageV2, passwordHash string) http.Handler {
+func manageHandler(m *ManageV2, passwordHash string, cluster *clusterManager) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/manage/peer/add", func(w http.ResponseWriter, r *http.Request) {
 		if !manageAuthOKWithHash(w, r, passwordHash) {
@@ -221,6 +221,31 @@ func manageHandler(m *ManageV2, passwordHash string) http.Handler {
 		// reverse-proxy auth.
 		w.Header().Set("Content-Type", "application/json")
 		data, _ := json.Marshal(m.Snapshot())
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	})
+	mux.HandleFunc("/manage/cluster/state", func(w http.ResponseWriter, r *http.Request) {
+		if !manageAuthOKWithHash(w, r, passwordHash) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var data []byte
+		var err error
+		if cluster != nil {
+			data, err = json.Marshal(cluster.Status())
+		} else {
+			data, err = json.Marshal(struct {
+				Enabled bool `json:"enabled"`
+			}{Enabled: false})
+		}
+		if err != nil {
+			http.Error(w, "encode cluster status", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	})

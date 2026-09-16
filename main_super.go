@@ -45,6 +45,7 @@ import (
 	"net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -69,8 +70,9 @@ import (
 // (ManageListen, ManageListenAddr) must be set; the runtime returns an
 // error otherwise.
 type superConfig struct {
-	BaseConfig   mtypes.SuperConfigV2 // already validated
-	EdgeTemplate mtypes.EdgeConfigV2  // for ManageV2
+	BaseConfig      mtypes.SuperConfigV2 // already validated
+	EdgeTemplate    mtypes.EdgeConfigV2  // for ManageV2
+	ClusterOverride *mtypes.SuperConfigV2Cluster
 
 	ConfigDir string // directory where ManageV2 writes super.yaml + edge_*.yaml
 
@@ -128,11 +130,12 @@ type superRuntime struct {
 	started time.Time
 
 	// Services (concurrency-safe singletons).
-	state  *ControlState
-	auth   *ControlAuthenticator
-	hub    *ControlEventHub
-	manage *ManageV2
-	graph  *graphpath.IG
+	state   *ControlState
+	auth    *ControlAuthenticator
+	hub     *ControlEventHub
+	manage  *ManageV2
+	cluster *clusterManager
+	graph   *graphpath.IG
 
 	// HTTP servers + listeners. manageServer may be nil when edge and
 	// manage share a single listener (EdgeListen == ManageListen).
@@ -169,6 +172,9 @@ func (r *superRuntime) Auth() *ControlAuthenticator { return r.auth }
 
 // Manage returns the wired ManageV2 service (test diagnostics).
 func (r *superRuntime) Manage() *ManageV2 { return r.manage }
+
+// Cluster returns the optional runtime cluster manager for tests and diagnostics.
+func (r *superRuntime) Cluster() *clusterManager { return r.cluster }
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -297,6 +303,20 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if err := cfg.BaseConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("super: invalid base config: %w", err)
 	}
+	clusterConfig := cfg.BaseConfig.Cluster
+	if cfg.ClusterOverride != nil {
+		clusterConfig = cfg.ClusterOverride
+	}
+	if clusterConfig != nil {
+		defaulted := clusterConfig.WithDefaults()
+		clusterConfig = &defaulted
+		cfg.BaseConfig.Cluster = clusterConfig
+	}
+	clusterStatePath := filepath.Join(cfg.ConfigDir, "cluster_state.yaml")
+	persistedClusterState, err := loadClusterStateFile(clusterStatePath)
+	if err != nil {
+		return nil, fmt.Errorf("super: load cluster state: %w", err)
+	}
 
 	if cfg.ShutdownTimeout <= 0 {
 		cfg.ShutdownTimeout = 10 * time.Second
@@ -308,6 +328,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if now == nil {
 		now = time.Now
 	}
+	persistedClusterState = pruneClusterStateTombstones(persistedClusterState, now())
 	startLocalPprof()
 
 	// Build the Floyd-Warshall graph with the Super's recalculation
@@ -333,6 +354,12 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 
 	// Build the typed control parameters from the v2 YAML.
 	params := buildControlV2Parameters(cfg.BaseConfig)
+	var selfID mtypes.Vertex
+	var remoteStaleGrace time.Duration
+	if clusterConfig != nil {
+		selfID = clusterConfig.SelfID
+		remoteStaleGrace = time.Duration(clusterConfig.RemoteStaleGraceSeconds * float64(time.Second))
+	}
 
 	// Build the ControlState. The publish hook is set later (after the
 	// hub exists) via SetPublishForTest to break the construction cycle
@@ -341,9 +368,12 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	state := NewControlState(ControlStateConfig{
 		Parameters:         params,
 		PeerAliveTimeout:   time.Duration(cfg.BaseConfig.PeerAliveTimeoutSeconds * float64(time.Second)),
+		RemoteStaleGrace:   remoteStaleGrace,
 		UsePSKForInterEdge: cfg.BaseConfig.UsePSKForInterEdge,
 		Graph:              graph,
 		Now:                now,
+		SelfID:             selfID,
+		HLCHighWater:       persistedClusterState.HLCHighWater,
 	})
 
 	// Build the hub with the configured replay ring depth.
@@ -356,35 +386,43 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	// Wire the publish hook so every state mutation fans out to SSE.
 	state.SetPublishForTest(hub.Publish)
 
-	// Seed the state with the pre-authorized peers declared in the v2
-	// YAML. Each peer is registered with a synthesized ControlV2Register
-	// request so the auth verifier can resolve its control PSKey at the
-	// first signed request. The state is otherwise untouched until the
-	// Edge actually reports.
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer seedCancel()
-	if err := seedConfiguredPeers(seedCtx, state, cfg.BaseConfig.Peers); err != nil {
+	if err := seedConfiguredPeers(seedCtx, state, cfg.BaseConfig.Peers, persistedClusterState, selfID); err != nil {
 		hub.Close()
 		return nil, err
 	}
 
-	// Build the authenticator bound to the state.
-	auth := NewControlAuthenticator(state, ControlAuthenticatorConfig{Now: now})
-
 	// Build the management service. ConfigDir is mandatory.
 	manage, err := NewManageV2(ManageV2Config{
-		State:        state,
-		ConfigDir:    cfg.ConfigDir,
-		BaseConfig:   cfg.BaseConfig,
-		EdgeTemplate: cfg.EdgeTemplate,
+		State:            state,
+		ConfigDir:        cfg.ConfigDir,
+		BaseConfig:       cfg.BaseConfig,
+		EdgeTemplate:     cfg.EdgeTemplate,
+		ClusterStateFile: clusterStatePath,
 	})
 	if err != nil {
 		hub.Close()
 		return nil, fmt.Errorf("super: build manage v2: %w", err)
 	}
 
+	// Build the authenticator bound to the state.
+	auth := NewControlAuthenticator(state, ControlAuthenticatorConfig{Now: now})
+
 	// Build the v2 HTTP handler.
 	handler := NewControlHTTPHandler(state, auth, hub, cfg.BaseConfig.APIPrefix)
+	var cluster *clusterManager
+	if clusterConfig != nil {
+		cluster = newClusterManager(clusterManagerConfig{
+			Cluster: clusterConfig, APIPrefix: cfg.BaseConfig.APIPrefix,
+			State: state, Manage: manage, HLC: state.hlc, Now: now,
+		})
+		if cluster == nil {
+			hub.Close()
+			return nil, errors.New("super: build cluster manager")
+		}
+		handler = handler.WithCluster(cluster)
+	}
 
 	// Compose the production mux: /manage/* (typed) + /edge/v2/* (v2).
 	// NewControlHTTPHandler normalises prefix internally to start with "/";
@@ -398,7 +436,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 	if apiprefix[0] != '/' {
 		apiprefix = "/" + apiprefix
 	}
-	mux.Handle(apiprefix+"/manage/", http.StripPrefix(apiprefix, manageHandler(manage, cfg.BaseConfig.ManagementAuth.PasswordHash)))
+	mux.Handle(apiprefix+"/manage/", http.StripPrefix(apiprefix, manageHandler(manage, cfg.BaseConfig.ManagementAuth.PasswordHash, cluster)))
 	// The v2 handler owns its full path table; mount at apiprefix so a
 	// request for /edge/v2/snapshot reaches the handler with
 	// r.URL.Path == "/edge/v2/snapshot" (which is what the handler's
@@ -421,6 +459,7 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 		auth:       auth,
 		hub:        hub,
 		manage:     manage,
+		cluster:    cluster,
 		graph:      graph,
 		edgeLn:     cfg.EdgeListen,
 		manageLn:   cfg.ManageListen,
@@ -451,6 +490,9 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 				serveErrs <- fmt.Errorf("super: manage http: %w", err)
 			}
 		}()
+	}
+	if rt.cluster != nil {
+		rt.cluster.Start(context.Background())
 	}
 
 	// Start the background ticker for SweepTimeouts + graph recalc.
@@ -483,12 +525,20 @@ func RunWithListeners(cfg *superConfig) (*superRuntime, error) {
 // any work.
 func (r *superRuntime) Shutdown(ctx context.Context) error {
 	r.shutdownOnce.Do(func() {
+		var clusterErr error
 		// 1. Stop the ticker.
 		if r.tickerCancel != nil {
 			r.tickerCancel()
 			select {
 			case <-r.tickerDone:
 			case <-time.After(2 * time.Second):
+			}
+		}
+
+		// 1.5. Stop cluster dial loops and close hijacked sessions.
+		if r.cluster != nil {
+			if err := r.cluster.Shutdown(ctx); err != nil {
+				clusterErr = fmt.Errorf("super: cluster shutdown: %w", err)
 			}
 		}
 
@@ -512,6 +562,9 @@ func (r *superRuntime) Shutdown(ctx context.Context) error {
 					firstErr = fmt.Errorf("super: manage shutdown: %w", err)
 				}
 			}
+		}
+		if firstErr == nil {
+			firstErr = clusterErr
 		}
 
 		// 4. If Shutdown timed out (e.g. an SSE handler is blocked on
@@ -595,7 +648,7 @@ func (r *superRuntime) runTicker(ctx context.Context) {
 // cannot strip the credential of an Edge that has not yet registered or
 // that has gone offline longer than PeerAliveTimeout; the Edge must call
 // Register explicitly to materialise an active peer record.
-func seedConfiguredPeers(ctx context.Context, state *ControlState, peers []mtypes.SuperConfigV2Peer) error {
+func seedConfiguredPeers(ctx context.Context, state *ControlState, peers []mtypes.SuperConfigV2Peer, persisted clusterStateFile, selfID mtypes.Vertex) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -603,8 +656,8 @@ func seedConfiguredPeers(ctx context.Context, state *ControlState, peers []mtype
 		if err := peer.Validate(); err != nil {
 			return fmt.Errorf("super: invalid seed peer %d: %w", peer.NodeID, err)
 		}
-		state.SetPreAuthorized(peer.NodeID, peer.ControlPSKey)
 	}
+	state.SetRegistryVersionsForSeed(peers, persisted, selfID)
 	return nil
 }
 
