@@ -70,6 +70,15 @@ func NewControlHTTPClient(base, prefix string, id mtypes.Vertex, key string) *Co
 	}
 }
 
+// InvalidateHTTP drops cached TCP connections. After a WAN/NAT remap a
+// keep-alive POST can hang until Timeout on a half-dead socket.
+func (c *ControlHTTPClient) InvalidateHTTP() {
+	if c == nil || c.HTTP == nil {
+		return
+	}
+	c.HTTP.CloseIdleConnections()
+}
+
 // defaultJitter returns d ± 20% to spread reconnect storms across Edge clients.
 func defaultJitter(d time.Duration) time.Duration {
 	if d <= 0 {

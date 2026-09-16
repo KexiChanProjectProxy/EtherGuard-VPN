@@ -124,6 +124,9 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 					}
 					break
 				}
+				if netlinkDefaultRoute(remain, hdr) {
+					device.notifyNetworkChange()
+				}
 				reqPeerLock.Lock()
 				reqPeer = make(map[uint32]peerEndpointPtr)
 				reqPeerLock.Unlock()
@@ -143,7 +146,7 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 						}
 						if nativeEP.IsV6() || nativeEP.Src4().Ifindex == 0 {
 							peer.RUnlock()
-							break
+							continue
 						}
 						nlmsg := struct {
 							hdr     unix.NlMsghdr
@@ -210,7 +213,7 @@ func createNetlinkRouteSocket() (int, error) {
 	}
 	saddr := &unix.SockaddrNetlink{
 		Family: unix.AF_NETLINK,
-		Groups: unix.RTMGRP_IPV4_ROUTE,
+		Groups: unix.RTMGRP_IPV4_ROUTE | unix.RTMGRP_IPV6_ROUTE,
 	}
 	err = unix.Bind(sock, saddr)
 	if err != nil {
@@ -218,4 +221,12 @@ func createNetlinkRouteSocket() (int, error) {
 		return -1, err
 	}
 	return sock, nil
+}
+
+func netlinkDefaultRoute(msg []byte, hdr unix.NlMsghdr) bool {
+	if uint(hdr.Len) < uint(unix.SizeofNlMsghdr+unix.SizeofRtMsg) || uint(hdr.Len) > uint(len(msg)) {
+		return false
+	}
+	rtmsg := *(*unix.RtMsg)(unsafe.Pointer(&msg[unix.SizeofNlMsghdr]))
+	return rtmsg.Dst_len == 0
 }

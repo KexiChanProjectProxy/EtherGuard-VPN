@@ -30,6 +30,9 @@ func endpointURLsForInterfaces(interfaces []interfaceAddresses, tapName string, 
 			if ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() {
 				continue
 			}
+			if sharedAddressSpaceIP(ip) {
+				continue
+			}
 			if ip4 := ip.To4(); ip4 != nil {
 				if !enabledAf.IPv4 {
 					continue
@@ -58,6 +61,14 @@ func interfaceAddressIP(address net.Addr) net.IP {
 	default:
 		return nil
 	}
+}
+
+func sharedAddressSpaceIP(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
 }
 
 func (device *Device) localEndpointURLs(port int) []string {

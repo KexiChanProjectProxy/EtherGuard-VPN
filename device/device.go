@@ -585,6 +585,31 @@ func (device *Device) GetConnurl(v mtypes.Vertex) string {
 	return peer.GetEndpointDstStr()
 }
 
+
+func (device *Device) clearAllEndpointSources() {
+	if device == nil {
+		return
+	}
+	device.peers.RLock()
+	defer device.peers.RUnlock()
+	for _, peer := range device.peers.keyMap {
+		peer.Lock()
+		if peer.endpoint != nil {
+			peer.endpoint.ClearSrc()
+		}
+		peer.Unlock()
+	}
+}
+
+func (device *Device) notifyNetworkChange() {
+	if device == nil {
+		return
+	}
+	device.clearAllEndpointSources()
+	if device.superHTTP != nil {
+		device.superHTTP.requestNetworkRefresh()
+	}
+}
 func (device *Device) RemovePeerByID(id mtypes.Vertex) {
 	device.peers.Lock()
 	defer device.peers.Unlock()

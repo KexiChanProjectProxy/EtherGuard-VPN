@@ -1488,3 +1488,41 @@ func (super *lifecycleSuper) bootstrapClient(nodeID mtypes.Vertex, key string) *
 	client.HTTP.Transport = &http.Transport{DisableKeepAlives: true}
 	return client
 }
+
+func TestRepublishLocalsDropsVanishedWANAddressesAndKeepsSTUN(t *testing.T) {
+	runtime := NewSuperHTTPRuntime(nil, mtypes.EdgeConfigV2{})
+	runtime.readyInfo = superHTTPReady{port: 16386, v4: net.ParseIP("10.38.5.1")}
+	runtime.setCandidates([]mtypes.ControlV2Candidate{
+		{Address: "100.64.75.132:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "[240e:34c:506:1783::1]:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "106.59.202.56:13374", Source: mtypes.ControlV2CandidateSTUN},
+	})
+
+	runtime.republishLocals()
+
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	got := map[string]mtypes.ControlV2CandidateSource{}
+	for _, candidate := range runtime.candidates {
+		got[candidate.Address] = candidate.Source
+	}
+	if got["10.38.5.1:16386"] != mtypes.ControlV2CandidateLocal {
+		t.Fatalf("current local missing: %#v", runtime.candidates)
+	}
+	if got["106.59.202.56:13374"] != mtypes.ControlV2CandidateSTUN {
+		t.Fatalf("STUN mapping missing: %#v", runtime.candidates)
+	}
+	if _, stale := got["100.64.75.132:16386"]; stale {
+		t.Fatalf("vanished CGNAT local kept: %#v", runtime.candidates)
+	}
+	if _, stale := got["[240e:34c:506:1783::1]:16386"]; stale {
+		t.Fatalf("vanished IPv6 local kept: %#v", runtime.candidates)
+	}
+}
+
+func TestControlHTTPClientInvalidateHTTPDoesNotPanic(t *testing.T) {
+	client := NewControlHTTPClient("http://127.0.0.1", "/edge/v2", 1, "key")
+	client.InvalidateHTTP()
+	var none *ControlHTTPClient
+	none.InvalidateHTTP()
+}

@@ -72,3 +72,55 @@ func TestSetEndpointFromPacket_doesNotHoldPeerLockDuringLocalAddressProbe(t *tes
 	close(endpoint.release)
 	<-setDone
 }
+
+type staticTestEndpoint struct {
+	dst net.IP
+	src net.IP
+}
+
+func (e staticTestEndpoint) ClearSrc() {}
+
+func (e staticTestEndpoint) SrcToString() string { return net.JoinHostPort(e.src.String(), "1") }
+
+func (e staticTestEndpoint) DstToString() string { return net.JoinHostPort(e.dst.String(), "51820") }
+
+func (e staticTestEndpoint) DstToBytes() []byte { return e.dst }
+
+func (e staticTestEndpoint) DstIP() net.IP { return e.dst }
+
+func (e staticTestEndpoint) SrcIP() net.IP { return e.src }
+
+func TestSetEndpointFromPacketSkipsDifferentIPWhileAlive(t *testing.T) {
+	now := time.Now()
+	current := staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("192.0.2.1")}
+	other := staticTestEndpoint{dst: net.ParseIP("192.0.2.20"), src: net.ParseIP("192.0.2.1")}
+	sameIPNewPort := staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("192.0.2.1")}
+	peer := &Peer{device: &Device{EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 70}}}}
+	peer.LastPacketReceivedAdd1Sec.Store(&now)
+	peer.endpoint = current
+
+	peer.SetEndpointFromPacket(other)
+	if !peer.endpoint.DstIP().Equal(current.dst) {
+		t.Fatalf("roamed to %v while alive, want %v", peer.endpoint.DstIP(), current.dst)
+	}
+
+	peer.SetEndpointFromPacket(sameIPNewPort)
+	if !peer.endpoint.DstIP().Equal(current.dst) {
+		t.Fatalf("same-IP roam lost dest %v", peer.endpoint.DstIP())
+	}
+}
+
+func TestPeerEndpointRetryHeldDuringHandshakeGrace(t *testing.T) {
+	peer := &Peer{}
+	if peerEndpointRetryHeld(peer) {
+		t.Fatal("zero lastEndpointChange should not hold retry")
+	}
+	peer.lastEndpointChange.Store(time.Now().UnixNano())
+	if !peerEndpointRetryHeld(peer) {
+		t.Fatal("fresh endpoint change should hold retry")
+	}
+	peer.lastEndpointChange.Store(time.Now().Add(-endpointHandshakeGrace - time.Second).UnixNano())
+	if peerEndpointRetryHeld(peer) {
+		t.Fatal("expired handshake grace still holding retry")
+	}
+}

@@ -411,6 +411,9 @@ func (device *Device) RoutineTryReceivedEndpoint() {
 		NextRun := false
 		<-device.event_tryendpoint
 		for _, thepeer := range device.retryPeersSnapshot() {
+			if peerEndpointRetryHeld(thepeer) {
+				continue
+			}
 			if thepeer.LastPacketReceivedAdd1Sec.Load().(*time.Time).Add(mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)).After(time.Now()) {
 				//Peer alives
 				continue
@@ -469,6 +472,16 @@ func (device *Device) RoutineDetectOfflineAndTryNextEndpoint() {
 		device.logQueueState()
 		time.Sleep(timeout)
 	}
+}
+
+const endpointHandshakeGrace = 20 * time.Second
+
+func peerEndpointRetryHeld(peer *Peer) bool {
+	ts := peer.lastEndpointChange.Load()
+	if ts == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, ts)) < endpointHandshakeGrace
 }
 
 func (device *Device) RoutineSendPing(startchan chan struct{}) {

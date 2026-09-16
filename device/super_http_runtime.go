@@ -43,6 +43,8 @@ type SuperHTTPRuntime struct {
 	reregistering    bool
 	reregisterWG     sync.WaitGroup
 	parameterUpdates chan struct{}
+	networkChanges   chan struct{}
+	readyInfo        superHTTPReady
 }
 
 func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
@@ -54,6 +56,7 @@ func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPR
 		done:             make(chan struct{}),
 		recoveryRequests: make(map[mtypes.Vertex]time.Time),
 		parameterUpdates: make(chan struct{}, 1),
+		networkChanges:   make(chan struct{}, 1),
 	}
 	runtime.relayCostMS.Store(math.Float64bits(resolveRelayCostMS(config.RelayCostMS, nil)))
 	return runtime
@@ -101,6 +104,8 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	}
+	runtime.readyInfo = ready
+
 
 	local := localControlCandidates(runtime.device, ready)
 	runtime.setCandidates(local)
@@ -144,10 +149,10 @@ func localControlCandidates(device *Device, ready superHTTPReady) []mtypes.Contr
 
 func localControlCandidatesFromAddresses(device *Device, ready superHTTPReady, localEndpoints []string) []mtypes.ControlV2Candidate {
 	candidates := make([]mtypes.ControlV2Candidate, 0, len(localEndpoints)+2)
-	if ready.v4 != nil && !ready.v4.IsUnspecified() {
+	if ready.v4 != nil && !ready.v4.IsUnspecified() && !sharedAddressSpaceIP(ready.v4) {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v4.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
 	}
-	if ready.v6 != nil && !ready.v6.IsUnspecified() {
+	if ready.v6 != nil && !ready.v6.IsUnspecified() && !sharedAddressSpaceIP(ready.v6) {
 		candidates = append(candidates, mtypes.ControlV2Candidate{Address: net.JoinHostPort(ready.v6.String(), strconv.Itoa(ready.port)), Source: mtypes.ControlV2CandidateLocal})
 	}
 	for _, endpoint := range localEndpoints {
@@ -219,13 +224,53 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	}
 }
 
+func (runtime *SuperHTTPRuntime) requestNetworkRefresh() {
+	if runtime == nil {
+		return
+	}
+	select {
+	case runtime.networkChanges <- struct{}{}:
+	default:
+	}
+}
+
+func (runtime *SuperHTTPRuntime) currentLocalCandidates() []mtypes.ControlV2Candidate {
+	ready := runtime.readyInfo
+	if runtime.device != nil {
+		ready.v4 = nil
+		ready.v6 = nil
+	}
+	return localControlCandidates(runtime.device, ready)
+}
+
+func stunCandidates(candidates []mtypes.ControlV2Candidate) []mtypes.ControlV2Candidate {
+	filtered := make([]mtypes.ControlV2Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Source == mtypes.ControlV2CandidateSTUN {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered
+}
+
+func (runtime *SuperHTTPRuntime) republishLocals() {
+	locals := runtime.currentLocalCandidates()
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	runtime.candidates = mergeControlCandidates(locals, stunCandidates(runtime.candidates))
+	if runtime.device != nil {
+		runtime.candidates = runtime.device.filterControlCandidates(runtime.candidates)
+	}
+}
+
 func (runtime *SuperHTTPRuntime) refreshSTUN(ctx context.Context, parameters mtypes.ControlV2Parameters) {
 	var public []mtypes.ControlV2Candidate
 	if runtime.device != nil && runtime.device.superSTUN != nil && len(parameters.STUNServers) > 0 {
 		public = runtime.device.superSTUN.Discover(ctx, parameters.STUNServers, parameters.STUNRequestTimeout)
 	}
+	locals := runtime.currentLocalCandidates()
 	runtime.mu.Lock()
-	runtime.candidates = mergeControlCandidates(runtime.candidates, public)
+	runtime.candidates = mergeControlCandidates(locals, public)
 	if runtime.device != nil {
 		runtime.candidates = runtime.device.filterControlCandidates(runtime.candidates)
 	}
@@ -297,7 +342,6 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 	for {
 		runtime.mu.RLock()
 		interval := runtime.parameters.ReportInterval
-		candidates := append([]mtypes.ControlV2Candidate(nil), runtime.candidates...)
 		runtime.mu.RUnlock()
 		if interval <= 0 {
 			interval = time.Second
@@ -309,8 +353,23 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 				<-timer.C
 			}
 			return
+		case <-runtime.networkChanges:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			runtime.mu.RLock()
+			parameters := runtime.parameters
+			runtime.mu.RUnlock()
+			runtime.refreshSTUN(ctx, parameters)
 		case <-timer.C:
+			runtime.republishLocals()
 		}
+		runtime.mu.RLock()
+		candidates := append([]mtypes.ControlV2Candidate(nil), runtime.candidates...)
+		runtime.mu.RUnlock()
 		relayCostMS := runtime.effectiveRelayCostMS()
 		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, RelayCostMS: &relayCostMS, Candidates: candidates, ReportedAt: time.Now()}
 		if runtime.device != nil {
@@ -319,7 +378,11 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 			report.Observed = runtime.observedEndpoints()
 			runtime.recoverExhaustedPeers()
 		}
-		if err := runtime.client.Report(ctx, &report); err != nil && ctx.Err() == nil {
+		reportCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := runtime.client.Report(reportCtx, &report)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			runtime.client.InvalidateHTTP()
 			if errors.Is(err, ErrControlUnknownPeer) {
 				runtime.requestReregistration(ctx, ready)
 			}

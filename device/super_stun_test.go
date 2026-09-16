@@ -352,6 +352,27 @@ func TestSuperSTUNRefreshRetainsLocalCandidatesAndDeduplicatesMappings(t *testin
 	}
 }
 
+func TestMergeControlCandidatesWithFreshLocalsDropsVanishedWAN(t *testing.T) {
+	fresh := []mtypes.ControlV2Candidate{
+		{Address: "10.38.5.1:16386", Source: mtypes.ControlV2CandidateLocal},
+	}
+	stale := []mtypes.ControlV2Candidate{
+		{Address: "100.64.75.132:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "[240e:old::1]:16386", Source: mtypes.ControlV2CandidateLocal},
+		{Address: "106.59.202.56:13374", Source: mtypes.ControlV2CandidateSTUN},
+	}
+	got := mergeControlCandidates(fresh, stunCandidates(stale))
+	if len(got) != 2 {
+		t.Fatalf("candidates = %#v, want current local plus STUN", got)
+	}
+	if got[0].Address != "10.38.5.1:16386" || got[0].Source != mtypes.ControlV2CandidateLocal {
+		t.Fatalf("current local lost: %#v", got)
+	}
+	if got[1].Address != "106.59.202.56:13374" || got[1].Source != mtypes.ControlV2CandidateSTUN {
+		t.Fatalf("STUN mapping lost: %#v", got)
+	}
+}
+
 func TestSuperSTUNDiscoversBothFamiliesFromSingleHostname(t *testing.T) {
 	// Given
 	bind := newSameBindSTUNFake(40103)

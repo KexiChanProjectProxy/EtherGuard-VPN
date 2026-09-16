@@ -125,6 +125,11 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 func superCandidateCost(candidate mtypes.APIConnURLCandidate) int {
 	switch candidate.Source {
 	case mtypes.APIConnURLSourceLocal:
+		if candidateHostIsIPv6(candidate.URL) {
+			// Campus/global IPv6 locals are often unreachble from WAN
+			// peers; try STUN/public IPv4 before them.
+			return 25000
+		}
 		return 0
 	case mtypes.APIConnURLSourceSTUN:
 		return 20000
@@ -137,6 +142,15 @@ func superCandidateCost(candidate mtypes.APIConnURLCandidate) int {
 	default:
 		return 40000
 	}
+}
+
+func candidateHostIsIPv6(url string) bool {
+	host, _, err := net.SplitHostPort(url)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
 }
 
 func (et *endpoint_trylist) UpdateP2P(url string) {
@@ -364,6 +378,7 @@ type Peer struct {
 	endpoint_trylist *endpoint_trylist
 
 	LastPacketReceivedAdd1Sec atomic.Value // *time.Time
+	lastEndpointChange atomic.Int64
 
 	SingleWayLatency filterwindow
 	OutboundLatency  filterwindow
@@ -705,9 +720,6 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	peer.ConnAF = af
 	peer.Unlock()
 	if peer.GetEndpointDstStr() == connIP {
-		//if peer.device.LogLevel.LogInternal {
-		//	fmt.Printf("Internal: Same as original endpoint:%v, skip for NodeID:%v\n", connurl, peer.ID.ToString())
-		//}
 		return nil
 	}
 	endpoint, err := peer.device.net.bind.ParseEndpoint(connIP)
@@ -721,6 +733,7 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 		return errEndpointBlacklisted
 	}
 	peer.SetEndpointFromPacket(endpoint)
+	peer.lastEndpointChange.Store(time.Now().UnixNano())
 	return nil
 }
 
@@ -735,6 +748,20 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		defer peer.Unlock()
 		if peer.disableRoaming {
 			return false, false
+		}
+		if peer.endpoint != nil {
+			if loaded := peer.LastPacketReceivedAdd1Sec.Load(); loaded != nil {
+				if ts, ok := loaded.(*time.Time); ok && ts != nil {
+					timeout := mtypes.S2TD(peer.device.EdgeConfig.DynamicRoute.PeerAliveTimeout)
+					if !ts.Add(timeout).Before(time.Now()) {
+						oldIP := peer.endpoint.DstIP()
+						newIP := endpoint.DstIP()
+						if oldIP != nil && newIP != nil && !oldIP.Equal(newIP) {
+							return false, false
+						}
+					}
+				}
+			}
 		}
 		localAddressChanged := peer.ID == mtypes.NodeID_SuperNode &&
 			(peer.endpoint == nil || !peer.endpoint.DstIP().Equal(endpoint.DstIP()))

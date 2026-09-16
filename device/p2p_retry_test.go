@@ -22,20 +22,17 @@ func superCandidates(candidates ...mtypes.APIConnURLCandidate) mtypes.API_connur
 func TestEndpointTrylistOrdersSuperCandidatesByClassAndFamilyPreference(t *testing.T) {
 	candidates := superCandidates(
 		mtypes.APIConnURLCandidate{URL: "192.0.2.20:51820", Source: mtypes.APIConnURLSourceLocal},
-		mtypes.APIConnURLCandidate{URL: "[2001:db8::20]:51820", Source: mtypes.APIConnURLSourceLocal},
 		mtypes.APIConnURLCandidate{URL: "192.0.2.30:51820", Source: mtypes.APIConnURLSourceSTUN},
-		mtypes.APIConnURLCandidate{URL: "[2001:db8::30]:51820", Source: mtypes.APIConnURLSourceSTUN},
 		mtypes.APIConnURLCandidate{URL: "192.0.2.40:51820", Source: mtypes.APIConnURLSourceObserved, ReporterCount: 16},
-		mtypes.APIConnURLCandidate{URL: "[2001:db8::40]:51820", Source: mtypes.APIConnURLSourceObserved, ReporterCount: 16},
+		mtypes.APIConnURLCandidate{URL: "192.0.2.50:51820", Source: mtypes.APIConnURLSourceObserved, ReporterCount: 2},
 	)
 	cases := []struct {
 		name     string
 		afPrefer int
 		want     []string
 	}{
-		{"no family preference", 0, []string{"192.0.2.20:51820", "[2001:db8::20]:51820", "192.0.2.30:51820", "[2001:db8::30]:51820", "192.0.2.40:51820", "[2001:db8::40]:51820"}},
-		{"prefer ipv4 within every class", 4, []string{"192.0.2.20:51820", "[2001:db8::20]:51820", "192.0.2.30:51820", "[2001:db8::30]:51820", "192.0.2.40:51820", "[2001:db8::40]:51820"}},
-		{"prefer ipv6 within every class", 6, []string{"[2001:db8::20]:51820", "192.0.2.20:51820", "[2001:db8::30]:51820", "192.0.2.30:51820", "[2001:db8::40]:51820", "192.0.2.40:51820"}},
+		{"no family preference", 0, []string{"192.0.2.20:51820", "192.0.2.30:51820", "192.0.2.40:51820", "192.0.2.50:51820"}},
+		{"prefer ipv4", 4, []string{"192.0.2.20:51820", "192.0.2.30:51820", "192.0.2.40:51820", "192.0.2.50:51820"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +75,15 @@ func TestEndpointTrylistRanksObservedCandidatesByReporterCountThenURL(t *testing
 	want := []string{"192.0.2.80:51820", "192.0.2.70:51820", "192.0.2.90:51820"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidate order = %v, want %v", got, want)
+	}
+}
+
+func TestSuperCandidateCostDeprioritizesLocalIPv6BehindSTUN(t *testing.T) {
+	local4 := superCandidateCost(mtypes.APIConnURLCandidate{URL: "192.0.2.1:51820", Source: mtypes.APIConnURLSourceLocal})
+	local6 := superCandidateCost(mtypes.APIConnURLCandidate{URL: "[2001:db8::1]:51820", Source: mtypes.APIConnURLSourceLocal})
+	stun4 := superCandidateCost(mtypes.APIConnURLCandidate{URL: "192.0.2.2:51820", Source: mtypes.APIConnURLSourceSTUN})
+	if local4 >= stun4 || stun4 >= local6 {
+		t.Fatalf("cost local4=%d stun4=%d local6=%d, want local4 < stun4 < local6", local4, stun4, local6)
 	}
 }
 
