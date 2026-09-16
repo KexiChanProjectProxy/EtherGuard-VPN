@@ -138,11 +138,48 @@ func GetExampleSuperConf(templatePath string, getDemo bool) (mtypes.SuperConfigV
 		DampingFilterRadius:        4,
 		ListenPortPriority:         mtypes.ListenPortPriority{{Port: intPtr(16386)}},
 		Peers:                      []mtypes.SuperConfigV2Peer{},
+		Cluster:                    nil,
 	}
 	if getDemo {
 		sconfig.Peers = []mtypes.SuperConfigV2Peer{{NodeID: 1, NodeName: "Node_01", ControlPSKey: device.RandomPSK().ToString(), AdditionalCost: 10}}
 	}
 	return sconfig, &fs.PathError{Path: "", Err: fmt.Errorf("no path provided")}
+}
+
+func GetExampleClusterConf() [2]mtypes.SuperConfigV2 {
+	first, _ := GetExampleSuperConf("", false)
+	second, _ := GetExampleSuperConf("", false)
+
+	first.NodeName = "NodeSuperA"
+	first.APIUrl = "http://127.0.0.1:3000"
+	second.NodeName = "NodeSuperB"
+	second.APIUrl = "http://127.0.0.1:3001"
+
+	const secret = "REPLACE_WITH_32_RANDOM_CHARS"
+	first.Cluster = &mtypes.SuperConfigV2Cluster{
+		SelfID:                  1,
+		Secret:                  secret,
+		Peers:                   []mtypes.SuperConfigV2ClusterPeer{{SuperID: 2, APIUrl: second.APIUrl}},
+		HeartbeatSeconds:        10,
+		DeadAfterSeconds:        30,
+		ReconnectMinSeconds:     1,
+		ReconnectMaxSeconds:     30,
+		RemoteStaleGraceSeconds: 600,
+		Compression:             "zstd",
+	}
+	second.Cluster = &mtypes.SuperConfigV2Cluster{
+		SelfID:                  2,
+		Secret:                  secret,
+		Peers:                   []mtypes.SuperConfigV2ClusterPeer{{SuperID: 1, APIUrl: first.APIUrl}},
+		HeartbeatSeconds:        10,
+		DeadAfterSeconds:        30,
+		ReconnectMinSeconds:     1,
+		ReconnectMaxSeconds:     30,
+		RemoteStaleGraceSeconds: 600,
+		Compression:             "zstd",
+	}
+
+	return [2]mtypes.SuperConfigV2{first, second}
 }
 
 func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {

@@ -51,6 +51,7 @@ const (
 	ControlV2ErrInvalidSTUNServer  = "invalid_stun_server"
 	ControlV2ErrInvalidAPIPrefix   = "invalid_api_prefix"
 	ControlV2ErrInvalidObservation = "invalid_observation"
+	ControlV2ErrInvalidCluster     = "invalid_cluster"
 )
 
 const (
@@ -677,26 +678,45 @@ func ParseControlV2Parameters(r io.Reader) (ControlV2Parameters, error) {
 // retained here for round-tripping but is `json:"-"` so a snapshot of the
 // Edge cannot leak it.
 type SuperNodeV2Ref struct {
-	APIUrl       string `yaml:"APIUrl" json:"-"`
-	APIPrefix    string `yaml:"APIPrefix" json:"-"`
-	NodeID       Vertex `yaml:"NodeID" json:"-"`
-	ControlPSKey string `yaml:"ControlPSKey" json:"-"`
+	APIUrl       string   `yaml:"APIUrl" json:"-"`
+	APIUrls      []string `yaml:"APIUrls,omitempty" json:"-"`
+	APIPrefix    string   `yaml:"APIPrefix" json:"-"`
+	NodeID       Vertex   `yaml:"NodeID" json:"-"`
+	ControlPSKey string   `yaml:"ControlPSKey" json:"-"`
 }
 
-// Validate verifies the API URL is parseable and the prefix is sane.
+// ResolveAPIUrls returns the normalized, deduplicated Super API URLs in
+// failover order. The legacy APIUrl always takes precedence when present.
+func (s *SuperNodeV2Ref) ResolveAPIUrls() []string {
+	resolved := make([]string, 0, len(s.APIUrls)+1)
+	seen := make(map[string]struct{}, len(s.APIUrls)+1)
+	appendURL := func(raw string) {
+		normalized := strings.TrimRight(raw, "/")
+		if _, ok := seen[normalized]; ok {
+			return
+		}
+		seen[normalized] = struct{}{}
+		resolved = append(resolved, normalized)
+	}
+	if s.APIUrl != "" {
+		appendURL(s.APIUrl)
+	}
+	for _, raw := range s.APIUrls {
+		appendURL(raw)
+	}
+	return resolved
+}
+
+// Validate verifies every resolved API URL is parseable and the prefix is sane.
 func (s *SuperNodeV2Ref) Validate() error {
-	if s.APIUrl == "" {
+	apiURLs := s.ResolveAPIUrls()
+	if len(apiURLs) == 0 {
 		return newControlV2Error(ControlV2ErrMissingField, "APIUrl", "super API URL is required")
 	}
-	u, err := url.Parse(s.APIUrl)
-	if err != nil {
-		return newControlV2Error(ControlV2ErrInvalidURI, "APIUrl", "%v", err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return newControlV2Error(ControlV2ErrInvalidURI, "APIUrl", "scheme must be http or https, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return newControlV2Error(ControlV2ErrInvalidURI, "APIUrl", "host is required")
+	for i, raw := range apiURLs {
+		if err := validateControlHTTPURL(fmt.Sprintf("APIUrls[%d]", i), raw); err != nil {
+			return err
+		}
 	}
 	if s.APIPrefix != "" && !strings.HasPrefix(s.APIPrefix, "/") {
 		return newControlV2Error(ControlV2ErrInvalidAPIPrefix, "APIPrefix", "must start with /")
@@ -710,12 +730,134 @@ func (s *SuperNodeV2Ref) Validate() error {
 	return nil
 }
 
+func validateControlHTTPURL(field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return newControlV2Error(ControlV2ErrInvalidURI, field, "%v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return newControlV2Error(ControlV2ErrInvalidURI, field, "scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return newControlV2Error(ControlV2ErrInvalidURI, field, "host is required")
+	}
+	return nil
+}
+
 // SuperConfigV2Peer is the Super-side per-Edge metadata.
 type SuperConfigV2Peer struct {
 	NodeID         Vertex  `yaml:"NodeID"`
 	NodeName       string  `yaml:"NodeName"`
 	ControlPSKey   string  `yaml:"ControlPSKey" json:"-"`
 	AdditionalCost float64 `yaml:"AdditionalCost"`
+}
+
+// SuperConfigV2ClusterPeer identifies another Super and its control API URL.
+type SuperConfigV2ClusterPeer struct {
+	SuperID Vertex `yaml:"SuperID"`
+	APIUrl  string `yaml:"APIUrl"`
+}
+
+// SuperConfigV2Cluster configures the optional active-active Super cluster.
+// Secret is configuration-only and must never be exposed through JSON APIs.
+type SuperConfigV2Cluster struct {
+	SelfID                  Vertex                     `yaml:"SelfID"`
+	Secret                  string                     `yaml:"Secret" json:"-"`
+	Peers                   []SuperConfigV2ClusterPeer `yaml:"Peers"`
+	HeartbeatSeconds        float64                    `yaml:"HeartbeatSeconds"`
+	DeadAfterSeconds        float64                    `yaml:"DeadAfterSeconds"`
+	ReconnectMinSeconds     float64                    `yaml:"ReconnectMinSeconds"`
+	ReconnectMaxSeconds     float64                    `yaml:"ReconnectMaxSeconds"`
+	RemoteStaleGraceSeconds float64                    `yaml:"RemoteStaleGraceSeconds"`
+	Compression             string                     `yaml:"Compression"`
+}
+
+// WithDefaults returns a copy with all zero-valued cluster settings filled.
+func (c *SuperConfigV2Cluster) WithDefaults() SuperConfigV2Cluster {
+	return c.withDefaults(0)
+}
+
+func (c *SuperConfigV2Cluster) withDefaults(peerAliveTimeoutSeconds float64) SuperConfigV2Cluster {
+	out := *c
+	if out.HeartbeatSeconds == 0 {
+		out.HeartbeatSeconds = 10
+	}
+	if out.DeadAfterSeconds == 0 {
+		out.DeadAfterSeconds = 30
+	}
+	if out.ReconnectMinSeconds == 0 {
+		out.ReconnectMinSeconds = 1
+	}
+	if out.ReconnectMaxSeconds == 0 {
+		out.ReconnectMaxSeconds = 30
+	}
+	if out.RemoteStaleGraceSeconds == 0 {
+		out.RemoteStaleGraceSeconds = math.Max(600, peerAliveTimeoutSeconds)
+	}
+	if out.Compression == "" {
+		out.Compression = "zstd"
+	}
+	return out
+}
+
+// Validate checks cluster identity, peer endpoints, timing relationships, and
+// the configured compression mode. Zero-valued optional settings use defaults.
+func (c *SuperConfigV2Cluster) Validate(peerAliveTimeoutSeconds float64) error {
+	if c.SelfID == 0 || c.SelfID.IsSpecial() {
+		return newControlV2Error(ControlV2ErrInvalidNodeID, "Cluster.SelfID", "cluster SelfID must be non-zero and non-special")
+	}
+	if c.Secret == "" {
+		return newControlV2Error(ControlV2ErrMissingField, "Cluster.Secret", "cluster secret is required")
+	}
+	if len(c.Secret) < 16 {
+		return newControlV2Error(ControlV2ErrInvalidCluster, "Cluster.Secret", "cluster secret must be at least 16 bytes")
+	}
+
+	seen := make(map[Vertex]struct{}, len(c.Peers))
+	for i, peer := range c.Peers {
+		field := fmt.Sprintf("Cluster.Peers[%d]", i)
+		if peer.SuperID == 0 || peer.SuperID.IsSpecial() {
+			return newControlV2Error(ControlV2ErrInvalidNodeID, field+".SuperID", "peer SuperID must be non-zero and non-special")
+		}
+		if peer.SuperID == c.SelfID {
+			return newControlV2Error(ControlV2ErrInvalidCluster, field+".SuperID", "peer SuperID must differ from SelfID")
+		}
+		if _, ok := seen[peer.SuperID]; ok {
+			return newControlV2Error(ControlV2ErrInvalidCluster, field+".SuperID", "duplicate peer SuperID %d", peer.SuperID)
+		}
+		seen[peer.SuperID] = struct{}{}
+		if peer.APIUrl == "" {
+			return newControlV2Error(ControlV2ErrMissingField, field+".APIUrl", "peer APIUrl is required")
+		}
+		if err := validateControlHTTPURL(field+".APIUrl", peer.APIUrl); err != nil {
+			return err
+		}
+	}
+
+	effective := c.withDefaults(peerAliveTimeoutSeconds)
+	if !validPositiveSeconds(effective.HeartbeatSeconds) {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "Cluster.HeartbeatSeconds", "must be positive and finite")
+	}
+	if !validPositiveSeconds(effective.DeadAfterSeconds) || effective.DeadAfterSeconds <= effective.HeartbeatSeconds {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "Cluster.DeadAfterSeconds", "must be positive, finite, and greater than HeartbeatSeconds")
+	}
+	if !validPositiveSeconds(effective.ReconnectMinSeconds) {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "Cluster.ReconnectMinSeconds", "must be positive and finite")
+	}
+	if !validPositiveSeconds(effective.ReconnectMaxSeconds) || effective.ReconnectMaxSeconds < effective.ReconnectMinSeconds {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "Cluster.ReconnectMaxSeconds", "must be positive, finite, and at least ReconnectMinSeconds")
+	}
+	if !validPositiveSeconds(effective.RemoteStaleGraceSeconds) || effective.RemoteStaleGraceSeconds < peerAliveTimeoutSeconds {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "Cluster.RemoteStaleGraceSeconds", "must be positive, finite, and at least PeerAliveTimeoutSeconds")
+	}
+	if effective.Compression != "zstd" && effective.Compression != "none" {
+		return newControlV2Error(ControlV2ErrInvalidCluster, "Cluster.Compression", "must be zstd or none")
+	}
+	return nil
+}
+
+func validPositiveSeconds(seconds float64) bool {
+	return seconds > 0 && !math.IsNaN(seconds) && !math.IsInf(seconds, 0)
 }
 
 // Validate ensures the peer has a real NodeID and a control PSKey.
@@ -762,6 +904,7 @@ type SuperConfigV2 struct {
 	ListenPortPriority         ListenPortPriority          `yaml:"ListenPortPriority,omitempty"`
 	EndpointBlacklist          []string                    `yaml:"EndpointBlacklist,omitempty"`
 	Peers                      []SuperConfigV2Peer         `yaml:"Peers"`
+	Cluster                    *SuperConfigV2Cluster       `yaml:"Cluster,omitempty"`
 }
 
 // Validate enforces non-empty required fields and rejects any leftover
@@ -804,6 +947,11 @@ func (c *SuperConfigV2) Validate() error {
 	}
 	for i := range c.Peers {
 		if err := c.Peers[i].Validate(); err != nil {
+			return err
+		}
+	}
+	if c.Cluster != nil {
+		if err := c.Cluster.Validate(c.PeerAliveTimeoutSeconds); err != nil {
 			return err
 		}
 	}
