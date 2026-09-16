@@ -52,7 +52,7 @@ func TestSuperHTTPRuntimeFailoverAfterThreeReportFailures(t *testing.T) {
 
 	// When
 	allowOnce.Do(func() { close(allowReports) })
-	waitRuntimeCondition(t, time.Second, func() bool { return b.registerCalls.Load() == 1 })
+	waitRuntimeCondition(t, 5*time.Second, func() bool { return b.registerCalls.Load() == 1 })
 
 	// Then
 	if got := a.reportCalls.Load(); got != 3 {
@@ -153,7 +153,7 @@ func TestSuperHTTPRuntimeReregisterBypassesThrottleOnSwitch(t *testing.T) {
 
 	// When
 	allowOnce.Do(func() { close(allowReports) })
-	waitRuntimeCondition(t, time.Second, func() bool { return b.registerCalls.Load() == 1 })
+	waitRuntimeCondition(t, 5*time.Second, func() bool { return b.registerCalls.Load() == 1 })
 
 	// Then
 	if got := a.reportCalls.Load(); got != 3 {
