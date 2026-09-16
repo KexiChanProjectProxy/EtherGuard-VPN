@@ -3,6 +3,7 @@ package gencfg
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -136,6 +137,107 @@ func TestGetExampleSuperConfListenPortPriority(t *testing.T) {
 	}
 }
 
+func TestGenSuperCfgClusterEmitsAPIUrls(t *testing.T) {
+	t.Run("with cluster", func(t *testing.T) {
+		// Given
+		outputDir := t.TempDir()
+		examples := GetExampleClusterConf()
+		inputPath := writeSuperGeneratorInputWithCluster(t, outputDir, examples[0].Cluster)
+
+		// When
+		err := GenSuperCfg(inputPath, false)
+
+		// Then
+		if err != nil {
+			t.Fatalf("GenSuperCfg() error = %v", err)
+		}
+		wantURLs := []string{examples[0].APIUrl, examples[0].Cluster.Peers[0].APIUrl}
+		var super mtypes.SuperConfigV2
+		if err := yaml.Unmarshal(readGeneratedFile(t, outputDir, "TestNet_super.yaml"), &super); err != nil {
+			t.Fatalf("unmarshal generated Super config: %v", err)
+		}
+		if super.Cluster == nil {
+			t.Fatal("generated Super Cluster is nil")
+		}
+		if super.Cluster.SelfID != examples[0].Cluster.SelfID {
+			t.Fatalf("generated Cluster.SelfID = %d, want %d", super.Cluster.SelfID, examples[0].Cluster.SelfID)
+		}
+		if !reflect.DeepEqual(super.Cluster.Peers, examples[0].Cluster.Peers) {
+			t.Fatalf("generated Cluster.Peers = %#v, want %#v", super.Cluster.Peers, examples[0].Cluster.Peers)
+		}
+		for _, name := range []string{"TestNet_edge1.yaml", "TestNet_edge2.yaml", "TestNet_edge3.yaml"} {
+			data := readGeneratedFile(t, outputDir, name)
+			var edge mtypes.EdgeConfigV2
+			if err := yaml.Unmarshal(data, &edge); err != nil {
+				t.Fatalf("unmarshal %s: %v", name, err)
+			}
+			if edge.SuperNodeV2.APIUrl != "" {
+				t.Errorf("%s SuperNodeV2.APIUrl = %q, want empty", name, edge.SuperNodeV2.APIUrl)
+			}
+			if !reflect.DeepEqual(edge.SuperNodeV2.APIUrls, wantURLs) {
+				t.Errorf("%s SuperNodeV2.APIUrls = %#v, want %#v", name, edge.SuperNodeV2.APIUrls, wantURLs)
+			}
+			if !strings.Contains(string(data), "APIUrls:") {
+				t.Errorf("%s YAML is missing APIUrls", name)
+			}
+		}
+	})
+
+	t.Run("without cluster", func(t *testing.T) {
+		// Given
+		outputDir := t.TempDir()
+		inputPath := writeSuperGeneratorInput(t, outputDir)
+
+		// When
+		err := GenSuperCfg(inputPath, false)
+
+		// Then
+		if err != nil {
+			t.Fatalf("GenSuperCfg() error = %v", err)
+		}
+		var super mtypes.SuperConfigV2
+		if err := yaml.Unmarshal(readGeneratedFile(t, outputDir, "TestNet_super.yaml"), &super); err != nil {
+			t.Fatalf("unmarshal generated Super config: %v", err)
+		}
+		if super.Cluster != nil {
+			t.Fatalf("generated Super Cluster = %#v, want nil", super.Cluster)
+		}
+		data := readGeneratedFile(t, outputDir, "TestNet_edge1.yaml")
+		if strings.Contains(string(data), "APIUrls:") {
+			t.Fatal("non-cluster edge YAML emitted APIUrls")
+		}
+		var edge mtypes.EdgeConfigV2
+		if err := yaml.Unmarshal(data, &edge); err != nil {
+			t.Fatalf("unmarshal TestNet_edge1.yaml: %v", err)
+		}
+		if edge.SuperNodeV2.APIUrl != "http://127.0.0.1:3456" {
+			t.Fatalf("SuperNodeV2.APIUrl = %q, want http://127.0.0.1:3456", edge.SuperNodeV2.APIUrl)
+		}
+		if len(edge.SuperNodeV2.APIUrls) != 0 {
+			t.Fatalf("SuperNodeV2.APIUrls = %#v, want empty", edge.SuperNodeV2.APIUrls)
+		}
+	})
+}
+
+func TestGenSuperCfgClusterRejectsSpecialSelfID(t *testing.T) {
+	// Given
+	outputDir := t.TempDir()
+	cluster := *GetExampleClusterConf()[0].Cluster
+	cluster.SelfID = mtypes.NodeID_SuperNode
+	inputPath := writeSuperGeneratorInputWithCluster(t, outputDir, &cluster)
+
+	// When
+	err := GenSuperCfg(inputPath, false)
+
+	// Then
+	if err == nil {
+		t.Fatal("GenSuperCfg() error = nil, want Cluster.Validate failure")
+	}
+	if got := mtypes.ErrorCode(err); got != mtypes.ControlV2ErrInvalidNodeID {
+		t.Fatalf("ErrorCode = %q, want %q", got, mtypes.ControlV2ErrInvalidNodeID)
+	}
+}
+
 func writeSuperGeneratorInput(t *testing.T, outputDir string) string {
 	t.Helper()
 	input := "Config output dir: " + outputDir + `
@@ -159,6 +261,50 @@ Edge Node:
   IPv6 LL range: fe80::1:0/112
 `
 	path := filepath.Join(t.TempDir(), "gensuper.yaml")
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatalf("write generator input: %v", err)
+	}
+	return path
+}
+
+func writeSuperGeneratorInputWithCluster(t *testing.T, outputDir string, cluster *mtypes.SuperConfigV2Cluster) string {
+	t.Helper()
+	if cluster == nil {
+		t.Fatal("cluster is required")
+	}
+	clusterBytes, err := yaml.Marshal(cluster)
+	if err != nil {
+		t.Fatalf("marshal cluster: %v", err)
+	}
+	var clusterYAML strings.Builder
+	clusterYAML.WriteString("  Cluster:\n")
+	for _, line := range strings.Split(strings.TrimSuffix(string(clusterBytes), "\n"), "\n") {
+		clusterYAML.WriteString("    ")
+		clusterYAML.WriteString(line)
+		clusterYAML.WriteByte('\n')
+	}
+	examples := GetExampleClusterConf()
+	input := "Config output dir: " + outputDir + `
+Enable generated config overwrite: true
+Add NodeID to the interface name: true
+ConfigTemplate for super node: ""
+ConfigTemplate for edge node: ""
+Network name: TestNet
+Super Node:
+  API URL: ` + examples[0].APIUrl + `
+  API prefix: /edge/v2
+  STUN servers:
+  - stun:203.0.113.10:3478
+  - 'stuns:[2001:db8::10]:5349'
+  Node ID: 10
+` + clusterYAML.String() + `Edge Node:
+  Node IDs: "[1~3]"
+  MacAddress prefix: ""
+  IPv4 range: 192.0.2.0/24
+  IPv6 range: 2001:db8:1::/64
+  IPv6 LL range: fe80::1:0/112
+`
+	path := filepath.Join(t.TempDir(), "gensuper_cluster.yaml")
 	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
 		t.Fatalf("write generator input: %v", err)
 	}

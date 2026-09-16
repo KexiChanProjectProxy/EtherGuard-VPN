@@ -16,21 +16,22 @@ type SMCfg struct {
 	NetworkName         string `yaml:"Network name"`
 	NetworkIFNameID     bool   `yaml:"Add NodeID to the interface name"`
 	Supernode           struct {
-		APIURL                     string        `yaml:"API URL"`
-		APIPrefix                  string        `yaml:"API prefix"`
-		STUNServers                []string      `yaml:"STUN servers"`
-		STUNRequestTimeoutSeconds  float64       `yaml:"STUN request timeout seconds"`
-		STUNRefreshIntervalSeconds float64       `yaml:"STUN refresh interval seconds"`
-		PollIntervalSeconds        float64       `yaml:"Poll interval seconds"`
-		ReportIntervalSeconds      float64       `yaml:"Report interval seconds"`
-		HeartbeatIntervalSeconds   float64       `yaml:"Heartbeat interval seconds"`
-		EventReplay                uint64        `yaml:"Event replay"`
-		PeerAliveTimeoutSeconds    float64       `yaml:"Peer alive timeout seconds"`
-		DampingFilterRadius        uint64        `yaml:"Damping filter radius"`
-		UsePSKForInterEdge         *bool         `yaml:"Use PSK for inter-edge"`
-		ManagementUser             string        `yaml:"Management user"`
-		ManagementPasswordHash     string        `yaml:"Management password hash"`
-		NodeID                     mtypes.Vertex `yaml:"Node ID"`
+		APIURL                     string                       `yaml:"API URL"`
+		APIPrefix                  string                       `yaml:"API prefix"`
+		STUNServers                []string                     `yaml:"STUN servers"`
+		STUNRequestTimeoutSeconds  float64                      `yaml:"STUN request timeout seconds"`
+		STUNRefreshIntervalSeconds float64                      `yaml:"STUN refresh interval seconds"`
+		PollIntervalSeconds        float64                      `yaml:"Poll interval seconds"`
+		ReportIntervalSeconds      float64                      `yaml:"Report interval seconds"`
+		HeartbeatIntervalSeconds   float64                      `yaml:"Heartbeat interval seconds"`
+		EventReplay                uint64                       `yaml:"Event replay"`
+		PeerAliveTimeoutSeconds    float64                      `yaml:"Peer alive timeout seconds"`
+		DampingFilterRadius        uint64                       `yaml:"Damping filter radius"`
+		UsePSKForInterEdge         *bool                        `yaml:"Use PSK for inter-edge"`
+		ManagementUser             string                       `yaml:"Management user"`
+		ManagementPasswordHash     string                       `yaml:"Management password hash"`
+		NodeID                     mtypes.Vertex                `yaml:"Node ID"`
+		Cluster                    *mtypes.SuperConfigV2Cluster `yaml:"Cluster,omitempty"`
 	} `yaml:"Super Node"`
 	EdgeNode struct {
 		NodeIDs     string `yaml:"Node IDs"`

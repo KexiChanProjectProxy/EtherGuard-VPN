@@ -167,7 +167,7 @@ func GenSuperCfg(configPath string, printExample bool) error {
 		edge.Interface.IPv4CIDR = input.EdgeNode.IPv4Range
 		edge.Interface.IPv6CIDR = input.EdgeNode.IPv6Range
 		edge.Interface.IPv6LLPrefix = input.EdgeNode.IPv6LLRange
-		edge.SuperNodeV2 = mtypes.SuperNodeV2Ref{APIUrl: super.APIUrl, APIPrefix: super.APIPrefix, NodeID: input.Supernode.NodeID, ControlPSKey: controlKey}
+		edge.SuperNodeV2 = edgeSuperNodeV2Ref(super, input.Supernode.NodeID, controlKey)
 		edge.Peers = clonePeersWithPairwisePSKs(edgeTemplate.Peers, super.UsePSKForInterEdge)
 		if err := edge.Validate(); err != nil {
 			return fmt.Errorf("validate Edge %d: %w", nodeID, err)
@@ -209,7 +209,7 @@ func validateSuperGeneratorInput(input *SMCfg) error {
 	if input.Supernode.NodeID == 0 {
 		input.Supernode.NodeID = 1
 	}
-	return nil
+	return validateSuperCluster(input.Supernode.Cluster, input.Supernode.PeerAliveTimeoutSeconds)
 }
 
 func applySuperInputs(super *mtypes.SuperConfigV2, input *SMCfg) {
@@ -240,6 +240,7 @@ func applySuperInputs(super *mtypes.SuperConfigV2, input *SMCfg) {
 	if input.Supernode.ManagementPasswordHash != "" {
 		super.ManagementAuth.PasswordHash = input.Supernode.ManagementPasswordHash
 	}
+	copySuperCluster(super, input.Supernode.Cluster)
 }
 
 func setPositiveFloat(target *float64, candidate float64) {

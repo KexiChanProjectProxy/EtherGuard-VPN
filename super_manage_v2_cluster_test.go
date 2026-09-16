@@ -18,6 +18,48 @@ import (
 
 const manageTestSelfID mtypes.Vertex = 7
 
+func TestManageBuildEdgeConfigV2APIUrls(t *testing.T) {
+	t.Run("with cluster", func(t *testing.T) {
+		// Given
+		base := validClusterBaseConfig()
+		mgr, _, _, _ := newClusterManageV2UnderTest(t, t.TempDir(), base, nil)
+
+		// When
+		edge := mgr.buildEdgeConfigV2(101, "edge-101", "control-key-101")
+
+		// Then
+		if edge.SuperNodeV2.APIUrl != "" {
+			t.Fatalf("APIUrl = %q, want empty", edge.SuperNodeV2.APIUrl)
+		}
+		wantURLs := []string{base.APIUrl, base.Cluster.Peers[0].APIUrl}
+		if !reflect.DeepEqual(edge.SuperNodeV2.APIUrls, wantURLs) {
+			t.Fatalf("APIUrls = %#v, want %#v", edge.SuperNodeV2.APIUrls, wantURLs)
+		}
+		if edge.SuperNodeV2.APIPrefix != base.APIPrefix {
+			t.Fatalf("APIPrefix = %q, want %q", edge.SuperNodeV2.APIPrefix, base.APIPrefix)
+		}
+		if edge.SuperNodeV2.ControlPSKey != "control-key-101" {
+			t.Fatalf("ControlPSKey = %q, want control-key-101", edge.SuperNodeV2.ControlPSKey)
+		}
+	})
+
+	t.Run("without cluster", func(t *testing.T) {
+		// Given
+		mgr, _, _, _ := newManageV2UnderTest(t)
+
+		// When
+		edge := mgr.buildEdgeConfigV2(101, "edge-101", "control-key-101")
+
+		// Then
+		if edge.SuperNodeV2.APIUrl != "http://127.0.0.1:3000" {
+			t.Fatalf("APIUrl = %q, want http://127.0.0.1:3000", edge.SuperNodeV2.APIUrl)
+		}
+		if len(edge.SuperNodeV2.APIUrls) != 0 {
+			t.Fatalf("APIUrls = %#v, want empty", edge.SuperNodeV2.APIUrls)
+		}
+	})
+}
+
 func TestManageAddPeerPersistsThenCommits(t *testing.T) {
 	// Given
 	mgr, state, published, dir := newClusterManageV2UnderTest(t, t.TempDir(), validClusterBaseConfig(), nil)

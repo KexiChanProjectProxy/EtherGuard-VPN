@@ -217,13 +217,27 @@ func (m *ManageV2) buildEdgeConfigV2(nodeID mtypes.Vertex, nodeName, controlPSKe
 	p.PrivKey = pri.ToString()
 	p.NodeID = nodeID
 	p.NodeName = nodeName
-	p.SuperNodeV2 = mtypes.SuperNodeV2Ref{
-		APIUrl:       m.baseConfig.APIUrl,
-		APIPrefix:    m.baseConfig.APIPrefix,
+	p.SuperNodeV2 = edgeSuperNodeV2Ref(m.baseConfig, controlPSKey)
+	return p
+}
+
+func edgeSuperNodeV2Ref(cfg mtypes.SuperConfigV2, controlPSKey string) mtypes.SuperNodeV2Ref {
+	ref := mtypes.SuperNodeV2Ref{
+		APIPrefix:    cfg.APIPrefix,
 		NodeID:       1, // non-special placeholder; concrete Super is identified by APIUrl+PSKey pair
 		ControlPSKey: controlPSKey,
 	}
-	return p
+	if cfg.Cluster == nil {
+		ref.APIUrl = cfg.APIUrl
+		return ref
+	}
+	urls := make([]string, 0, 1+len(cfg.Cluster.Peers))
+	urls = append(urls, cfg.APIUrl)
+	for _, peer := range cfg.Cluster.Peers {
+		urls = append(urls, peer.APIUrl)
+	}
+	ref.APIUrls = urls
+	return ref
 }
 
 // applyParameters overwrites the timing/STUN fields on the SuperConfigV2.
