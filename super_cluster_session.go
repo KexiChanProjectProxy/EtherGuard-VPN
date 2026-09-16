@@ -227,8 +227,12 @@ func (s *clusterSession) Send(envelope clusterEnvelope) error {
 // FreezeReaderForTest stops the session reader before it consumes another
 // message without closing the underlying connection.
 func (s *clusterSession) FreezeReaderForTest() {
-	if s != nil {
-		s.freezeReader.Store(true)
+	if s == nil {
+		return
+	}
+	s.freezeReader.Store(true)
+	if netConn, ok := s.conn.(net.Conn); ok {
+		_ = netConn.SetReadDeadline(s.wallNow().Add(-time.Second))
 	}
 }
 

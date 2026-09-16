@@ -296,3 +296,42 @@ func TestClusterSessionDrainsQueuedHelloBeforeHeartbeatTicker(t *testing.T) {
 	_ = session.Close()
 	_ = waitClusterSessionRun(t, run, time.Second)
 }
+
+func TestClusterSessionFreezeReaderStopsBlockedReadWithoutClosing(t *testing.T) {
+	// Given: a live pair with no heartbeats, so B's reader stays blocked in ReadMessage
+	// after hello. Freeze must not wait for the next envelope or the dead-after timeout.
+	baseline := runtime.NumGoroutine()
+	a, b := newClusterSessionTestPair(t, clusterSessionTestPairConfig{
+		mode: "none", heartbeat: time.Hour, deadAfter: 2 * time.Hour,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	runA := runClusterSession(ctx, a)
+	runB := runClusterSession(ctx, b)
+	waitClusterSessionRX(t, a, 1, time.Second)
+	waitClusterSessionRX(t, b, 1, time.Second)
+
+	// When: freeze is requested while B is blocked on the next record.
+	b.FreezeReaderForTest()
+
+	// Then: the reader parks without closing the underlying session.
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(time.Second)
+	defer timeout.Stop()
+	for !b.readerFrozen.Load() {
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatal("reader did not freeze while blocked on ReadMessage")
+		case err := <-runB:
+			t.Fatalf("B closed instead of freezing: %v", err)
+		}
+	}
+	if b.closed() {
+		t.Fatal("freezing the blocked reader closed the session")
+	}
+
+	closeClusterSessionPair(t, a, b, runA, runB)
+	assertClusterSessionGoroutines(t, baseline)
+}

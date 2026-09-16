@@ -62,6 +62,11 @@ func (s *clusterSession) readerLoop() error {
 		}
 		message, err := s.dec.ReadMessage()
 		if err != nil {
+			if s.freezeReader.Load() {
+				s.readerFrozen.Store(true)
+				<-s.done
+				return nil
+			}
 			if s.closed() {
 				return nil
 			}

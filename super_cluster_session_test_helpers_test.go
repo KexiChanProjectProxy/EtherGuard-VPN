@@ -163,6 +163,24 @@ func waitClusterEnvelope(t *testing.T, ch <-chan clusterEnvelope, timeout time.D
 	}
 }
 
+func waitClusterSessionRX(t *testing.T, session *clusterSession, want uint64, timeout time.Duration) {
+	t.Helper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		if session.Stats().RX.Messages >= want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("session RX messages = %d, want >= %d", session.Stats().RX.Messages, want)
+		}
+	}
+}
+
 func waitClusterSessionRun(t *testing.T, result <-chan error, timeout time.Duration) error {
 	t.Helper()
 	timer := time.NewTimer(timeout)
