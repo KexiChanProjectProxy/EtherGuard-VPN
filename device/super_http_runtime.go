@@ -21,6 +21,61 @@ type superHTTPReady struct {
 	v6     net.IP
 }
 
+type superSelector struct {
+	urls                      []string
+	idx                       int
+	epoch                     uint64
+	consecutiveReportFailures int
+	lastSuccess               time.Time
+	now                       func() time.Time
+}
+
+func (selector *superSelector) recordSuccess() {
+	selector.consecutiveReportFailures = 0
+	selector.lastSuccess = selector.now()
+}
+
+func (selector *superSelector) recordReportFailure(err error) {
+	if errors.Is(err, ErrControlUnknownPeer) {
+		return
+	}
+	selector.consecutiveReportFailures++
+}
+
+func (selector *superSelector) shouldRotate(reportInterval time.Duration) bool {
+	if len(selector.urls) <= 1 {
+		return false
+	}
+	if selector.consecutiveReportFailures >= 3 {
+		return true
+	}
+	window := 3 * reportInterval
+	if window < 15*time.Second {
+		window = 15 * time.Second
+	}
+	return selector.now().Sub(selector.lastSuccess) >= window
+}
+
+func (selector *superSelector) rotate() string {
+	if len(selector.urls) == 0 {
+		return ""
+	}
+	selector.idx = (selector.idx + 1) % len(selector.urls)
+	return selector.urls[selector.idx]
+}
+
+type SuperHTTPRuntimeOption func(*superHTTPRuntimeOptions)
+
+type superHTTPRuntimeOptions struct {
+	startIndex int
+}
+
+func WithStartIndex(index int) SuperHTTPRuntimeOption {
+	return func(options *superHTTPRuntimeOptions) {
+		options.startIndex = index
+	}
+}
+
 // SuperHTTPRuntime owns the Edge HTTP control-plane lifecycle.
 type SuperHTTPRuntime struct {
 	relayCostMS atomic.Uint64
@@ -28,6 +83,7 @@ type SuperHTTPRuntime struct {
 	device *Device
 	config mtypes.EdgeConfigV2
 	client *ControlHTTPClient
+	now    func() time.Time
 
 	ready chan superHTTPReady
 	done  chan struct{}
@@ -39,27 +95,69 @@ type SuperHTTPRuntime struct {
 	parameters       mtypes.ControlV2Parameters
 	generation       uint64
 	recoveryRequests map[mtypes.Vertex]time.Time
-	lastReregister   time.Time
+	selector         superSelector
+	lastReregister   map[uint64]time.Time
 	reregistering    bool
+	reregisterEpoch  uint64
 	reregisterWG     sync.WaitGroup
 	parameterUpdates chan struct{}
 	networkChanges   chan struct{}
 	readyInfo        superHTTPReady
 }
 
-func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2) *SuperHTTPRuntime {
+func NewSuperHTTPRuntime(device *Device, config mtypes.EdgeConfigV2, options ...SuperHTTPRuntimeOption) *SuperHTTPRuntime {
+	settings := superHTTPRuntimeOptions{}
+	for _, option := range options {
+		option(&settings)
+	}
+	urls := config.SuperNodeV2.ResolveAPIUrls()
+	startIndex := settings.startIndex
+	if startIndex < 0 || startIndex >= len(urls) {
+		startIndex = 0
+	}
+	baseURL := config.SuperNodeV2.APIUrl
+	if len(urls) > 0 {
+		baseURL = urls[startIndex]
+	}
+	now := time.Now
 	runtime := &SuperHTTPRuntime{
 		device:           device,
 		config:           config,
-		client:           NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey),
+		client:           NewControlHTTPClient(baseURL, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey),
+		now:              now,
 		ready:            make(chan superHTTPReady, 1),
 		done:             make(chan struct{}),
 		recoveryRequests: make(map[mtypes.Vertex]time.Time),
+		selector: superSelector{
+			urls:        urls,
+			idx:         startIndex,
+			lastSuccess: now(),
+			now:         now,
+		},
+		lastReregister:   make(map[uint64]time.Time),
 		parameterUpdates: make(chan struct{}, 1),
 		networkChanges:   make(chan struct{}, 1),
 	}
+	runtime.client.OnSuccess = runtime.recordControlSuccess
 	runtime.relayCostMS.Store(math.Float64bits(resolveRelayCostMS(config.RelayCostMS, nil)))
 	return runtime
+}
+
+func (runtime *SuperHTTPRuntime) SetClockForTest(now func() time.Time) {
+	if runtime == nil || now == nil {
+		return
+	}
+	runtime.mu.Lock()
+	runtime.now = now
+	runtime.selector.now = now
+	runtime.selector.lastSuccess = now()
+	runtime.mu.Unlock()
+}
+
+func (runtime *SuperHTTPRuntime) recordControlSuccess() {
+	runtime.mu.Lock()
+	runtime.selector.recordSuccess()
+	runtime.mu.Unlock()
 }
 
 func resolveRelayCostMS(override, serverDefault *float64) float64 {
@@ -106,14 +204,16 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	}
 	runtime.readyInfo = ready
 
-
 	local := localControlCandidates(runtime.device, ready)
 	runtime.setCandidates(local)
+	registerEpoch := runtime.client.Epoch()
 	register := runtime.registerRequest(ready, local)
 	snapshot, err := runtime.client.Register(ctx, &register)
 	if err == nil {
-		runtime.applySnapshot(snapshot)
-		runtime.refreshSTUN(ctx, snapshot.Parameters)
+		runtime.recordControlSuccess()
+		if runtime.applySnapshot(snapshot, registerEpoch) {
+			runtime.refreshSTUN(ctx, snapshot.Parameters)
+		}
 	} else if runtime.device != nil {
 		runtime.device.log.Errorf("HTTP control register failed; continuing with sync retry: %v", err)
 	}
@@ -122,7 +222,13 @@ func (runtime *SuperHTTPRuntime) run(ctx context.Context) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		err := runtime.client.Sync(ctx, runtime.applySnapshot)
+		err := runtime.client.Sync(ctx, func(snapshot *mtypes.ControlV2Snapshot) {
+			epoch := runtime.client.Epoch()
+			if runtime.client.Current() != snapshot {
+				return
+			}
+			runtime.applySnapshot(snapshot, epoch)
+		})
 		if err != nil && !errors.Is(err, context.Canceled) && runtime.device != nil {
 			runtime.device.log.Errorf("HTTP control sync stopped: %v", err)
 		}
@@ -169,7 +275,7 @@ func (runtime *SuperHTTPRuntime) registerRequest(ready superHTTPReady, candidate
 	request := mtypes.ControlV2RegisterRequest{
 		NodeID: runtime.config.NodeID, NodeName: runtime.config.NodeName,
 		Version: mtypes.ControlV2ProtocolVersion, ListenPort: ready.port, FwMark: ready.fwmark,
-		DesiredTTL: runtime.config.DefaultTTL, RequestedAt: time.Now(), Implementation: "etherguard",
+		DesiredTTL: runtime.config.DefaultTTL, RequestedAt: runtime.now(), Implementation: "etherguard",
 	}
 	if runtime.device != nil {
 		runtime.device.staticIdentity.RLock()
@@ -191,12 +297,22 @@ func (runtime *SuperHTTPRuntime) registerRequest(ready superHTTPReady, candidate
 	return request
 }
 
-func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapshot) {
+func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapshot, epochs ...uint64) bool {
 	if snapshot == nil {
-		return
+		return false
+	}
+	epoch := runtime.client.Epoch()
+	if len(epochs) > 0 {
+		epoch = epochs[0]
+	}
+	if runtime.client.Epoch() != epoch {
+		return false
 	}
 	runtime.apply.Lock()
 	defer runtime.apply.Unlock()
+	if runtime.client.Epoch() != epoch {
+		return false
+	}
 	if runtime.device != nil {
 		runtime.device.applyEndpointBlacklist(snapshot.Parameters)
 	}
@@ -222,6 +338,7 @@ func (runtime *SuperHTTPRuntime) applySnapshot(snapshot *mtypes.ControlV2Snapsho
 	if runtime.device != nil {
 		runtime.device.applySuperHTTPSnapshot(snapshot, uint32(runtime.config.DirectConnectivity.PersistentKeepaliveSeconds))
 	}
+	return true
 }
 
 func (runtime *SuperHTTPRuntime) requestNetworkRefresh() {
@@ -371,7 +488,7 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 		candidates := append([]mtypes.ControlV2Candidate(nil), runtime.candidates...)
 		runtime.mu.RUnlock()
 		relayCostMS := runtime.effectiveRelayCostMS()
-		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, RelayCostMS: &relayCostMS, Candidates: candidates, ReportedAt: time.Now()}
+		report := mtypes.ControlV2ReportRequest{NodeID: runtime.config.NodeID, RelayCostMS: &relayCostMS, Candidates: candidates, ReportedAt: runtime.now()}
 		if runtime.device != nil {
 			report.Candidates = runtime.device.filterControlCandidates(report.Candidates)
 			report.Pongs = runtime.device.superHTTPPongs()
@@ -383,25 +500,52 @@ func (runtime *SuperHTTPRuntime) reportLoop(ctx context.Context, ready superHTTP
 		cancel()
 		if err != nil && ctx.Err() == nil {
 			runtime.client.InvalidateHTTP()
+			runtime.mu.Lock()
+			runtime.selector.recordReportFailure(err)
+			runtime.mu.Unlock()
 			if errors.Is(err, ErrControlUnknownPeer) {
-				runtime.requestReregistration(ctx, ready)
+				runtime.requestReregistration(ctx, ready, runtime.client.Epoch())
 			}
 			if runtime.device != nil {
 				runtime.device.log.Errorf("HTTP control report failed: %v", err)
 			}
+		} else if err == nil {
+			runtime.recordControlSuccess()
 		}
+		if ctx.Err() != nil {
+			continue
+		}
+		runtime.mu.Lock()
+		if !runtime.selector.shouldRotate(interval) {
+			runtime.mu.Unlock()
+			continue
+		}
+		url := runtime.selector.rotate()
+		runtime.mu.Unlock()
+		runtime.apply.Lock()
+		epoch := runtime.client.SwitchBase(url)
+		runtime.mu.Lock()
+		runtime.selector.epoch = epoch
+		runtime.mu.Unlock()
+		runtime.apply.Unlock()
+		if runtime.device != nil {
+			runtime.device.log.Errorf("HTTP control failover to %s (epoch %d)", url, epoch)
+		}
+		runtime.requestReregistration(ctx, ready, epoch)
 	}
 }
 
-func (runtime *SuperHTTPRuntime) requestReregistration(ctx context.Context, ready superHTTPReady) {
-	now := time.Now()
+func (runtime *SuperHTTPRuntime) requestReregistration(ctx context.Context, ready superHTTPReady, epoch uint64) {
 	runtime.mu.Lock()
-	if runtime.reregistering || (!runtime.lastReregister.IsZero() && now.Sub(runtime.lastReregister) < 30*time.Second) {
+	now := runtime.now()
+	lastReregister, attempted := runtime.lastReregister[epoch]
+	if (runtime.reregistering && runtime.reregisterEpoch == epoch) || (attempted && now.Sub(lastReregister) < 30*time.Second) {
 		runtime.mu.Unlock()
 		return
 	}
-	runtime.lastReregister = now
+	runtime.lastReregister[epoch] = now
 	runtime.reregistering = true
+	runtime.reregisterEpoch = epoch
 	runtime.reregisterWG.Add(1)
 	runtime.mu.Unlock()
 
@@ -409,9 +553,11 @@ func (runtime *SuperHTTPRuntime) requestReregistration(ctx context.Context, read
 		success := false
 		defer func() {
 			runtime.mu.Lock()
-			runtime.reregistering = false
-			if success {
-				runtime.lastReregister = time.Now()
+			if runtime.reregistering && runtime.reregisterEpoch == epoch && runtime.client.Epoch() == epoch {
+				runtime.reregistering = false
+				if success {
+					runtime.lastReregister[epoch] = runtime.now()
+				}
 			}
 			runtime.mu.Unlock()
 			runtime.reregisterWG.Done()
@@ -431,7 +577,13 @@ func (runtime *SuperHTTPRuntime) requestReregistration(ctx context.Context, read
 			}
 			return
 		}
-		runtime.applySnapshot(snapshot)
+		if runtime.client.Epoch() != epoch {
+			return
+		}
+		runtime.recordControlSuccess()
+		if !runtime.applySnapshot(snapshot, epoch) {
+			return
+		}
 		runtime.refreshSTUN(ctx, snapshot.Parameters)
 		success = true
 	}()

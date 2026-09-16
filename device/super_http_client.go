@@ -48,6 +48,7 @@ type ControlHTTPClient struct {
 	Nonce           func() string
 	Jitter          func(time.Duration) time.Duration
 	Logf            func(string, ...any)
+	OnSuccess       func()
 
 	MinBackoff time.Duration
 	MaxBackoff time.Duration
@@ -98,6 +99,20 @@ func (c *ControlHTTPClient) Epoch() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.epoch
+}
+
+func (c *ControlHTTPClient) notifySuccess(epoch uint64) bool {
+	c.mu.Lock()
+	if c.epoch != epoch {
+		c.mu.Unlock()
+		return false
+	}
+	onSuccess := c.OnSuccess
+	c.mu.Unlock()
+	if onSuccess != nil {
+		onSuccess()
+	}
+	return true
 }
 
 // InvalidateHTTP drops cached TCP connections. After a WAN/NAT remap a
@@ -165,9 +180,7 @@ func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snap
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.epoch != epoch {
+		if !c.notifySuccess(epoch) {
 			return nil, false, ErrControlEpochChanged
 		}
 		return old, false, nil
@@ -180,14 +193,23 @@ func (c *ControlHTTPClient) Snapshot(ctx context.Context) (*mtypes.ControlV2Snap
 		return nil, false, e
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.epoch != epoch {
+		c.mu.Unlock()
 		return nil, false, ErrControlEpochChanged
 	}
 	if c.current != nil && !c.current.Accepts(&in) {
-		return c.current, false, nil
+		current := c.current
+		c.mu.Unlock()
+		if !c.notifySuccess(epoch) {
+			return nil, false, ErrControlEpochChanged
+		}
+		return current, false, nil
 	}
 	c.current = &in
+	c.mu.Unlock()
+	if !c.notifySuccess(epoch) {
+		return nil, false, ErrControlEpochChanged
+	}
 	return &in, true, nil
 }
 
@@ -340,6 +362,7 @@ func (c *ControlHTTPClient) Bootstrap(ctx context.Context) (*mtypes.ControlV2Par
 	if e != nil {
 		return nil, e
 	}
+	defer c.InvalidateHTTP()
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, &BootstrapStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
@@ -499,6 +522,9 @@ func (c *ControlHTTPClient) events(ctx context.Context, out chan<- mtypes.Contro
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("events: %s", resp.Status)
+	}
+	if !c.notifySuccess(epoch) {
+		return ErrControlEpochChanged
 	}
 	if connected != nil {
 		select {
