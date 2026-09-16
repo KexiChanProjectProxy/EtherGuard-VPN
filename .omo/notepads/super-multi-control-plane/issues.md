@@ -101,3 +101,19 @@ Cause: `FreezeReaderForTest` only set a flag. `readerLoop` checks it at the top 
 Fix: expire the read deadline when freeze is requested, and honor `freezeReader` on the resulting read error so the reader parks without closing the conn. Regression: `TestClusterSessionFreezeReaderStopsBlockedReadWithoutClosing` (hour heartbeat / 2h deadAfter — freeze cannot wait for traffic).
 
 Verification after both fixes: `go test -race -run TestE2EMultiSuperTopologySmoke -count=20` PASS; full scoped suite `-race -shuffle=on` ×3 PASS.
+
+---
+
+## 2026-09-16 — Frozen-reader shutdown e2e: watchdog window + dual-dial loser close (final flake)
+
+Observed on full-suite `-race -shuffle=on` attempt 5/5 after the freeze-wake fix (`4494da0`): `TestMultiSuperE2EShutdownWithBlockedLink` fatals with `freezing B's cluster reader closed the underlying session`. Isolation looked green until the incomplete first fix (hour-wide heartbeat/deadAfter only) still failed 1/30 in ~0.10s — too fast for a 2h watchdog, so that diagnosis was real but not sufficient.
+
+Two closers, both test-timing, neither a production bug:
+
+1. **Watchdog.** Empty `e2eClusterOptions{}` defaults heartbeat/deadAfter to 100ms/500ms. Freeze parks B's reader so `lastRX` stops. `Run`'s `deadTicker` is independent of freeze flags and closes when `now-lastRX > deadAfter`. Under race-suite load the 500ms window can elapse during the 1s `readerFrozen` wait. Production watchdog is correct; this test then calls `Shutdown` with a 3s budget, so the default window is also too tight for the rest of the scenario.
+
+2. **Dual-dial loser.** `WaitLinked` only waits for `state=="connected"`. Both supers dial (`ReconnectMinSeconds=0.05`). `adoptSession` keeps the session whose dialer SuperID is lower and `loser.Close()`s the other. A=Vertex(1), B=Vertex(2), so the stable session is A-as-dialer. If the test snapshots B's session while B-as-dialer is still current, the in-flight A-dial handshake then closes that pointer. Freeze parks the already-closed (or just-closed) session; `readerFrozen` is true and `closed()` is true within ~100ms. This is why the hour-wide window still failed in isolation.
+
+Fix in this test only: `heartbeat: time.Hour, deadAfter: 2*time.Hour` (same window as `TestClusterSessionFreezeReaderStopsBlockedReadWithoutClosing`) **and** wait until B's session is the hijack-stable winner before freeze. Assertions unchanged (readerFrozen, session still open after freeze, Shutdown nil within 3s, A's sessions/goroutines gone, edge dial refused).
+
+This is (hopefully truly) the last flake in this plan's QA journey. If another one appears in the verification passes, document it the same way.

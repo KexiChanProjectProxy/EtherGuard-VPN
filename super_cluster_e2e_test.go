@@ -1267,18 +1267,39 @@ func TestMultiSuperE2EEdge401OnMissingKeyRotates(t *testing.T) {
 
 func TestMultiSuperE2EShutdownWithBlockedLink(t *testing.T) {
 	baselineGoroutines := runtime.NumGoroutine()
-	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	// Freeze parks B's reader so lastRX stops advancing; default 100ms/500ms
+	// lets Run()'s watchdog close the session under race-suite load. WaitLinked
+	// can also snapshot a losing dual-dial session that adoptSession then
+	// loser.Close()s; wait for the lowest-dialer-SuperID winner first. Same
+	// wide window as TestClusterSessionFreezeReaderStopsBlockedReadWithoutClosing.
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{
+		heartbeat: time.Hour,
+		deadAfter: 2 * time.Hour,
+	})
 	WaitLinked(t, topology, 0, 1, 3*time.Second)
 	WaitLinked(t, topology, 1, 0, 3*time.Second)
 
-	bManager := topology.supers[1].runtime.Cluster()
-	bManager.mu.Lock()
-	bPeer := bManager.peers[topology.supers[0].id]
-	var bSession *clusterSession
-	if bPeer != nil {
-		bSession = bPeer.session
+	aID := topology.supers[0].id
+	bID := topology.supers[1].id
+	winnerDialer := aID
+	if bID < aID {
+		winnerDialer = bID
 	}
-	bManager.mu.Unlock()
+	bManager := topology.supers[1].runtime.Cluster()
+	var bSession *clusterSession
+	awaitE2E(t, 3*time.Second, func() bool {
+		bManager.mu.Lock()
+		defer bManager.mu.Unlock()
+		peer := bManager.peers[aID]
+		if peer == nil || peer.session == nil || peer.session.closed() {
+			return false
+		}
+		if clusterSessionDialerID(bID, aID, peer.dialer) != winnerDialer {
+			return false
+		}
+		bSession = peer.session
+		return true
+	})
 	if bSession == nil {
 		t.Fatal("B has no established cluster session to A")
 	}
