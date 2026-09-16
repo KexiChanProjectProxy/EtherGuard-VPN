@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/netip"
 	"sort"
@@ -35,12 +36,18 @@ type ControlStateConfig struct {
 	Graph              *graphpath.IG
 	Now                func() time.Time
 	Publish            func(mtypes.ControlV2Event)
+	SelfID             mtypes.Vertex
+	HLCHighWater       uint64
 }
 
 type controlPeerRecord struct {
 	view       mtypes.ControlV2Peer
 	controlKey string
 	candidates []mtypes.ControlV2Candidate
+	origin     mtypes.Vertex
+	version    ClusterVersion
+	receivedAt time.Time
+	observed   []mtypes.ControlV2ObservedEndpoint
 }
 
 type controlObservedVote struct {
@@ -66,6 +73,16 @@ type ControlState struct {
 	now                func() time.Time
 	publish            func(mtypes.ControlV2Event)
 	revision           uint64
+	selfID             mtypes.Vertex
+	hlc                *hlcClock
+	outbox             []clusterMutation
+	outboxCap          int
+	outboxNotify       chan struct{}
+	outboxSeq          uint64
+	resyncNeeded       bool
+	originLinks        map[mtypes.Vertex]originLinkStatus
+	liveTombstones     map[mtypes.Vertex]ClusterVersion
+	liveTombstoneTimes map[mtypes.Vertex]time.Time
 }
 
 func NewControlState(config ControlStateConfig) *ControlState {
@@ -83,6 +100,14 @@ func NewControlState(config ControlStateConfig) *ControlState {
 		usePSKForInterEdge: config.UsePSKForInterEdge,
 		now:                now,
 		publish:            config.Publish,
+		selfID:             config.SelfID,
+		hlc:                newHLCClock(now, config.HLCHighWater),
+		outbox:             make([]clusterMutation, 0, clusterOutboxCapacity),
+		outboxCap:          clusterOutboxCapacity,
+		outboxNotify:       make(chan struct{}, 1),
+		originLinks:        make(map[mtypes.Vertex]originLinkStatus),
+		liveTombstones:     make(map[mtypes.Vertex]ClusterVersion),
+		liveTombstoneTimes: make(map[mtypes.Vertex]time.Time),
 	}
 }
 
@@ -110,7 +135,8 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 		s.mu.Unlock()
 		return mtypes.ControlV2Snapshot{}, filterErr
 	}
-	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, PubKey: req.PubKey, LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: s.now()}
+	acceptedAt := s.now()
+	view := mtypes.ControlV2Peer{NodeID: req.NodeID, NodeName: req.NodeName, PubKey: req.PubKey, LatencyMS: map[mtypes.Vertex]float64{}, LastSeen: acceptedAt}
 	mergeCandidatesIntoView(&view, candidateState)
 	changed := !exists || old.view.NodeName != view.NodeName || old.view.PubKey != view.PubKey || old.view.LastSeen.IsZero() || old.controlKey != controlPSKey
 	if exists {
@@ -118,11 +144,35 @@ func (s *ControlState) Register(ctx context.Context, req mtypes.ControlV2Registe
 		changed = changed || !sameStrings(old.view.LocalV4, view.LocalV4) || !sameStrings(old.view.LocalV6, view.LocalV6) || !sameStrings(old.view.PublicV4, view.PublicV4) || !sameStrings(old.view.PublicV6, view.PublicV6)
 		view.RelayCostMS = cloneFloat64Ptr(old.view.RelayCostMS)
 	}
-	s.peers[req.NodeID] = &controlPeerRecord{view: view, controlKey: controlPSKey, candidates: candidateState}
+	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	record := &controlPeerRecord{
+		view:       view,
+		controlKey: controlPSKey,
+		candidates: candidateState,
+		origin:     s.selfID,
+		version:    version,
+		receivedAt: acceptedAt,
+	}
+	s.peers[req.NodeID] = record
 	s.clearObservedVotesForObserverLocked(req.NodeID)
 	changed = changed || s.observedHintsChangedLocked(beforeObserved)
 	if changed {
 		s.revision++
+		s.appendMutationLocked(clusterMutation{
+			Kind:    "peer_upsert",
+			NodeID:  req.NodeID,
+			Peer:    s.recordToClusterPeerLocked(record),
+			Version: version,
+			Origin:  s.selfID,
+		})
+	} else {
+		s.appendMutationLocked(clusterMutation{
+			Kind:    "peer_alive",
+			NodeID:  req.NodeID,
+			Alive:   &clusterAlive{NodeID: req.NodeID, Version: version, LastSeen: view.LastSeen},
+			Version: version,
+			Origin:  s.selfID,
+		})
 	}
 	rev := s.revision
 	snapshot := s.snapshotLocked(req.NodeID, rev)
@@ -164,9 +214,21 @@ func (s *ControlState) DeletePeer(ctx context.Context, nodeID mtypes.Vertex) err
 	s.clearObservedVotesForObserverLocked(nodeID)
 	delete(s.observedVotes, nodeID)
 	name := peer.view.NodeName
+	deletedAt := s.now()
+	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	evictedTombstone, tombstoneEvicted := s.setLiveTombstoneLocked(nodeID, version, deletedAt)
+	s.appendMutationLocked(clusterMutation{
+		Kind:    "peer_delete",
+		NodeID:  nodeID,
+		Version: version,
+		Origin:  s.selfID,
+	})
 	s.revision++
 	rev := s.revision
 	s.mu.Unlock()
+	if tombstoneEvicted {
+		log.Printf("control state live tombstone evicted: node_id=%d", evictedTombstone)
+	}
 	s.emit(mtypes.ControlV2EventPeerGone, nodeID, name, rev)
 	return nil
 }
@@ -271,7 +333,9 @@ func (s *ControlState) Revision() uint64 {
 func (s *ControlState) SweepTimeouts() int {
 	now := s.now()
 	s.mu.Lock()
+	s.sweepLiveTombstonesLocked(now)
 	removed := 0
+	evictedTombstones := make([]mtypes.Vertex, 0)
 	type affectedPeer struct {
 		name string
 		kind mtypes.ControlV2EventType
@@ -294,6 +358,18 @@ func (s *ControlState) SweepTimeouts() int {
 	for id, peer := range s.peers {
 		if s.peerAliveTimeout > 0 && !peer.view.LastSeen.Add(s.peerAliveTimeout).After(now) {
 			affected[id] = affectedPeer{name: peer.view.NodeName, kind: mtypes.ControlV2EventPeerGone}
+			if peer.origin == s.selfID {
+				version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+				if evicted, ok := s.setLiveTombstoneLocked(id, version, now); ok {
+					evictedTombstones = append(evictedTombstones, evicted)
+				}
+				s.appendMutationLocked(clusterMutation{
+					Kind:    "peer_delete",
+					NodeID:  id,
+					Version: version,
+					Origin:  s.selfID,
+				})
+			}
 			delete(s.peers, id)
 			s.clearObservedVotesForObserverLocked(id)
 			delete(s.observedVotes, id)
@@ -316,6 +392,9 @@ func (s *ControlState) SweepTimeouts() int {
 		}
 	}
 	s.mu.Unlock()
+	for _, evicted := range evictedTombstones {
+		log.Printf("control state live tombstone evicted: node_id=%d", evicted)
+	}
 	if event != nil {
 		s.emit(eventKind, event.NodeID, event.NodeName, rev)
 	}

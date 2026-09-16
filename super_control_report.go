@@ -29,8 +29,9 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		s.mu.Unlock()
 		return filterErr
 	}
+	acceptedAt := s.now()
 	peer.candidates = candidates
-	peer.view.LastSeen = s.now()
+	peer.view.LastSeen = acceptedAt
 	viewChanged := mergeCandidatesIntoView(&peer.view, peer.candidates)
 	if req.RelayCostMS != nil && (peer.view.RelayCostMS == nil || *peer.view.RelayCostMS != *req.RelayCostMS) {
 		peer.view.RelayCostMS = cloneFloat64Ptr(req.RelayCostMS)
@@ -42,9 +43,6 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 			continue
 		}
 		latencies[pong.DestNode] = pong.LatencyMS
-		if s.graph != nil {
-			s.graph.UpdateLatency(pong.SourceNode, pong.DestNode, pong.LatencyMS, pong.AliveSeconds, 0, true, true)
-		}
 	}
 	if !maps.Equal(peer.view.LatencyMS, latencies) {
 		peer.view.LatencyMS = latencies
@@ -57,7 +55,7 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 			votes = make(map[mtypes.Vertex]controlObservedVote)
 			s.observedVotes[observation.TargetNodeID] = votes
 		}
-		votes[req.NodeID] = controlObservedVote{address: observation.Address, receivedAt: s.now()}
+		votes[req.NodeID] = controlObservedVote{address: observation.Address, receivedAt: acceptedAt}
 	}
 	for _, target := range previousTargets {
 		if _, reported := reportedTargets[target]; reported {
@@ -70,12 +68,40 @@ func (s *ControlState) Report(ctx context.Context, req mtypes.ControlV2ReportReq
 		}
 	}
 	viewChanged = viewChanged || s.observedHintsChangedLocked(beforeObserved)
+	version := ClusterVersion{HLC: s.hlc.Next(), Origin: s.selfID}
+	peer.origin = s.selfID
+	peer.version = version
+	peer.receivedAt = acceptedAt
+	peer.observed = append(peer.observed[:0], req.Observed...)
 	if viewChanged {
 		s.revision++
+		s.appendMutationLocked(clusterMutation{
+			Kind:    "peer_upsert",
+			NodeID:  req.NodeID,
+			Peer:    s.recordToClusterPeerLocked(peer),
+			Version: version,
+			Origin:  s.selfID,
+		})
+	} else {
+		s.appendMutationLocked(clusterMutation{
+			Kind:    "peer_alive",
+			NodeID:  req.NodeID,
+			Alive:   &clusterAlive{NodeID: req.NodeID, Version: version, LastSeen: peer.view.LastSeen},
+			Version: version,
+			Origin:  s.selfID,
+		})
 	}
 	rev := s.revision
 	name := peer.view.NodeName
 	s.mu.Unlock()
+	if s.graph != nil {
+		for _, pong := range req.Pongs {
+			if pong.SourceNode != req.NodeID {
+				continue
+			}
+			s.graph.UpdateLatency(pong.SourceNode, pong.DestNode, pong.LatencyMS, pong.AliveSeconds, 0, true, true)
+		}
+	}
 	if viewChanged {
 		s.emit(mtypes.ControlV2EventPeerChange, req.NodeID, name, rev)
 	}
