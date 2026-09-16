@@ -77,3 +77,27 @@ Failed once during a full-suite `-race -shuffle=on` run at `waitRuntimeCondition
 Cause: `go test $(go list ./...)` runs packages in parallel. The root package's ~100s race suite starves the device package. After `close(allowReports)`, failover still needs three wall-clock `ReportInterval` (20ms) ticks plus B's register; those timers stretch under load and can miss a 1s deadline. Not a production logic bug — the 30s per-epoch reregister throttle is correctly bypassed on `SwitchBase` (new epoch).
 
 Fix: widen the B-register wait to 5s (matches the production report HTTP timeout) in this test and the sibling `TestSuperHTTPRuntimeFailoverAfterThreeReportFailures`, which uses the same close-reports-then-wait-for-B pattern.
+
+---
+
+## 2026-09-16 — Final load-dependent e2e flakes (mesh recheck + freeze-reader)
+
+These are the last flakes found in this plan's QA journey. Both only showed under full-suite `-race` load; each passed in isolation.
+
+### `TestE2EMultiSuperTopologySmoke/three_supers_form_a_full_mesh`
+
+Observed 1/3 full-suite runs: `super 1 links = 2 total, 1 connected; want 2/2` at the single-shot recheck after `awaitE2E` had already seen `connected==2` for all three supers.
+
+Cause: poll-then-recheck TOCTOU. `awaitE2E` confirmed the mesh, then a non-retrying `t.Fatalf` re-read `Status().Links` and caught a brief link flap. `WaitLinked` in the same file does not do this.
+
+Fix: fold `len(links)==2 && connected==2` for every super into the `awaitE2E` condition and delete the single-shot recheck. Correctness bar unchanged; only polling discipline.
+
+### `TestMultiSuperE2EShutdownWithBlockedLink`
+
+Observed on the next full-suite pass while verifying the mesh fix: `awaitE2E` at the `readerFrozen` wait timed out in 1s.
+
+Cause: `FreezeReaderForTest` only set a flag. `readerLoop` checks it at the top of the loop, but the reader is usually blocked in `ReadMessage`. Freeze then depended on the next heartbeat (100ms) arriving before the 500ms socket `deadAfter` timeout. Under load the timeout won, the session died with `ErrClusterLinkDead`, and `readerFrozen` stayed false.
+
+Fix: expire the read deadline when freeze is requested, and honor `freezeReader` on the resulting read error so the reader parks without closing the conn. Regression: `TestClusterSessionFreezeReaderStopsBlockedReadWithoutClosing` (hour heartbeat / 2h deadAfter — freeze cannot wait for traffic).
+
+Verification after both fixes: `go test -race -run TestE2EMultiSuperTopologySmoke -count=20` PASS; full scoped suite `-race -shuffle=on` ×3 PASS.
