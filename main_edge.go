@@ -61,21 +61,47 @@ func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfi
 	hydrateV2DirectConnectivity(econfig, econfigV2)
 }
 
-func bootstrapInitialBind(ctx context.Context, config mtypes.EdgeConfigV2) ([]uint16, error) {
-	client := device.NewControlHTTPClient(config.SuperNodeV2.APIUrl, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey)
-	parameters, err := client.Bootstrap(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap control parameters: %w", err)
+func bootstrapInitialBind(ctx context.Context, config mtypes.EdgeConfigV2) (ports []uint16, startIdx int, err error) {
+	urls := config.SuperNodeV2.ResolveAPIUrls()
+	var lastErr error
+	for idx, apiURL := range urls {
+		attemptBudget := 2 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			remaining := time.Until(deadline)
+			perURL := remaining / time.Duration(len(urls)-idx)
+			if perURL > attemptBudget {
+				attemptBudget = perURL
+			}
+		}
+
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptBudget)
+		client := device.NewControlHTTPClient(apiURL, config.SuperNodeV2.APIPrefix, config.NodeID, config.SuperNodeV2.ControlPSKey)
+		parameters, bootstrapErr := client.Bootstrap(attemptCtx)
+		cancelAttempt()
+		if bootstrapErr != nil {
+			lastErr = fmt.Errorf("bootstrap control parameters: %w", bootstrapErr)
+			var decodeErr *device.BootstrapDecodeError
+			var policyErr *device.BootstrapInvalidPolicyError
+			if errors.As(bootstrapErr, &decodeErr) || errors.As(bootstrapErr, &policyErr) {
+				return nil, 0, lastErr
+			}
+			continue
+		}
+
+		expanded, expandErr := parameters.ListenPortPriority.Expand()
+		if expandErr != nil {
+			return nil, 0, fmt.Errorf("expand bootstrap listen-port policy: %w", expandErr)
+		}
+		ports = make([]uint16, len(expanded))
+		for i, port := range expanded {
+			ports[i] = uint16(port)
+		}
+		return ports, idx, nil
 	}
-	ports, err := parameters.ListenPortPriority.Expand()
-	if err != nil {
-		return nil, fmt.Errorf("expand bootstrap listen-port policy: %w", err)
+	if lastErr == nil {
+		lastErr = errors.New("bootstrap control parameters: no Super API URLs configured")
 	}
-	candidates := make([]uint16, len(ports))
-	for i, port := range ports {
-		candidates[i] = uint16(port)
-	}
-	return candidates, nil
+	return nil, 0, lastErr
 }
 
 func waitInitialBind(ctx context.Context, results <-chan device.InitialBindResult) (uint16, error) {
@@ -94,37 +120,55 @@ func waitInitialBind(ctx context.Context, results <-chan device.InitialBindResul
 }
 
 func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (err error) {
-	if printExample {
+	return runEdge(edgeRunConfig{
+		configPath:   configPath,
+		useUAPI:      useUAPI,
+		printExample: printExample,
+		bindmode:     bindmode,
+	})
+}
+
+type edgeRunConfig struct {
+	configPath              string
+	useUAPI                 bool
+	printExample            bool
+	bindmode                string
+	beforeInitialBindDevice func()
+}
+
+func runEdge(runConfig edgeRunConfig) (err error) {
+	if runConfig.printExample {
 		printExampleEdgeConf()
 		return nil
 	}
 	var econfig mtypes.EdgeConfig
 	var econfigV2 mtypes.EdgeConfigV2
 	var initialBindCandidates []uint16
+	var initialSuperIndex int
 	//printExampleConf()
 	//return
 
-	err = mtypes.ReadYaml(configPath, &econfigV2)
+	err = mtypes.ReadYaml(runConfig.configPath, &econfigV2)
 	if err != nil {
-		return fmt.Errorf("parse v2 edge config %q: %w", configPath, err)
+		return fmt.Errorf("parse v2 edge config %q: %w", runConfig.configPath, err)
 	}
 	superNodeV2Enabled := econfigV2.SuperNodeV2.APIUrl != ""
 	if superNodeV2Enabled {
 		if err := econfigV2.Validate(); err != nil {
-			return fmt.Errorf("validate v2 edge config %q: %w", configPath, err)
+			return fmt.Errorf("validate v2 edge config %q: %w", runConfig.configPath, err)
 		}
 		hydrateV2EdgeConfig(&econfig, &econfigV2)
 		bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), edgeInitialBindTimeout)
-		initialBindCandidates, err = bootstrapInitialBind(bootstrapCtx, econfigV2)
+		initialBindCandidates, initialSuperIndex, err = bootstrapInitialBind(bootstrapCtx, econfigV2)
 		cancelBootstrap()
 		if err != nil {
 			return fmt.Errorf("bootstrap Edge listen-port policy: %w", err)
 		}
 	} else {
-		err = mtypes.ReadYaml(configPath, &econfig)
+		err = mtypes.ReadYaml(runConfig.configPath, &econfig)
 	}
 	if err != nil {
-		fmt.Printf("Error read config: %v\t%v\n", configPath, err)
+		fmt.Printf("Error read config: %v\t%v\n", runConfig.configPath, err)
 		return err
 	}
 
@@ -207,12 +251,15 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	if superNodeV2Enabled {
 		results := make(chan device.InitialBindResult, 1)
 		initialBindResults = results
-		the_device = device.NewDeviceWithInitialBind(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version, device.InitialBindPolicy{
+		if runConfig.beforeInitialBindDevice != nil {
+			runConfig.beforeInitialBindDevice()
+		}
+		the_device = device.NewDeviceWithInitialBind(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, runConfig.bindmode, econfig.FwMark), logger, graph, runConfig.configPath, &econfig, Version, device.InitialBindPolicy{
 			Candidates: initialBindCandidates,
 			Results:    results,
 		})
 	} else {
-		the_device = device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, bindmode, econfig.FwMark), logger, graph, configPath, &econfig, Version)
+		the_device = device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, runConfig.bindmode, econfig.FwMark), logger, graph, runConfig.configPath, &econfig, Version)
 	}
 	defer the_device.Close()
 	pk, err := device.Str2PriKey(econfig.PrivKey)
@@ -229,6 +276,8 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 		if err != nil {
 			return err
 		}
+		// TODO(super-multi-control-plane/19): pass initialSuperIndex once EnableSuperHTTP accepts the bootstrap-selected URL index.
+		_ = initialSuperIndex
 		the_device.EnableSuperHTTP(econfigV2)
 	} else {
 		the_device.IpcSet("listen_port=" + strconv.Itoa(econfig.ListenPort) + "\n")
@@ -261,7 +310,7 @@ func Edge(configPath string, useUAPI bool, printExample bool, bindmode string) (
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)
 
-	if useUAPI {
+	if runConfig.useUAPI {
 		startUAPI(NodeName, logger, the_device, errs)
 	}
 
