@@ -78,6 +78,12 @@ func TestHTTPOnlySuperEndToEnd(t *testing.T) {
 		return topology.edgeA.LookupPeer(topology.pubB) != nil && topology.edgeB.LookupPeer(topology.pubA) != nil &&
 			topology.edgeA.GetConnurl(102) != "" && topology.edgeB.GetConnurl(101) != ""
 	})
+	topology.cancelA()
+	select {
+	case <-topology.runtimeA.Done():
+	case <-ctx.Done():
+		t.Fatal("Edge A runtime did not stop before controlled traffic")
+	}
 	peerToB := topology.edgeA.LookupPeer(topology.pubB)
 	if err := peerToB.SendHandshakeInitiation(false); err != nil {
 		t.Fatalf("start direct Edge handshake: %v", err)
@@ -179,12 +185,15 @@ func TestHTTPOnlySuperEndToEndObservedFallback(t *testing.T) {
 	awaitE2E(t, 3*time.Second, func() bool {
 		return topology.edgeA.LookupPeer(topology.pubB) != nil &&
 			topology.edgeB.LookupPeer(topology.pubA) != nil &&
-			topology.edgeC.LookupPeer(topology.pubB) != nil
+			topology.edgeC.LookupPeer(topology.pubB) != nil &&
+			topology.edgeB.GetConnurl(101) != ""
 	})
 
 	// When A receives authenticated traffic from B's alternate public source.
+	peerFromB := topology.edgeB.LookupPeer(topology.pubA)
+	peerFromB.ExpireCurrentKeypairs()
 	topology.bindB.dropInitiation.Store(false)
-	if err := topology.edgeB.LookupPeer(topology.pubA).SendHandshakeInitiation(false); err != nil {
+	if err := peerFromB.SendHandshakeInitiation(false); err != nil {
 		t.Fatalf("start B-to-A handshake: %v", err)
 	}
 	select {
@@ -192,7 +201,7 @@ func TestHTTPOnlySuperEndToEndObservedFallback(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("B-to-A handshake response did not arrive before deadline")
 	}
-	topology.edgeB.SendPacket(topology.edgeB.LookupPeer(topology.pubA), path.NormalPacket, 64, e2eNormalPacket(t, 102, 101), device.MessageTransportOffsetContent)
+	topology.edgeB.SendPacket(peerFromB, path.NormalPacket, 64, e2eNormalPacket(t, 102, 101), device.MessageTransportOffsetContent)
 	select {
 	case <-topology.bindA.transports:
 	case <-ctx.Done():
@@ -220,6 +229,13 @@ func TestHTTPOnlySuperEndToEndObservedFallback(t *testing.T) {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("snapshot JSON leaked %q: %s", forbidden, encoded)
 		}
+	}
+	// Preserve A's committed observed vote while the test manually drives B and C.
+	topology.cancelA()
+	select {
+	case <-topology.runtimeA.Done():
+	case <-ctx.Done():
+		t.Fatal("A runtime did not stop after publishing the observed fallback")
 	}
 
 	// When B withdraws its self candidates, C applies only the observed fallback.
@@ -256,16 +272,10 @@ func TestHTTPOnlySuperEndToEndObservedFallback(t *testing.T) {
 		t.Fatal("C did not rotate to B's observed fallback")
 	}
 
-	// When the only observer expires, the revision exposes stale-hint removal.
+	// When the stopped observer expires, the revision exposes stale-hint removal.
 	beforeExpiry, err := topology.snapshot(ctx, 103, topology.keyC)
 	if err != nil {
 		t.Fatalf("snapshot before observer expiry: %v", err)
-	}
-	topology.cancelA()
-	select {
-	case <-topology.runtimeA.Done():
-	case <-ctx.Done():
-		t.Fatal("A runtime did not stop before expiry")
 	}
 	topology.clock.Advance(30 * time.Minute)
 	if err := reporterB.Report(ctx, &mtypes.ControlV2ReportRequest{NodeID: 102, ReportedAt: topology.clock.Now()}); err != nil {

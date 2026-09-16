@@ -1,0 +1,124 @@
+EXIT_CODE=0
+COMMAND: go test -race -shuffle=on -count=10 -run 'TestHTTPOnlySuperEndToEnd|TestHTTPOnlySuperEndToEndObservedFallback' -v .
+-test.shuffle 1789574971881339506
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.17s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.47s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (3.20s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.29s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.49s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (3.20s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+2026/09/16 12:09:46 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.27s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.48s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+2026/09/16 12:09:50 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEnd (0.17s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+2026/09/16 12:09:50 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.27s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.50s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (3.21s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.27s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.50s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+2026/09/16 12:10:01 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEnd (3.16s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+2026/09/16 12:10:04 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.30s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.49s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (0.19s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.26s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.49s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (3.19s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.25s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.48s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+2026/09/16 12:10:19 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEnd (0.19s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.18s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.49s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (0.19s)
+=== RUN   TestHTTPOnlySuperEndToEndObservedFallback
+2026/09/16 12:10:23 http: proxy error: context canceled
+--- PASS: TestHTTPOnlySuperEndToEndObservedFallback (0.27s)
+=== RUN   TestHTTPOnlySuperEndToEndForcedRefreshCap
+--- PASS: TestHTTPOnlySuperEndToEndForcedRefreshCap (3.49s)
+=== RUN   TestHTTPOnlySuperEndToEnd
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+--- PASS: TestHTTPOnlySuperEndToEnd (0.22s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	57.103s
+
+EXIT_CODE=0
+COMMAND: five consecutive runs of go test -race -shuffle=on -count=1 . (runs 1-5/10)
+
+FULL_ROOT_RUN=1/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	77.090s
+
+FULL_ROOT_RUN=2/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	78.029s
+
+FULL_ROOT_RUN=3/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	84.564s
+
+FULL_ROOT_RUN=4/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	77.501s
+
+FULL_ROOT_RUN=5/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	84.339s
+
+EXIT_CODE=0
+COMMAND: five consecutive runs of go test -race -shuffle=on -count=1 . (runs 6-10/10)
+
+FULL_ROOT_RUN=6/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	77.071s
+
+FULL_ROOT_RUN=7/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	77.350s
+
+FULL_ROOT_RUN=8/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	80.849s
+
+FULL_ROOT_RUN=9/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	80.619s
+
+FULL_ROOT_RUN=10/10
+ok  	github.com/KusakabeSi/EtherGuard-VPN	81.379s
+
+EXIT_CODE=0
+COMMAND: go build ./...
+
+EXIT_CODE=0
+COMMAND: go vet ./...
