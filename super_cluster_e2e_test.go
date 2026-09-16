@@ -9,10 +9,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -821,5 +825,436 @@ func assertClusterWireOverhead(t *testing.T, compression string, stats clusterDi
 	minimumWireBytes := stats.CompressedBytes + 20*stats.Messages
 	if stats.WireBytes < minimumWireBytes {
 		t.Fatalf("%s wire bytes = %d, want at least compressed bytes %d + 20*messages %d", compression, stats.WireBytes, stats.CompressedBytes, stats.Messages)
+	}
+}
+
+func TestMultiSuperE2EEdgeStartsWhenFirstSuperDown(t *testing.T) {
+	// Given: B authorizes the Edge and publishes a concrete pre-bind policy,
+	// while the first configured Super endpoint is shut down.
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	port := 51101
+	parameters := topology.supers[1].runtime.State().SnapshotFor(mtypes.NodeID_SuperNode).Parameters
+	parameters.ListenPortPriority = mtypes.ListenPortPriority{{Port: &port}}
+	parameters.ReportInterval = 50 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	if err := topology.supers[1].runtime.Manage().UpdateParameters(ctx, ManageUpdateParametersRequest{Parameters: parameters}); err != nil {
+		cancel()
+		t.Fatalf("publish B bootstrap parameters: %v", err)
+	}
+	cancel()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	added, err := topology.supers[1].runtime.Manage().AddPeer(ctx, ManageAddPeerRequest{NodeID: 101, NodeName: "edge-101"})
+	cancel()
+	if err != nil {
+		t.Fatalf("add edge 101 on B: %v", err)
+	}
+	ShutdownSuper(t, topology, 0)
+	urls := []string{topology.supers[0].edgeURL, topology.supers[1].edgeURL}
+	config := mtypes.EdgeConfigV2{
+		NodeID:     101,
+		NodeName:   added.SuperPeer.NodeName,
+		DefaultTTL: 64,
+		SuperNodeV2: mtypes.SuperNodeV2Ref{
+			APIUrls:      urls,
+			APIPrefix:    mtypes.ControlV2APIPrefix,
+			NodeID:       1,
+			ControlPSKey: added.SuperPeer.ControlPSKey,
+		},
+	}
+
+	// When: production bootstrap walks A then B and hands the selected index to
+	// a real Edge runtime.
+	bootstrapCtx, cancelBootstrap := context.WithTimeout(context.Background(), 5*time.Second)
+	ports, startIndex, err := bootstrapInitialBind(bootstrapCtx, config)
+	cancelBootstrap()
+	if err != nil {
+		t.Fatalf("bootstrap with A down and B healthy: %v", err)
+	}
+	if startIndex != 1 {
+		t.Fatalf("bootstrap start index = %d, want 1", startIndex)
+	}
+	if len(ports) != 1 || ports[0] != uint16(port) {
+		t.Fatalf("bootstrap ports = %v, want [%d]", ports, port)
+	}
+
+	var logMu sync.Mutex
+	var logged []string
+	logger := &device.Logger{
+		Verbosef: device.DiscardLogf,
+		Errorf: func(format string, args ...interface{}) {
+			logMu.Lock()
+			logged = append(logged, fmt.Sprintf(format, args...))
+			logMu.Unlock()
+		},
+	}
+	fabric := newE2EFabric()
+	privateKey, publicKey := device.RandomKeyPair()
+	bind := newE2EBind(fabric, net.ParseIP("198.51.100.101"), net.ParseIP("198.51.100.101"), ports[0], true)
+	edge, runtime, cancelEdge := newE2EEdge(
+		t, 101, added.SuperPeer.NodeName, added.SuperPeer.ControlPSKey, "", bind, newE2ETap(), privateKey,
+		e2eRetryConfig{}, nil, urls, withE2EEdgeStartIndex(startIndex), withE2EEdgeLogger(logger),
+	)
+	topology.edges = append(topology.edges, edge)
+	topology.edgeRuntimes = append(topology.edgeRuntimes, runtime)
+	topology.edgeCancels = append(topology.edgeCancels, cancelEdge)
+	WaitApplied(t, topology, 1, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == publicKey.ToString()
+	}, 3*time.Second)
+	registeredVersion := e2eRecordVersion(t, topology.supers[1].runtime.State(), 101)
+	awaitE2E(t, 2*time.Second, func() bool {
+		return e2eRecordVersion(t, topology.supers[1].runtime.State(), 101).Newer(registeredVersion)
+	})
+
+	// Then: the runtime remains alive on B and its Sync loop never aborts.
+	select {
+	case <-runtime.Done():
+		t.Fatal("edge runtime stopped after bootstrap fallback")
+	default:
+	}
+	logMu.Lock()
+	defer logMu.Unlock()
+	for _, line := range logged {
+		if strings.Contains(line, "HTTP control sync stopped") {
+			t.Fatalf("unexpected sync-loop abort log after bootstrap fallback: %q", line)
+		}
+	}
+}
+
+type e2eEdgeControlProxyRequest struct {
+	nodeID      string
+	path        string
+	lastEventID string
+	status      int
+}
+
+type e2eEdgeControlProxy struct {
+	server *httptest.Server
+
+	mu       sync.RWMutex
+	target   *url.URL
+	requests []e2eEdgeControlProxyRequest
+}
+
+func newE2EEdgeControlProxy(t *testing.T, rawTarget string) *e2eEdgeControlProxy {
+	t.Helper()
+	target, err := url.Parse(rawTarget)
+	if err != nil {
+		t.Fatalf("parse edge control proxy target %q: %v", rawTarget, err)
+	}
+	proxy := &e2eEdgeControlProxy{target: target}
+	proxy.server = httptest.NewServer(http.HandlerFunc(proxy.serveHTTP))
+	t.Cleanup(func() {
+		proxy.server.CloseClientConnections()
+		proxy.server.Close()
+	})
+	return proxy
+}
+
+func (proxy *e2eEdgeControlProxy) URL() string {
+	return proxy.server.URL
+}
+
+func (proxy *e2eEdgeControlProxy) SetTarget(t *testing.T, rawTarget string) {
+	t.Helper()
+	target, err := url.Parse(rawTarget)
+	if err != nil {
+		t.Fatalf("parse replacement edge control proxy target %q: %v", rawTarget, err)
+	}
+	proxy.mu.Lock()
+	proxy.target = target
+	proxy.mu.Unlock()
+}
+
+func (proxy *e2eEdgeControlProxy) serveHTTP(writer http.ResponseWriter, request *http.Request) {
+	proxy.mu.Lock()
+	requestIndex := len(proxy.requests)
+	proxy.requests = append(proxy.requests, e2eEdgeControlProxyRequest{
+		nodeID:      request.Header.Get(device.HeaderNodeID),
+		path:        request.URL.Path,
+		lastEventID: request.Header.Get("Last-Event-ID"),
+	})
+	target := proxy.target
+	proxy.mu.Unlock()
+	if target == nil {
+		proxy.setStatus(requestIndex, http.StatusServiceUnavailable)
+		http.Error(writer, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
+		return
+	}
+
+	reverseProxy := httputil.NewSingleHostReverseProxy(target)
+	reverseProxy.ModifyResponse = func(response *http.Response) error {
+		proxy.setStatus(requestIndex, response.StatusCode)
+		return nil
+	}
+	reverseProxy.ErrorHandler = func(writer http.ResponseWriter, _ *http.Request, _ error) {
+		proxy.setStatus(requestIndex, http.StatusBadGateway)
+		http.Error(writer, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+	}
+	reverseProxy.ServeHTTP(writer, request)
+}
+
+func (proxy *e2eEdgeControlProxy) setStatus(index, status int) {
+	proxy.mu.Lock()
+	proxy.requests[index].status = status
+	proxy.mu.Unlock()
+}
+
+func (proxy *e2eEdgeControlProxy) count(nodeID, pathSuffix string, status int) int {
+	proxy.mu.RLock()
+	defer proxy.mu.RUnlock()
+	count := 0
+	for _, request := range proxy.requests {
+		if request.nodeID != nodeID || !strings.HasSuffix(request.path, pathSuffix) {
+			continue
+		}
+		if status != 0 && request.status != status {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func (proxy *e2eEdgeControlProxy) successfulCount(nodeID, pathSuffix string) int {
+	proxy.mu.RLock()
+	defer proxy.mu.RUnlock()
+	count := 0
+	for _, request := range proxy.requests {
+		if request.nodeID == nodeID && strings.HasSuffix(request.path, pathSuffix) && request.status >= 200 && request.status < 300 {
+			count++
+		}
+	}
+	return count
+}
+
+func (proxy *e2eEdgeControlProxy) eventIDs(nodeID string) []string {
+	proxy.mu.RLock()
+	defer proxy.mu.RUnlock()
+	ids := make([]string, 0)
+	for _, request := range proxy.requests {
+		if request.nodeID == nodeID && strings.HasSuffix(request.path, "/events") {
+			ids = append(ids, request.lastEventID)
+		}
+	}
+	return ids
+}
+
+func TestMultiSuperE2EEdgeSwitchResetsRevision(t *testing.T) {
+	// Given: Edge 101 is authorized by both Supers, then A and B are partitioned
+	// so A can advance far beyond B's independent revision history.
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	setE2EReportInterval(t, topology, 50*time.Millisecond)
+	aProxy := newE2EEdgeControlProxy(t, topology.supers[0].edgeURL)
+	bProxy := newE2EEdgeControlProxy(t, topology.supers[1].edgeURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	added101, err := topology.supers[0].runtime.Manage().AddPeer(ctx, ManageAddPeerRequest{NodeID: 101, NodeName: "edge-101"})
+	cancel()
+	if err != nil {
+		t.Fatalf("add edge 101 on A: %v", err)
+	}
+	awaitE2E(t, 3*time.Second, func() bool {
+		key, ok := topology.supers[1].runtime.State().ControlKeyFor(101)
+		return ok && key == added101.SuperPeer.ControlPSKey
+	})
+	CutLink(topology, 0, 1)
+	awaitE2E(t, 3*time.Second, func() bool {
+		return !e2eLinkConnected(topology, 0, 1) && !e2eLinkConnected(topology, 1, 0)
+	})
+
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	added102, err := topology.supers[1].runtime.Manage().AddPeer(ctx, ManageAddPeerRequest{NodeID: 102, NodeName: "edge-102"})
+	cancel()
+	if err != nil {
+		t.Fatalf("add edge 102 on B: %v", err)
+	}
+	fabric := newE2EFabric()
+	edge102 := startMultiSuperE2EEdge(t, topology, fabric, 1, 102, added102.SuperPeer.NodeName, added102.SuperPeer.ControlPSKey, []string{topology.supers[1].edgeURL})
+	WaitApplied(t, topology, 1, 102, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge102.publicKey.ToString()
+	}, 3*time.Second)
+
+	edge101 := startMultiSuperE2EEdge(t, topology, fabric, 0, 101, added101.SuperPeer.NodeName, added101.SuperPeer.ControlPSKey, []string{aProxy.URL(), bProxy.URL()})
+	WaitApplied(t, topology, 0, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge101.publicKey.ToString()
+	}, 3*time.Second)
+
+	// When: authenticated reports drive A above revision 100 and A is shut down,
+	// forcing the real Edge runtime to switch epochs to B.
+	driver := device.NewControlHTTPClient(aProxy.URL(), mtypes.ControlV2APIPrefix, 101, added101.SuperPeer.ControlPSKey)
+	driver.Now = topology.supers[0].clock.Now
+	for i := 0; i < 110; i++ {
+		relayCost := float64(i % 2)
+		reportCtx, cancelReport := context.WithTimeout(context.Background(), time.Second)
+		err := driver.Report(reportCtx, &mtypes.ControlV2ReportRequest{
+			NodeID:      101,
+			RelayCostMS: &relayCost,
+			ReportedAt:  topology.supers[0].clock.Now(),
+		})
+		cancelReport()
+		if err != nil {
+			t.Fatalf("drive A revision with report %d: %v", i, err)
+		}
+	}
+	awaitE2E(t, 5*time.Second, func() bool {
+		return topology.supers[0].runtime.State().SnapshotFor(101).Revision >= 100
+	})
+	client101 := edge101.runtime.ControlClientForTest()
+	awaitE2E(t, 5*time.Second, func() bool {
+		current := client101.Current()
+		return current != nil && current.Revision >= 100
+	})
+	ShutdownSuper(t, topology, 0)
+	WaitApplied(t, topology, 1, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge101.publicKey.ToString()
+	}, 5*time.Second)
+
+	// Then: B's low revision becomes the new baseline, its peer set is applied,
+	// and the first B event stream starts without replay state from A.
+	awaitE2E(t, 5*time.Second, func() bool {
+		current := client101.Current()
+		if current == nil || current.Revision == 0 || current.Revision >= 20 || len(current.Peers) != 1 {
+			return false
+		}
+		return current.Peers[0].NodeID == 102 && current.Peers[0].PubKey == edge102.publicKey.ToString()
+	})
+	awaitE2E(t, 5*time.Second, func() bool {
+		return len(bProxy.eventIDs("101")) > 0
+	})
+	if eventIDs := bProxy.eventIDs("101"); eventIDs[0] != "" {
+		t.Fatalf("B first SSE Last-Event-ID = %q, want empty", eventIDs[0])
+	}
+}
+
+func TestMultiSuperE2EEdgeNoFailbackWhileHealthy(t *testing.T) {
+	// Given: a real Edge starts on A through a stable proxy address and B has
+	// received the replicated registry key needed for failover.
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	setE2EReportInterval(t, topology, 50*time.Millisecond)
+	aProxy := newE2EEdgeControlProxy(t, topology.supers[0].edgeURL)
+	bProxy := newE2EEdgeControlProxy(t, topology.supers[1].edgeURL)
+	fabric := newE2EFabric()
+	edge101 := newMultiSuperE2EEdge(t, topology, fabric, 0, 101, []string{aProxy.URL(), bProxy.URL()})
+	edge101.runtime.SetFailoverThresholdsForTest(300 * time.Millisecond)
+	awaitE2E(t, 3*time.Second, func() bool {
+		key, ok := topology.supers[1].runtime.State().ControlKeyFor(101)
+		return ok && key == edge101.key && aProxy.successfulCount("101", "/report") > 0
+	})
+
+	// When: A is shut down, the Edge becomes healthy on B, and A is restarted
+	// behind the same reachable proxy URL.
+	ShutdownSuper(t, topology, 0)
+	awaitE2E(t, 5*time.Second, func() bool {
+		record, ok := e2eLiveRecord(topology.supers[1].runtime.State(), 101)
+		return ok && record.Origin == topology.supers[1].id && bProxy.successfulCount("101", "/report") > 0
+	})
+	oldA := topology.supers[0]
+	oldA.proxy.Close()
+	restarted := newE2ESuperFrom(t, oldA.dir, oldA.id, oldA.clock)
+	topology.supers[0] = *restarted
+	topology.proxies[0] = restarted.proxy
+	topology.edgeListeners[0] = restarted.edgeLn
+	topology.manageListeners[0] = restarted.manageLn
+	aProxy.SetTarget(t, restarted.edgeURL)
+	HealLink(topology, 0, 1)
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	WaitApplied(t, topology, 0, 101, func(peer mtypes.ControlV2Peer) bool {
+		return peer.PubKey == edge101.publicKey.ToString()
+	}, 3*time.Second)
+
+	// Then: twenty further successful B report intervals produce no request to
+	// the now-healthy A endpoint, proving there is no automatic fail-back.
+	aRequests := aProxy.count("101", "", 0)
+	bReports := bProxy.successfulCount("101", "/report")
+	awaitE2E(t, 5*time.Second, func() bool {
+		return bProxy.successfulCount("101", "/report") >= bReports+20
+	})
+	if got := aProxy.count("101", "", 0); got != aRequests {
+		t.Fatalf("edge sent %d requests to recovered A during 20 healthy B reports, want 0", got-aRequests)
+	}
+	if record, ok := e2eLiveRecord(topology.supers[1].runtime.State(), 101); !ok || record.Origin != topology.supers[1].id {
+		t.Fatalf("B live record after recovered A = %+v, ok=%v; want origin %d", record, ok, topology.supers[1].id)
+	}
+}
+
+func TestMultiSuperE2EEdge401OnMissingKeyRotates(t *testing.T) {
+	// Given: registry replication is cut before Edge 101 is added to A, leaving
+	// B intentionally unable to authenticate that Edge's control key.
+	topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	setE2EReportInterval(t, topology, 50*time.Millisecond)
+	aProxy := newE2EEdgeControlProxy(t, topology.supers[0].edgeURL)
+	bProxy := newE2EEdgeControlProxy(t, topology.supers[1].edgeURL)
+	CutLink(topology, 0, 1)
+	awaitE2E(t, 3*time.Second, func() bool {
+		return !e2eLinkConnected(topology, 0, 1) && !e2eLinkConnected(topology, 1, 0)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	added, err := topology.supers[0].runtime.Manage().AddPeer(ctx, ManageAddPeerRequest{NodeID: 101, NodeName: "edge-101"})
+	cancel()
+	if err != nil {
+		t.Fatalf("add isolated edge 101 on A: %v", err)
+	}
+	if key, ok := topology.supers[1].runtime.State().ControlKeyFor(101); ok {
+		t.Fatalf("B unexpectedly has isolated edge key %q", key)
+	}
+	fabric := newE2EFabric()
+	edge101 := startMultiSuperE2EEdge(t, topology, fabric, 0, 101, added.SuperPeer.NodeName, added.SuperPeer.ControlPSKey, []string{aProxy.URL(), bProxy.URL()})
+	edge101.runtime.SetFailoverThresholdsForTest(300 * time.Millisecond)
+	awaitE2E(t, 3*time.Second, func() bool {
+		return aProxy.successfulCount("101", "/report") > 0
+	})
+
+	// When: A dies, B answers three-report failure windows with 401 while dead A
+	// answers alternate windows with 502, exercising repeated selector rotation.
+	ShutdownSuper(t, topology, 0)
+	awaitE2E(t, 8*time.Second, func() bool {
+		return bProxy.count("101", "/report", http.StatusUnauthorized) >= 6 &&
+			aProxy.count("101", "/report", http.StatusBadGateway) >= 6
+	})
+	select {
+	case <-edge101.runtime.Done():
+		t.Fatal("edge runtime stopped while cycling between dead A and unauthorized B")
+	default:
+	}
+
+	// Then: restarting A and healing replication lets whichever Super is current
+	// authenticate, register, and resume successful reports without a crash.
+	oldA := topology.supers[0]
+	oldA.proxy.Close()
+	restarted := newE2ESuperFrom(t, oldA.dir, oldA.id, oldA.clock)
+	topology.supers[0] = *restarted
+	topology.proxies[0] = restarted.proxy
+	topology.edgeListeners[0] = restarted.edgeLn
+	topology.manageListeners[0] = restarted.manageLn
+	aProxy.SetTarget(t, restarted.edgeURL)
+	HealLink(topology, 0, 1)
+	WaitLinked(t, topology, 0, 1, 3*time.Second)
+	WaitLinked(t, topology, 1, 0, 3*time.Second)
+	awaitE2E(t, 10*time.Second, func() bool {
+		key, ok := topology.supers[1].runtime.State().ControlKeyFor(101)
+		return ok && key == edge101.key
+	})
+	successfulReports := aProxy.successfulCount("101", "/report") + bProxy.successfulCount("101", "/report")
+	awaitE2E(t, 10*time.Second, func() bool {
+		return aProxy.successfulCount("101", "/report")+bProxy.successfulCount("101", "/report") > successfulReports
+	})
+	for index := range topology.supers {
+		WaitApplied(t, topology, index, 101, func(peer mtypes.ControlV2Peer) bool {
+			return peer.PubKey == edge101.publicKey.ToString()
+		}, 3*time.Second)
+	}
+	select {
+	case <-edge101.runtime.Done():
+		t.Fatal("edge runtime stopped instead of recovering after A restart")
+	default:
 	}
 }

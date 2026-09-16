@@ -640,6 +640,25 @@ type e2eRetryConfig struct {
 	timeoutCheckInterval float64
 }
 
+type e2eEdgeOptions struct {
+	startIndex int
+	logger     *device.Logger
+}
+
+type e2eEdgeOption func(*e2eEdgeOptions)
+
+func withE2EEdgeStartIndex(index int) e2eEdgeOption {
+	return func(options *e2eEdgeOptions) {
+		options.startIndex = index
+	}
+}
+
+func withE2EEdgeLogger(logger *device.Logger) e2eEdgeOption {
+	return func(options *e2eEdgeOptions) {
+		options.logger = logger
+	}
+}
+
 func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTopology {
 	t.Helper()
 	edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -782,8 +801,12 @@ func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTop
 	}
 }
 
-func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func(), baseURLs []string) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc) {
+func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func(), baseURLs []string, optionValues ...e2eEdgeOption) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc) {
 	t.Helper()
+	options := e2eEdgeOptions{}
+	for _, option := range optionValues {
+		option(&options)
+	}
 	graph, err := path.NewGraph(3, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
 	if err != nil {
 		t.Fatalf("new edge graph: %v", err)
@@ -801,7 +824,11 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 		},
 		SuperNodeV2Enabled: true,
 	}
-	edge := device.NewDevice(tapDevice, id, bind, device.NewLogger(device.LogLevelSilent, "e2e"), graph, "", legacy, "e2e")
+	logger := options.logger
+	if logger == nil {
+		logger = device.NewLogger(device.LogLevelSilent, "e2e")
+	}
+	edge := device.NewDevice(tapDevice, id, bind, logger, graph, "", legacy, "e2e")
 	if err := edge.SetPrivateKey(privateKey); err != nil {
 		edge.Close()
 		t.Fatalf("set edge private key: %v", err)
@@ -827,7 +854,7 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	runtime := device.NewSuperHTTPRuntime(edge, config)
+	runtime := device.NewSuperHTTPRuntime(edge, config, device.WithStartIndex(options.startIndex))
 	runtime.Start(ctx)
 	runtime.MarkReady(int(bind.port), 0, net.ParseIP("127.0.0.1"), nil)
 	return edge, runtime, cancel

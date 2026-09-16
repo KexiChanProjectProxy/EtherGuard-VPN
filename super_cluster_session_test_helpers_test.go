@@ -23,6 +23,7 @@ type clusterSessionTestPairConfig struct {
 	mode      string
 	heartbeat time.Duration
 	deadAfter time.Duration
+	now       func() time.Time
 	inboxA    chan<- clusterEnvelope
 	inboxB    chan<- clusterEnvelope
 	onPingA   func(uint64)
@@ -60,16 +61,20 @@ func newClusterSessionTestPair(
 	t.Helper()
 	connA, connB := net.Pipe()
 	keys := newClusterSessionTestKeys(t)
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
 	var hlcA atomic.Uint64
 	var hlcB atomic.Uint64
 	a := newClusterSession(clusterSessionConfig{
 		PeerID: 2, Dialer: true, Conn: connA, Reader: bufio.NewReader(connA), SendKey: keys.aSend, RecvKey: keys.aRecv,
-		Compression: cfg.mode, Heartbeat: cfg.heartbeat, DeadAfter: cfg.deadAfter, Now: time.Now, HLC: func() uint64 { return hlcA.Add(1) },
+		Compression: cfg.mode, Heartbeat: cfg.heartbeat, DeadAfter: cfg.deadAfter, Now: now, HLC: func() uint64 { return hlcA.Add(1) },
 		Inbox: clusterSessionTestInbox(cfg.inboxA), OnPing: cfg.onPingA,
 	})
 	b := newClusterSession(clusterSessionConfig{
 		PeerID: 1, Dialer: false, Conn: connB, Reader: bufio.NewReader(connB), SendKey: keys.bSend, RecvKey: keys.bRecv,
-		Compression: cfg.mode, Heartbeat: cfg.heartbeat, DeadAfter: cfg.deadAfter, Now: time.Now, HLC: func() uint64 { return hlcB.Add(1) },
+		Compression: cfg.mode, Heartbeat: cfg.heartbeat, DeadAfter: cfg.deadAfter, Now: now, HLC: func() uint64 { return hlcB.Add(1) },
 		Inbox: clusterSessionTestInbox(cfg.inboxB), OnPing: cfg.onPingB,
 	})
 	t.Cleanup(func() {

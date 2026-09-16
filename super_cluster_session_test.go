@@ -79,6 +79,33 @@ func TestClusterSessionPingPongKeepsAlive(t *testing.T) {
 	assertClusterSessionGoroutines(t, baseline)
 }
 
+func TestClusterSessionStaleLogicalClockKeepsSocketDeadlineAlive(t *testing.T) {
+	// Given: both peers use a deliberately stale logical clock while real time advances.
+	stale := time.Now().Add(-time.Hour)
+	a, b := newClusterSessionTestPair(t, clusterSessionTestPairConfig{
+		mode: "none", heartbeat: 20 * time.Millisecond, deadAfter: 100 * time.Millisecond,
+		now: func() time.Time { return stale },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	runA := runClusterSession(ctx, a)
+	runB := runClusterSession(ctx, b)
+
+	// When: heartbeat traffic refreshes each socket's read deadline.
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case err := <-runA:
+		t.Fatalf("A closed because stale logical time produced an expired socket deadline: %v", err)
+	case err := <-runB:
+		t.Fatalf("B closed because stale logical time produced an expired socket deadline: %v", err)
+	case <-timer.C:
+	}
+
+	// Then: the session remains healthy until explicitly closed.
+	closeClusterSessionPair(t, a, b, runA, runB)
+}
+
 func TestClusterSessionCountersMonotonic(t *testing.T) {
 	for _, mode := range []string{"zstd", "none"} {
 		t.Run(mode, func(t *testing.T) {

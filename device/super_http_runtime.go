@@ -159,6 +159,14 @@ func (runtime *SuperHTTPRuntime) SetClockForTest(now func() time.Time) {
 	runtime.mu.Unlock()
 }
 
+// ControlClientForTest exposes the epoch-scoped HTTP client to integration tests.
+func (runtime *SuperHTTPRuntime) ControlClientForTest() *ControlHTTPClient {
+	if runtime == nil {
+		return nil
+	}
+	return runtime.client
+}
+
 // SetFailoverThresholdsForTest overrides the production 15-second minimum
 // failover window for deterministic integration tests. A non-positive value
 // restores the production floor.

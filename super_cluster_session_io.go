@@ -96,7 +96,7 @@ func (s *clusterSession) readRecord() ([]byte, error) {
 	now := s.now()
 	s.lastRX.Store(now.UnixNano())
 	if netConn, ok := s.conn.(net.Conn); ok {
-		if err := netConn.SetReadDeadline(now.Add(s.deadAfter)); err != nil {
+		if err := netConn.SetReadDeadline(time.Now().Add(s.deadAfter)); err != nil {
 			return nil, fmt.Errorf("cluster session: set read deadline: %w", err)
 		}
 	}
