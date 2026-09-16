@@ -51,10 +51,15 @@ import (
 // handler does not touch this — it is the responsibility of the Super
 // startup so the state and hub share the same single publish hook.
 type ControlHTTPHandler struct {
-	state  *ControlState
-	auth   *ControlAuthenticator
-	hub    *ControlEventHub
-	prefix string
+	state   *ControlState
+	auth    *ControlAuthenticator
+	hub     *ControlEventHub
+	prefix  string
+	cluster clusterLinkAcceptor
+}
+
+type clusterLinkAcceptor interface {
+	AcceptUpgrade(http.ResponseWriter, *http.Request)
 }
 
 // NewControlHTTPHandler constructs the v2 HTTP handler. prefix is
@@ -70,6 +75,11 @@ func NewControlHTTPHandler(state *ControlState, auth *ControlAuthenticator, hub 
 	return &ControlHTTPHandler{state: state, auth: auth, hub: hub, prefix: prefix}
 }
 
+func (h *ControlHTTPHandler) WithCluster(acceptor clusterLinkAcceptor) *ControlHTTPHandler {
+	h.cluster = acceptor
+	return h
+}
+
 // ServeHTTP routes an inbound request to the matching handler. The
 // registered path set is:
 //
@@ -78,10 +88,19 @@ func NewControlHTTPHandler(state *ControlState, auth *ControlAuthenticator, hub 
 //	GET  prefix/snapshot   -> handleSnapshot
 //	GET  prefix/events     -> handleEvents
 //	GET  prefix/bootstrap  -> handleBootstrap
+//	GET  prefix/cluster/link -> cluster.AcceptUpgrade (when installed)
 //
 // Unknown methods or paths return 405 / 404 respectively. Every route
 // requires the four HMAC headers; missing headers → 401 via Verify.
 func (h *ControlHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == h.prefix+"/cluster/link" {
+		if h.cluster == nil {
+			http.NotFound(w, r)
+			return
+		}
+		h.cluster.AcceptUpgrade(w, r)
+		return
+	}
 	switch r.URL.Path {
 	case h.prefix + "/register":
 		if r.Method != http.MethodPost {
