@@ -61,6 +61,7 @@ type clusterLinkPeer struct {
 	apiURL         string
 	session        *clusterSession
 	dialer         bool
+	dialBlocked    bool
 	pending        bool
 	backoff        time.Duration
 	queue          *clusterOutQueue
@@ -304,6 +305,46 @@ func (m *clusterManager) Status() clusterStatus {
 	}
 }
 
+// SetDialGateForTest blocks or unblocks outbound dials to one configured peer.
+// Existing sessions are left untouched; tests that simulate a link cut call
+// CloseSessionForTest after closing the gate on both managers.
+func (m *clusterManager) SetDialGateForTest(peerID mtypes.Vertex, blocked bool) {
+	if m == nil {
+		return
+	}
+	var wake chan struct{}
+	m.mu.Lock()
+	if peer := m.peers[peerID]; peer != nil {
+		peer.dialBlocked = blocked
+		wake = peer.wake
+		if blocked && peer.session == nil && !peer.pending {
+			peer.state = "down"
+		}
+	}
+	m.mu.Unlock()
+	if wake != nil {
+		signalClusterPeer(wake)
+	}
+}
+
+// CloseSessionForTest forcibly closes the current established session to one
+// peer. The normal session-ended path updates link state and wakes the dialer.
+func (m *clusterManager) CloseSessionForTest(peerID mtypes.Vertex) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	peer := m.peers[peerID]
+	var session *clusterSession
+	if peer != nil {
+		session = peer.session
+	}
+	m.mu.Unlock()
+	if session != nil {
+		_ = session.Close()
+	}
+}
+
 func clusterManagerStateCounts(state *ControlState) (int, int, int) {
 	state.mu.RLock()
 	defer state.mu.RUnlock()
@@ -388,7 +429,7 @@ func (m *clusterManager) adoptSession(ctx context.Context, peerID mtypes.Vertex,
 	helloDone := make(chan struct{})
 	m.mu.Lock()
 	peer := m.peers[peerID]
-	if peer == nil || m.ctx == nil || m.ctx.Err() != nil || ctx != m.ctx {
+	if peer == nil || m.ctx == nil || m.ctx.Err() != nil || ctx != m.ctx || peer.dialBlocked {
 		m.mu.Unlock()
 		_ = session.Close()
 		return
@@ -904,6 +945,10 @@ func (m *clusterManager) dialLoop(ctx context.Context, peerID mtypes.Vertex) {
 		})
 		m.finishDialAttempt(peerID)
 		if err == nil {
+			if !m.dialAllowedForTest(peerID) {
+				_ = result.conn.Close()
+				continue
+			}
 			session := newClusterSession(clusterSessionConfig{
 				PeerID: peerID, Dialer: true, Conn: result.conn, Reader: result.br,
 				SendKey: result.sendKey, RecvKey: result.recvKey, Compression: result.compression,
@@ -952,12 +997,24 @@ func (m *clusterManager) beginDialAttempt(peerID mtypes.Vertex) (string, <-chan 
 		peer.state = "connected"
 		return peer.apiURL, peer.wake, false, true
 	}
+	if peer.dialBlocked {
+		peer.pending = false
+		peer.state = "down"
+		return peer.apiURL, peer.wake, false, true
+	}
 	if peer.pending {
 		return peer.apiURL, peer.wake, false, true
 	}
 	peer.pending = true
 	peer.state = "connecting"
 	return peer.apiURL, peer.wake, true, true
+}
+
+func (m *clusterManager) dialAllowedForTest(peerID mtypes.Vertex) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	peer := m.peers[peerID]
+	return peer != nil && !peer.dialBlocked && m.ctx != nil && m.ctx.Err() == nil
 }
 
 func (m *clusterManager) finishDialAttempt(peerID mtypes.Vertex) {

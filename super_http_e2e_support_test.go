@@ -341,6 +341,219 @@ type e2eTopology struct {
 	closeErr  error
 }
 
+type e2eSuper struct {
+	id        mtypes.Vertex
+	runtime   *superRuntime
+	edgeURL   string
+	manageURL string
+	clock     *e2eClock
+	dir       string
+	hash      string
+}
+
+type e2eClusterOptions struct {
+	heartbeat   time.Duration
+	deadAfter   time.Duration
+	grace       time.Duration
+	compression string
+	linkPairs   [][2]int
+}
+
+type e2eMultiSuper struct {
+	supers          []e2eSuper
+	proxies         []*httptest.Server
+	edgeListeners   []net.Listener
+	manageListeners []net.Listener
+	edges           []*device.Device
+	edgeRuntimes    []*device.SuperHTTPRuntime
+	edgeCancels     []context.CancelFunc
+	closeOnce       sync.Once
+	closeErr        error
+}
+
+func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eMultiSuper {
+	t.Helper()
+	if n < 2 {
+		t.Fatalf("multi-super topology size = %d, want at least 2", n)
+	}
+	if opts.heartbeat <= 0 {
+		opts.heartbeat = 100 * time.Millisecond
+	}
+	if opts.deadAfter <= 0 {
+		opts.deadAfter = 500 * time.Millisecond
+	}
+	if opts.grace <= 0 {
+		opts.grace = 2 * time.Second
+	}
+	if opts.compression == "" {
+		opts.compression = "zstd"
+	}
+
+	topology := &e2eMultiSuper{
+		supers:          make([]e2eSuper, n),
+		proxies:         make([]*httptest.Server, n),
+		edgeListeners:   make([]net.Listener, n),
+		manageListeners: make([]net.Listener, n),
+	}
+	t.Cleanup(func() {
+		if err := topology.shutdown(); err != nil {
+			t.Errorf("shutdown multi-super topology: %v", err)
+		}
+	})
+
+	for index := range n {
+		edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen super %d edge API: %v", index, err)
+		}
+		topology.edgeListeners[index] = edgeListener
+		manageListener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen super %d management API: %v", index, err)
+		}
+		topology.manageListeners[index] = manageListener
+
+		upstreamURL, err := url.Parse("http://" + edgeListener.Addr().String())
+		if err != nil {
+			t.Fatalf("parse super %d edge URL: %v", index, err)
+		}
+		proxy := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			httputil.NewSingleHostReverseProxy(upstreamURL).ServeHTTP(writer, request)
+		}))
+		topology.proxies[index] = proxy
+		topology.supers[index] = e2eSuper{
+			id:        mtypes.Vertex(index + 1),
+			edgeURL:   proxy.URL,
+			manageURL: "http://" + manageListener.Addr().String(),
+			clock:     newE2EClock(),
+			dir:       t.TempDir(),
+			hash:      "e2e-management-hash-" + strconv.Itoa(index+1),
+		}
+	}
+
+	links := make([][]bool, n)
+	for index := range links {
+		links[index] = make([]bool, n)
+	}
+	if opts.linkPairs == nil {
+		for left := range n {
+			for right := left + 1; right < n; right++ {
+				links[left][right] = true
+				links[right][left] = true
+			}
+		}
+	} else {
+		for _, pair := range opts.linkPairs {
+			if pair[0] < 0 || pair[0] >= n || pair[1] < 0 || pair[1] >= n || pair[0] == pair[1] {
+				t.Fatalf("invalid multi-super link pair %v for size %d", pair, n)
+			}
+			links[pair[0]][pair[1]] = true
+			links[pair[1]][pair[0]] = true
+		}
+	}
+
+	const sharedSecret = "e2e-multi-super-shared-secret-0123456789"
+	for index := range n {
+		clusterPeers := make([]mtypes.SuperConfigV2ClusterPeer, 0, n-1)
+		for peerIndex := range n {
+			if links[index][peerIndex] {
+				clusterPeers = append(clusterPeers, mtypes.SuperConfigV2ClusterPeer{
+					SuperID: topology.supers[peerIndex].id,
+					APIUrl:  topology.supers[peerIndex].edgeURL,
+				})
+			}
+		}
+		cluster := &mtypes.SuperConfigV2Cluster{
+			SelfID:                  topology.supers[index].id,
+			Secret:                  sharedSecret,
+			Peers:                   clusterPeers,
+			HeartbeatSeconds:        opts.heartbeat.Seconds(),
+			DeadAfterSeconds:        opts.deadAfter.Seconds(),
+			ReconnectMinSeconds:     0.05,
+			ReconnectMaxSeconds:     0.2,
+			RemoteStaleGraceSeconds: opts.grace.Seconds(),
+			Compression:             opts.compression,
+		}
+		base := validBaseConfig()
+		base.NodeName = "e2e-super-" + strconv.Itoa(index+1)
+		base.APIUrl = topology.supers[index].edgeURL
+		base.ManagementAuth.PasswordHash = topology.supers[index].hash
+		base.STUNServers = nil
+		base.Peers = nil
+		base.PeerAliveTimeoutSeconds = min(1, opts.grace.Seconds())
+		runtime, err := RunWithListeners(&superConfig{
+			BaseConfig:      base,
+			EdgeTemplate:    validEdgeTemplate(),
+			ClusterOverride: cluster,
+			ConfigDir:       topology.supers[index].dir,
+			EdgeListen:      topology.edgeListeners[index],
+			ManageListen:    topology.manageListeners[index],
+			ShutdownTimeout: 5 * time.Second,
+			TickInterval:    10 * time.Millisecond,
+			Now:             topology.supers[index].clock.Now,
+		})
+		if err != nil {
+			t.Fatalf("start super %d: %v", index, err)
+		}
+		topology.supers[index].runtime = runtime
+	}
+	return topology
+}
+
+func (topology *e2eMultiSuper) shutdown() error {
+	topology.closeOnce.Do(func() {
+		for _, cancel := range topology.edgeCancels {
+			if cancel != nil {
+				cancel()
+			}
+		}
+		for _, runtime := range topology.edgeRuntimes {
+			if runtime == nil {
+				continue
+			}
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-runtime.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+			case <-timer.C:
+				topology.closeErr = errors.Join(topology.closeErr, errors.New("edge runtime shutdown timed out"))
+			}
+		}
+		for _, edge := range topology.edges {
+			if edge != nil {
+				edge.Close()
+			}
+		}
+		for index := range topology.supers {
+			if topology.supers[index].runtime == nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := topology.supers[index].runtime.Shutdown(ctx)
+			cancel()
+			if err != nil {
+				topology.closeErr = errors.Join(topology.closeErr, err)
+			}
+		}
+		for _, proxy := range topology.proxies {
+			if proxy != nil {
+				proxy.Close()
+			}
+		}
+		for _, listener := range append(topology.edgeListeners, topology.manageListeners...) {
+			if listener == nil {
+				continue
+			}
+			if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				topology.closeErr = errors.Join(topology.closeErr, err)
+			}
+		}
+	})
+	return topology.closeErr
+}
+
 func newE2ETopology(t *testing.T) *e2eTopology {
 	return newE2ETopologyWithOptions(t, e2eTopologyOptions{pollIntervalSeconds: 0.01})
 }
@@ -473,10 +686,10 @@ func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTop
 	var runtimeA *device.SuperHTTPRuntime
 	var cancelA context.CancelFunc
 	if !options.twoEdges {
-		edgeA, runtimeA, cancelA = newE2EEdge(t, 101, "edge-a", keyA, baseURL, bindA, tapA, privateA, e2eRetryConfig{}, nil)
+		edgeA, runtimeA, cancelA = newE2EEdge(t, 101, "edge-a", keyA, baseURL, bindA, tapA, privateA, e2eRetryConfig{}, nil, nil)
 	}
-	edgeB, runtimeB, cancelB := newE2EEdge(t, 102, "edge-b", keyB, baseURL, bindB, tapB, privateB, e2eRetryConfig{}, nil)
-	edgeC, runtimeC, cancelC := newE2EEdge(t, 103, "edge-c", keyC, baseURL, bindC, tapC, privateC, options.edgeCRetry, nil)
+	edgeB, runtimeB, cancelB := newE2EEdge(t, 102, "edge-b", keyB, baseURL, bindB, tapB, privateB, e2eRetryConfig{}, nil, nil)
+	edgeC, runtimeC, cancelC := newE2EEdge(t, 103, "edge-c", keyC, baseURL, bindC, tapC, privateC, options.edgeCRetry, nil, nil)
 
 	return &e2eTopology{
 		runtime:            runtime,
@@ -511,7 +724,7 @@ func newE2ETopologyWithOptions(t *testing.T, options e2eTopologyOptions) *e2eTop
 	}
 }
 
-func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func()) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc) {
+func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func(), baseURLs []string) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc) {
 	t.Helper()
 	graph, err := path.NewGraph(3, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
 	if err != nil {
@@ -549,6 +762,7 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 		DefaultTTL: 64,
 		SuperNodeV2: mtypes.SuperNodeV2Ref{
 			APIUrl:       baseURL,
+			APIUrls:      append([]string(nil), baseURLs...),
 			APIPrefix:    mtypes.ControlV2APIPrefix,
 			NodeID:       1,
 			ControlPSKey: controlKey,
@@ -559,6 +773,82 @@ func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string
 	runtime.Start(ctx)
 	runtime.MarkReady(int(bind.port), 0, net.ParseIP("127.0.0.1"), nil)
 	return edge, runtime, cancel
+}
+
+func WaitLinked(t *testing.T, topology *e2eMultiSuper, a, b int, timeout time.Duration) {
+	t.Helper()
+	awaitE2E(t, timeout, func() bool {
+		return e2eLinkConnected(topology, a, b)
+	})
+}
+
+func e2eLinkConnected(topology *e2eMultiSuper, a, b int) bool {
+	manager := topology.supers[a].runtime.Cluster()
+	if manager == nil {
+		return false
+	}
+	wantID := topology.supers[b].id
+	for _, link := range manager.Status().Links {
+		if link.SuperID == wantID {
+			return link.State == "connected"
+		}
+	}
+	return false
+}
+
+func WaitApplied(t *testing.T, topology *e2eMultiSuper, s int, nodeID mtypes.Vertex, pred func(mtypes.ControlV2Peer) bool, timeout time.Duration) {
+	t.Helper()
+	awaitE2E(t, timeout, func() bool {
+		snapshot := topology.supers[s].runtime.State().SnapshotFor(60000)
+		for _, peer := range snapshot.Peers {
+			if peer.NodeID == nodeID && pred(peer) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func CutLink(topology *e2eMultiSuper, a, b int) {
+	left := topology.supers[a]
+	right := topology.supers[b]
+	left.runtime.Cluster().SetDialGateForTest(right.id, true)
+	right.runtime.Cluster().SetDialGateForTest(left.id, true)
+	left.runtime.Cluster().CloseSessionForTest(right.id)
+	right.runtime.Cluster().CloseSessionForTest(left.id)
+}
+
+func HealLink(topology *e2eMultiSuper, a, b int) {
+	left := topology.supers[a]
+	right := topology.supers[b]
+	left.runtime.Cluster().SetDialGateForTest(right.id, false)
+	right.runtime.Cluster().SetDialGateForTest(left.id, false)
+}
+
+func ShutdownSuper(t *testing.T, topology *e2eMultiSuper, s int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := topology.supers[s].runtime.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown super %d: %v", s, err)
+	}
+}
+
+func LinkStats(topology *e2eMultiSuper, a, b int) clusterLinkStats {
+	wantID := topology.supers[b].id
+	for _, link := range topology.supers[a].runtime.Cluster().Status().Links {
+		if link.SuperID == wantID {
+			return clusterLinkStats{
+				TX:             link.TX,
+				RX:             link.RX,
+				ConnectedSince: link.ConnectedSince,
+				LastRXAt:       link.LastRXAt,
+				Dialer:         link.Dialer,
+				Compression:    link.Compression,
+			}
+		}
+	}
+	return clusterLinkStats{}
 }
 
 func (topology *e2eTopology) shutdown(ctx context.Context) error {
@@ -596,4 +886,72 @@ func (topology *e2eTopology) shutdown(ctx context.Context) error {
 		}
 	})
 	return topology.closeErr
+}
+
+func TestE2EMultiSuperTopologySmoke(t *testing.T) {
+	t.Run("two supers link through reverse proxies", func(t *testing.T) {
+		topology := newE2EMultiSuperTopology(t, 2, e2eClusterOptions{})
+
+		WaitLinked(t, topology, 0, 1, 3*time.Second)
+		WaitLinked(t, topology, 1, 0, 3*time.Second)
+
+		CutLink(topology, 0, 1)
+		awaitE2E(t, time.Second, func() bool {
+			return !e2eLinkConnected(topology, 0, 1) && !e2eLinkConnected(topology, 1, 0)
+		})
+		gateWindow := time.NewTimer(300 * time.Millisecond)
+		gatePoll := time.NewTicker(5 * time.Millisecond)
+		for gateWindow != nil {
+			select {
+			case <-gateWindow.C:
+				gateWindow = nil
+			case <-gatePoll.C:
+				if e2eLinkConnected(topology, 0, 1) || e2eLinkConnected(topology, 1, 0) {
+					gatePoll.Stop()
+					t.Fatal("cut cluster link reconnected while both dial gates were closed")
+				}
+			}
+		}
+		gatePoll.Stop()
+		HealLink(topology, 0, 1)
+		WaitLinked(t, topology, 0, 1, 3*time.Second)
+		WaitLinked(t, topology, 1, 0, 3*time.Second)
+	})
+
+	t.Run("three supers form a full mesh", func(t *testing.T) {
+		topology := newE2EMultiSuperTopology(t, 3, e2eClusterOptions{linkPairs: nil})
+		for index := range topology.supers {
+			for peerIndex := range topology.supers {
+				if index != peerIndex {
+					WaitLinked(t, topology, index, peerIndex, 3*time.Second)
+				}
+			}
+		}
+		awaitE2E(t, 3*time.Second, func() bool {
+			for index := range topology.supers {
+				connected := 0
+				for _, link := range topology.supers[index].runtime.Cluster().Status().Links {
+					if link.State == "connected" {
+						connected++
+					}
+				}
+				if connected != 2 {
+					return false
+				}
+			}
+			return true
+		})
+		for index := range topology.supers {
+			links := topology.supers[index].runtime.Cluster().Status().Links
+			connected := 0
+			for _, link := range links {
+				if link.State == "connected" {
+					connected++
+				}
+			}
+			if len(links) != 2 || connected != 2 {
+				t.Fatalf("super %d links = %d total, %d connected; want 2/2", index, len(links), connected)
+			}
+		}
+	})
 }
