@@ -80,6 +80,20 @@ Fix: widen the B-register wait to 5s (matches the production report HTTP timeout
 
 ---
 
+## 2026-09-16 — F1 re-audit (HEAD 75819c0): APPROVE
+
+Full write-up: `.omo/evidence/super-multi-control-plane/final-wave-f1-plan-compliance.txt`.
+
+Must NOTs: `state.Register(` in `super_manage_v2.go` = 0; `EncodeAll` = 0; `Cluster.Secret` has `json:"-"`; `time.Now` in cluster production files is constructor/injected defaults only (`currentTime` nil-fallback, `dialClusterLink`/`newClusterManager`/`newClusterSession` Now/WallNow).
+
+§E headers and both canonical strings match the plan byte-for-byte (5-component reply). Hijack path keeps `rw.Reader`. First inbound envelope must be `hello`.
+
+Did not re-litigate the fabricated §E/§F/§G/§H items already recorded above. Evidence files exist for todos 1–27; some early todos stored `grep -c` counts rather than full `-v` PASS transcripts — counts match the acceptance predicates, not a design miss.
+
+F1 does not complete the plan; F2–F4 still need to APPROVE and the user must explicitly okay.
+
+---
+
 ## 2026-09-16 — Final load-dependent e2e flakes (mesh recheck + freeze-reader)
 
 These are the last flakes found in this plan's QA journey. Both only showed under full-suite `-race` load; each passed in isolation.

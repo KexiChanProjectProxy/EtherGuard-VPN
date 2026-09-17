@@ -653,3 +653,129 @@ the_device.EnableSuperHTTP(econfigV2, initialSuperIndex)
 - The test now stops Edge A's control runtime after initial peer/candidate convergence in `TestHTTPOnlySuperEndToEnd`, before manually reporting latency. In the observed-fallback test it stops A only after A's observed vote is committed, preserving that vote while the test manually drives B/C withdrawal and observer expiry. Device traffic remains live; only the competing automatic full-state report loop is stopped.
 - The sibling test also had an independent handshake startup race. The bind test fabric records a raw handshake response before the receiving device consumes it, and intentionally dropped startup initiations still update `lastSentHandshake`, allowing the explicit initiation to be suppressed by `RekeyTimeout`. The test now waits for B's resolved connection URL and calls `ExpireCurrentKeypairs` before the explicit B-to-A handshake so the normal staged-packet handshake path starts deterministically.
 - No correctness predicate or timeout was weakened. The existing 3s deadline remains unchanged. Verification passed the required focused race/shuffle run 10x, ten consecutive full root-package race/shuffle runs, `go build ./...`, and `go vet ./...`; full output is in `.omo/evidence/super-multi-control-plane/fix-e2e-convergence-flake.txt`.
+
+## 2026-09-16 — Task 22 multi-Super E2E topology support
+
+Exact final helper API consumed by todos 23, 24, 25, and 27:
+
+```go
+type e2eSuper struct {
+	id        mtypes.Vertex
+	runtime   *superRuntime
+	edgeURL   string
+	manageURL string
+	clock     *e2eClock
+	dir       string
+	hash      string
+}
+
+type e2eClusterOptions struct {
+	heartbeat   time.Duration
+	deadAfter   time.Duration
+	grace       time.Duration
+	compression string
+	linkPairs   [][2]int
+}
+
+type e2eMultiSuper struct {
+	supers          []e2eSuper
+	proxies         []*httptest.Server
+	edgeListeners   []net.Listener
+	manageListeners []net.Listener
+	edges           []*device.Device
+	edgeRuntimes    []*device.SuperHTTPRuntime
+	edgeCancels     []context.CancelFunc
+	closeOnce       sync.Once
+	closeErr        error
+}
+
+func newE2EMultiSuperTopology(t *testing.T, n int, opts e2eClusterOptions) *e2eMultiSuper
+func WaitLinked(t *testing.T, topology *e2eMultiSuper, a, b int, timeout time.Duration)
+func WaitApplied(t *testing.T, topology *e2eMultiSuper, s int, nodeID mtypes.Vertex, pred func(mtypes.ControlV2Peer) bool, timeout time.Duration)
+func CutLink(topology *e2eMultiSuper, a, b int)
+func HealLink(topology *e2eMultiSuper, a, b int)
+func ShutdownSuper(t *testing.T, topology *e2eMultiSuper, s int)
+func LinkStats(topology *e2eMultiSuper, a, b int) clusterLinkStats
+func newE2EEdge(t *testing.T, id mtypes.Vertex, name, controlKey, baseURL string, bind *e2eBind, tapDevice tap.Device, privateKey device.NoisePrivateKey, retry e2eRetryConfig, beforeRuntime func(), baseURLs []string) (*device.Device, *device.SuperHTTPRuntime, context.CancelFunc)
+```
+
+Cluster-manager test seams:
+
+```go
+func (m *clusterManager) SetDialGateForTest(peerID mtypes.Vertex, blocked bool)
+func (m *clusterManager) CloseSessionForTest(peerID mtypes.Vertex)
+```
+
+- Every Super owns a separate edge listener, management listener, reverse proxy, `t.TempDir`, `e2eClock`, and management hash. Cluster peers use the other Super's proxy URL, so HTTP Upgrade passthrough remains in the full runtime path.
+- `linkPairs == nil` means full mesh. A non-nil slice declares only the undirected pairs listed; a non-nil empty slice creates no links.
+- The dial gate is checked before outbound attempts, after a completed handshake, and during session adoption. `CutLink` closes both gates before closing both current sessions, preventing either direction or an in-flight Upgrade from reconnecting; `HealLink` wakes both normal dial loops.
+- `newE2EEdge` preserves legacy `APIUrl` and copies a supplied `baseURLs` slice into `SuperNodeV2.APIUrls`, so callers can exercise ordered multi-Super failover.
+- Multi-topology cleanup cancels Edge runtimes first, waits for them, closes Edge devices, then calls production `superRuntime.Shutdown` for each Super. It never manually pre-closes cluster sessions; proxies and listeners close only after all Super shutdown calls.
+- `TestE2EMultiSuperTopologySmoke` proves a two-Super proxy link, sustained cut/heal dial-gate behavior, and a three-Super full mesh with exactly two connected links per Super. Build, vet, cluster-manager regressions, and the required race/shuffle smoke command pass; evidence is `.omo/evidence/super-multi-control-plane/task-22-super-multi-control-plane.txt`.
+
+## 2026-09-16 — Task 26 docs + contract whitelists
+
+Documented against committed schema/behavior, not the plan's original pseudocode:
+
+- `SuperConfigV2Cluster` YAML keys match todo 3 / `mtypes.SuperConfigV2Cluster`: `SelfID`, `Secret` (`json:"-"`), `Peers`, `HeartbeatSeconds` (default 10), `DeadAfterSeconds` (default 30, must be > heartbeat), `ReconnectMinSeconds` (default 1), `ReconnectMaxSeconds` (default 30, >= min), `RemoteStaleGraceSeconds`, `Compression` (`zstd`|`none`, default `zstd`).
+- `RemoteStaleGraceSeconds` zero-value is `max(600, PeerAliveTimeoutSeconds)`, not a hard 600. Validate requires the effective value `>= PeerAliveTimeoutSeconds`. Secret minimum is 16 bytes (the §I comment's "32+" is operational guidance, not the validator).
+- `/manage/cluster/state` (todo 15): no cluster returns exactly `{"enabled":false}`; with a cluster the body is `clusterStatus` (`self_id`, `links[]` with `super_id`/`api_url`/`state`/`dialer`/`compression`/`connected_since`/`last_rx_at`/`last_full_sync_at`/`tx`/`rx`, plus `hlc`/`outbox_len`/`live_records`/`registry_entries`) and has no `enabled` field. Link `state` is `connected`|`connecting`|`down`. TX/RX counters are `{messages,inner_bytes,compressed_bytes,wire_bytes}`.
+- Failover (todo 18): sticky-current; rotate on 3 consecutive qualifying report failures OR `max(3×ReportInterval, 15s)` without a qualifying success; `ErrControlUnknownPeer` does not count; no automatic fail-back.
+- Edge `APIUrls` is `yaml:"APIUrls,omitempty" json:"-"` on `SuperNodeV2Ref`. Generator input `gensuper_cluster.yaml` is not a runtime Super YAML; runtime pair is `EgNet_super_cluster_a.yaml` / `_b.yaml` with placeholder `REPLACE_WITH_32_RANDOM_CHARS` (28 bytes, passes `>=16`).
+- Docs contract: `TestDocsReferenceV2APIRoutes` needed `{` as a path terminator so nginx `location /edge/v2/cluster/link {` parses. Markdown tables start with `|`, so the new `### Cluster` / `### Cluster peers` audit reads `parts[1]`; the pre-existing `parts[0]` Logf path is unchanged (it never extracted leading-pipe table keys). A bogus `Foo` row fails `TestDocsReferenceValidYAMLKeys`; that canary was reverted.
+- Consistency wording locked in both READMEs: "eventually consistent; converges within one ReportInterval after connectivity is restored". No strong-consistency claim.
+- Evidence: `.omo/evidence/super-multi-control-plane/task-26-super-multi-control-plane.txt`.
+
+## 2026-09-16 — Todo 23 multi-Super E2E helpers
+
+```go
+func (runtime *SuperHTTPRuntime) SetFailoverThresholdsForTest(minWindow time.Duration)
+func newE2ESuperFrom(t *testing.T, dir string, id mtypes.Vertex, clock *e2eClock) *e2eSuper
+```
+
+- `SetFailoverThresholdsForTest` is per-runtime (not package-global). It replaces only the production 15-second minimum in `max(3×ReportInterval, minimum)`; non-positive values restore 15 seconds, and the existing three-report-failure trigger is unchanged.
+- `newE2ESuperFrom` reloads `super.yaml`, verifies the persisted cluster `SelfID`, creates fresh edge/manage listeners plus a reverse proxy, and calls `RunWithListeners` with the same `ConfigDir` and `e2eClock`. The returned `e2eSuper` owns `proxy`, `edgeLn`, and `manageLn` fields so a restarted topology can replace its cleanup slots.
+- A restart fixture must first create `super.yaml` through a management mutation (for example `ManageV2.AddPeer`); the original topology otherwise exists only from the in-memory `BaseConfig` passed to `RunWithListeners`.
+- Multi-Super edge fixtures should authorize through `ManageV2.AddPeer`, not bare `ControlState.SetPreAuthorized`: before registration, `SetPreAuthorized` has no `NodeName`, and replication correctly rejects that invalid registry entry.
+
+## 2026-09-16 — Todo 24 compression counters and memory budget
+
+- `TestClusterCompressionCounters` builds one immutable 20-edge workload and reuses it for separate zstd/none topologies. Each edge has a deterministic `Register` request plus 30 deterministic `Report` requests; candidates, pong destination, and observed endpoint stay fixed while only `LatencyMS` changes. Each mutation is applied directly to super A and followed by `WaitApplied` on B, which keeps the continuous-stream byte counters deterministic enough for equal `InnerBytes` across modes.
+- Counter measurement subtracts the post-handshake baseline, normalizes `LastSeen` before comparing `ExportLive` (wire JSON removes Go's monotonic clock component), checks A-TX/B-RX message symmetry, enforces only the specified zstd `< none/3` bound, and checks `WireBytes >= CompressedBytes + 20*Messages` in both modes.
+- `TestClusterMemoryBudget` is isolated by `//go:build membudget`. It builds a 3-super full mesh, forces a GC and reads `HeapInuse` before topology startup, registers 500 deterministic peers in 100-record batches, applies two report rounds (1000 mutations total) in 20-record batches with `WaitApplied` barriers on both remote supers, waits for outboxes/link queues/send channels to drain and TX/RX counts to become symmetric, then forces GC and measures the positive `HeapInuse` delta. The test requires delta `< 48 MiB` and exactly one encoder/decoder construction on every directed link; the focused development run measured 27.59 MiB.
+- Exact focused commands: `go test -race -shuffle=on -count=1 -run 'TestClusterCompressionCounters' -v .` and `go test -tags membudget -count=1 -run 'TestClusterMemoryBudget' -v .` (never add `-race` to the latter).
+
+## 2026-09-16 — Todo 25 Edge failover and bootstrap resilience E2E
+
+```go
+func withE2EEdgeStartIndex(index int) e2eEdgeOption
+func withE2EEdgeLogger(logger *device.Logger) e2eEdgeOption
+func (runtime *SuperHTTPRuntime) ControlClientForTest() *ControlHTTPClient
+```
+
+- `newE2EEdge` now accepts variadic test options while preserving every existing call. Todo 25 uses `withE2EEdgeStartIndex` to pass `bootstrapInitialBind`'s selected URL into the real runtime and `withE2EEdgeLogger` to capture concurrent device errors without changing production logging.
+- `e2eEdgeControlProxy` is a stable Edge-facing URL that forwards to a replaceable Super proxy target. It records node ID, path, `Last-Event-ID`, and response status under a mutex. Restart tests can swap the upstream from an old Super process to `newE2ESuperFrom` while proving whether the Edge itself sent any request to that recovered URL.
+- Revision reset setup: replicate Edge 101's registry key while linked, cut A-B, run Edge 102 only on B, run Edge 101 on A, and alternate authenticated report relay costs until A and Edge 101 both observe revision >=100. After shutting down A, B registers Edge 101 at its own low revision; `ControlClientForTest().Current()` verifies the low baseline and Edge 102 peer set, while B's proxy verifies the first `/events` request has an empty `Last-Event-ID`.
+- No-failback setup: route Edge URLs through stable proxies, shut down A, wait for B-origin reports, restart A from persisted config, retarget A's stable proxy, heal the cluster link, then require 20 additional successful B reports with zero new Edge requests to A.
+- Missing-key rotation setup: cut the cluster link before `AddPeer` on A, then shut down A and require at least six B `/report` 401 responses plus six dead-A 502 responses. This covers multiple three-failure rotation windows and verifies the runtime remains alive. After A restart and link heal, allow up to 10 seconds for full-sync registry convergence and resumed successful reporting; shorter recovery bounds proved unnecessarily flaky under `-race`.
+
+## 2026-09-16 — Todo 25 race-flake hardening
+
+- The post-restart A↔B oscillation was not dedupe churn or stale reconnect backoff. `SetDialGateForTest(..., false)` already wakes the dial loop immediately, and runtime traces showed only A dialing while B accepted; B repeatedly ended first with `ErrClusterLinkDead`.
+- Root cause: `clusterSession.readRecord` used the injected logical `Now` for `net.Conn.SetReadDeadline`. Multi-super E2E clocks are intentionally frozen, so by the restart that logical time plus the 500ms dead-after interval was in the operating system's past. Every accepted B session therefore timed out immediately, closed A with EOF, and repeated.
+- Socket deadlines now use real wall time while injected logical time remains responsible for HLC/state timestamps and dead-link bookkeeping. `TestClusterSessionStaleLogicalClockKeepsSocketDeadlineAlive` locks this separation with a logical clock one hour behind real time.
+
+## 2026-09-16 — Final flake-hunting summary (todos 1–27)
+
+- The plan's concurrency discipline was established early and remained the main defense against flakes: mutation/version decisions happen under the owning state lock, persistence and publish/graph work happen after unlock, network sends use bounded queues, cluster sessions own and join their goroutines, and every test synchronization point uses a bounded condition poll rather than sleeping for correctness.
+- Replication was made deterministic around HLC last-writer-wins versions, explicit origins, tombstones, one ordered bounded outbox, full-sync fallback after overflow, and per-link `FromLink` suppression. This eliminated timing-dependent reordering, rebroadcast loops, unbounded growth, and stale resurrection across live peers, registry entries, parameters, partitions, and restarts.
+- HTTP Upgrade/session ownership was hardened end to end: the server preserves the hijacker's buffered reader, the manager deterministically deduplicates simultaneous links, dial gates are checked before dialing, after handshake, and again at adoption, and shutdown cancels dial/drain loops, closes every hijacked session, and waits only within the caller's context. Todo 27's frozen-reader test proves shutdown does not depend on an unresponsive peer consuming or acknowledging data.
+- Edge failover races were removed with epoch-scoped control-client state. Base switches clear snapshot/event cursors, cancel the old sync work, discard stale register/snapshot completions, and serialize selector updates. Bootstrap uses ordered per-URL deadline slices; only report-loop policy rotates; unknown-peer responses do not count as transport failures; and successful failover remains sticky without automatic failback.
+- Standalone fix `52ee300` addressed the only production data race found by the full race suite: `graphpath.IG` routing tables, recalculation timestamps, and changed state were accessed concurrently by ticker recalculation and `ControlState.Report`. An instance `routelock` with the fixed `routelock -> edgelock` order now protects computation, replacement, and readers; the dedicated concurrent recalculation regression test failed before and passes under `-race` after the fix.
+- Standalone fix `c29fe05` root-caused the original single-Super HTTP E2E convergence flake instead of extending deadlines. Automatic full-state reports were legitimately replacing the tests' one-shot latency/observed state, so those control runtimes are stopped only after initial convergence before manual assertions. A separate startup race was fixed by waiting for the resolved URL and expiring keypairs before the explicit handshake, preventing a recorded-but-dropped startup initiation from suppressing it via `RekeyTimeout`.
+- Todo 22's topology work closed cut/heal races by gating both directions and rejecting already-completed in-flight handshakes at adoption. Cleanup follows production ownership order: cancel Edge runtimes, close devices, call each Super's production shutdown, then close proxies/listeners. Reverse-proxy URLs are used for cluster peers, so every later E2E exercises the real Upgrade path.
+- Todo 24 avoided measurement flakes without weakening the memory bound: immutable deterministic workloads, batch barriers, normalized monotonic timestamps, drained outboxes/link queues/send channels, symmetric counter checks, forced GC, and a separate non-race `membudget` binary make compression and HeapInuse assertions reproducible.
+- Todo 25 found the final pre-todo-27 cluster-link flake. The session had used an injected frozen logical clock to set a real OS socket deadline, making restarted links expire immediately once logical `now + deadAfter` was in the wall-clock past. Socket deadlines now use `time.Now`; injected time remains limited to logical/HLC/dead-link bookkeeping, with `TestClusterSessionStaleLogicalClockKeepsSocketDeadlineAlive` preventing regression.
+- Todo 27 added `FreezeReaderForTest`, which atomically stops the reader loop before its next message while leaving the connection open, plus an observed frozen state for deterministic test synchronization. `TestMultiSuperE2EShutdownWithBlockedLink` freezes B, proves A shuts down within the 3-second context, retains no tracked hijacked session, refuses new edge-listener dials, and returns to the pre-topology goroutine baseline within ±3 after cleanup.
+- Todo 27 also made the E2E topology's API prefix configurable and threads it into both Supers and real Edges. `TestMultiSuperE2EUpgradeThroughProxyNonDefaultPrefix` proves `/api/x/cluster/link` forms through the reverse proxy and an Edge using `/api/x` registers and replicates successfully.
+- Final flake hunt: `go test -race -count=5 -run 'TestMultiSuperE2E|TestClusterManager' .` passed with no skip, retry wrapper, assertion weakening, or sleep-based workaround. Both new focused tests pass under `-race`; both build modes, vet, the scoped tracked-package shuffled race suite, and the memory-budget gate pass. The literal `./...` race command reports only the already documented data race in untracked `cmd/eg-tcpmesh`; that scratch package was not modified, and the exact scoped command excluding it passes cleanly. Full command output is recorded in `.omo/evidence/super-multi-control-plane/task-27-super-multi-control-plane.txt`.
