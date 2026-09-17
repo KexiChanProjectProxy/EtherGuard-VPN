@@ -1,0 +1,62 @@
+Exit code: 0
+
+Task 24 final verification
+==========================
+
+$ go build ./...
+Exit code: 0
+(no output)
+
+$ go test -race -shuffle=on -count=1 -run 'TestClusterCompressionCounters' -v .
+Exit code: 0
+-test.shuffle 1789583743774416490
+=== RUN   TestClusterCompressionCounters
+=== RUN   TestClusterCompressionCounters/zstd
+=== RUN   TestClusterCompressionCounters/none
+--- PASS: TestClusterCompressionCounters (10.87s)
+    --- PASS: TestClusterCompressionCounters/zstd (5.49s)
+    --- PASS: TestClusterCompressionCounters/none (5.38s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	11.962s
+
+$ go test -tags membudget -count=1 -run 'TestClusterMemoryBudget' -v .
+Exit code: 0
+=== RUN   TestClusterMemoryBudget
+    super_cluster_mem_test.go:100: HeapInuse delta: 28393472 bytes (27.08 MiB); before=3268608 after=31662080
+--- PASS: TestClusterMemoryBudget (77.95s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	77.976s
+
+$ go vet .
+Exit code: 0
+(no output)
+
+$ go vet -tags membudget .
+Exit code: 0
+(no output)
+
+Required forced-none sanity check
+=================================
+
+Temporary development-only change: the `zstd` subtest called `runClusterCompressionCounterMode(t, "none", workload)`, so both topologies used `none`.
+
+$ go test -race -shuffle=on -count=1 -run 'TestClusterCompressionCounters' -v .
+Exit code: 1 (expected)
+=== RUN   TestClusterCompressionCounters
+=== RUN   TestClusterCompressionCounters/zstd
+=== RUN   TestClusterCompressionCounters/none
+=== NAME  TestClusterCompressionCounters
+    super_cluster_e2e_test.go:605: zstd compressed bytes = 266080, want < one third of none bytes 266080
+--- FAIL: TestClusterCompressionCounters (11.15s)
+    --- PASS: TestClusterCompressionCounters/zstd (5.51s)
+    --- PASS: TestClusterCompressionCounters/none (5.62s)
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	11.210s
+FAIL
+
+The temporary change was reverted before the final acceptance run above.
+
+LSP diagnostics
+===============
+
+`gopls` is not installed and the environment reports that installation was previously declined. Static/compile coverage was therefore provided by `go build`, both focused `go test` commands, `go vet .`, and `go vet -tags membudget .`.

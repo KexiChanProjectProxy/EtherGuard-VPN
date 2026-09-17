@@ -1,0 +1,40 @@
+0
+--- PASS: TestManageV2SnapshotIsAuthorative (0.01s)
+--- PASS: TestManageV2YamlWriteFailureRollsBackRegistryKeyRotation (0.01s)
+--- PASS: TestManageHandlerTwoRuntimesIndependentPasswords (0.04s)
+--- PASS: TestManageV2AddPeerDuplicateRejected (0.01s)
+--- PASS: TestManageV2UpdatePeerPSKeyMustDiffer (0.01s)
+--- PASS: TestManageV2DeletePeerRemovesEdgeFile (0.01s)
+--- PASS: TestManageV2AddPeerRejectsSpecialNodeID (0.00s)
+--- PASS: TestManageAuthOKWithHash (0.00s)
+--- PASS: TestManageV2AddPeerInstallsPreAuthorizedKeyOnRegistry (0.00s)
+--- PASS: TestManageV2UpdateParametersRevisionBump (0.00s)
+--- PASS: TestManageV2DeletePeerUnknownRejected (0.00s)
+--- PASS: TestManageV2ControlStateDeletePeer (0.00s)
+--- PASS: TestManageSuperStateRedactsClusterSecret (0.00s)
+--- PASS: TestManageV2DeletePeerRevokesAndPersists (0.01s)
+--- PASS: TestManageV2UpdatePeerUnknownRejected (0.00s)
+--- PASS: TestManageV2AddPeerNameDuplicateRejected (0.01s)
+--- PASS: TestManageV2UpdateSTUNValidatesAndPersists (0.00s)
+--- PASS: TestManageV2AtomicWriteFailureLeavesPriorState (0.01s)
+--- PASS: TestManageV2ControlStateUpdateParameters (0.00s)
+--- PASS: TestManageV2YamlWriteFailureRollsBackRegistryKeyAdd (0.01s)
+--- PASS: TestManageV2AddPeerIsolatedControlKey (0.02s)
+--- PASS: TestManageV2AddPeerWritesFreshProfiles (0.02s)
+--- PASS: TestManageV2UpdatePeerRotationReplacesRegistryKey (0.01s)
+--- PASS: TestManageV2AllFilesAreV2Only (0.01s)
+--- PASS: TestManageV2YamlWriteFailureRollsBackRegistryKeyDelete (0.01s)
+--- PASS: TestManageV2DeletePeerRemovesRegistryKey (0.01s)
+--- PASS: TestManageAuthOK_acceptsConfiguredPassword_andRejectsLegacyFailures (0.00s)
+--- PASS: TestManageV2UpdatePeerRotatesPSKey (0.01s)
+--- PASS: TestManageV2AddPeerPublishesPeerChange (0.00s)
+
+--- go test -race -shuffle=on -count=1 . ---
+0
+ok  	github.com/KusakabeSi/EtherGuard-VPN	64.504s
+
+--- go vet . ---
+0
+
+--- go build ./... ---
+0

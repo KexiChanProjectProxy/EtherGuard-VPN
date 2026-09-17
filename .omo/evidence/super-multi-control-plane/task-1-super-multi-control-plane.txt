@@ -1,0 +1,311 @@
+exit_code=1
+=== go build ./... && go test -race -shuffle=on -count=1 ./device ===
+started: 2026-09-16T04:03:58-04:00
+go_build_exit=0
+-test.shuffle 1789545841558045394
+--- FAIL: TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener (3.05s)
+    super_http_runtime_test.go:1203: goroutine delta = 3, all stacks:
+        goroutine 877 [running]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.collectGoroutineDelta(0xc0004b1208, 0xc00110deb0)
+        	/home/kexi/EtherGuard-VPN/device/super_http_runtime_test.go:1038 +0x13b
+        github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener(0xc0004b1208)
+        	/home/kexi/EtherGuard-VPN/device/super_http_runtime_test.go:1203 +0x20e
+        testing.tRunner(0xc0004b1208, 0x123d228)
+        	/usr/local/go/src/testing/testing.go:2193 +0x21d
+        created by testing.(*T).Run in goroutine 1
+        	/usr/local/go/src/testing/testing.go:2258 +0xb13
+        
+        goroutine 1 [chan receive]:
+        testing.(*T).Run(0xc0001c2248, {0xc8e798, 0x49}, 0x123d228)
+        	/usr/local/go/src/testing/testing.go:2266 +0xb3e
+        testing.runTests.func1(0xc0001c2248)
+        	/usr/local/go/src/testing/testing.go:2742 +0x85
+        testing.tRunner(0xc0001c2248, 0xc00003da40)
+        	/usr/local/go/src/testing/testing.go:2193 +0x21d
+        testing.runTests({0xc7ae8d, 0x24}, {0xc80bb0, 0x2b}, 0xc000016018, {0x12a38c8, 0x75, 0x75}, {0xc2a2b1d26146124b, 0x8bb4e04728, ...})
+        	/usr/local/go/src/testing/testing.go:2740 +0x9ea
+        testing.(*M).Run(0xc0001e00a0)
+        	/usr/local/go/src/testing/testing.go:2600 +0xf45
+        main.main()
+        	_testmain.go:280 +0x165
+        
+        goroutine 109 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 128
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 108 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc0006a0008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 128
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 2374 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1229
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 1929 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc000e7c320}, 0xc000e7c2d0, 0xc00089b5f0)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNBypassesResolverForLiteralURI in goroutine 1928
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:148 +0x71d
+        
+        goroutine 498 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 469
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 449 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc0006a0508)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 469
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 402 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc0006a0008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 128
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 1184 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc00096af08)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1218
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 888 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc000cdc508)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 829
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 827 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc0001eea00}, 0xc0001ee9b0, 0xc0001ca490)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNResolvesHostnameBeforeSendingLiteralEndpoint in goroutine 826
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:121 +0x79d
+        
+        goroutine 889 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 829
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 743 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc0006a0508)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 469
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 1185 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1218
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 2000 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc000438870}, 0xc000438820, 0xc0004123f0)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNDiscoversMappedCandidatesThroughActiveBind in goroutine 1999
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:267 +0x79d
+        
+        goroutine 2007 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc000db6508)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2071
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 1174 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc00094c230}, 0xc00094c1e0, 0xc000928480)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNDetectsMappedPortMismatch in goroutine 1173
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:454 +0x95d
+        
+        goroutine 879 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f21283c6200, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc000ca64a0, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Read(0xc000ca6480, {0xc001220000, 0x1000, 0x1000})
+        	/usr/local/go/src/internal/poll/fd_unix.go:170 +0x499
+        net.(*netFD).Read(0xc000ca6480, {0xc001220000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/fd_posix.go:68 +0x4b
+        net.(*conn).Read(0xc0007820d8, {0xc001220000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/net.go:196 +0xad
+        net/http.(*connReader).Read(0xc0003fc400, {0xc001220000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/http/server.go:856 +0x288
+        bufio.(*Reader).fill(0xc00121e000)
+        	/usr/local/go/src/bufio/bufio.go:113 +0x2a4
+        bufio.(*Reader).Peek(0xc00121e000, 0x4)
+        	/usr/local/go/src/bufio/bufio.go:152 +0xaf
+        net/http.(*conn).serve(0xc00060c750, {0x12391d8, 0xc0003fa8a0})
+        	/usr/local/go/src/net/http/server.go:2173 +0x112e
+        created by net/http.(*Server).Serve in goroutine 878
+        	/usr/local/go/src/net/http/server.go:3581 +0x92a
+        
+        goroutine 1150 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc000cdc508)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 829
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 2008 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2071
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 2373 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc0004f8008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1229
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 1528 [select]:
+        net/http.(*persistConn).writeLoop(0xc000da52c0)
+        	/usr/local/go/src/net/http/transport.go:2810 +0x1b5
+        created by net/http.(*Transport).dialConn in goroutine 1526
+        	/usr/local/go/src/net/http/transport.go:2124 +0x397d
+        
+        goroutine 1873 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc0000286e0}, 0xc000028690, 0xc000795840)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNFailsOverAfterFirstServerTimeout in goroutine 1872
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:300 +0x693
+        
+        goroutine 1821 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x1239210, 0xc000ea9900}, 0xc000ea98b0, 0xc000f84170)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNDiscoversBothFamiliesFromSingleHostname in goroutine 1820
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:395 +0x82b
+        
+        goroutine 1478 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc00096af08)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1218
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 2317 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc000db6508)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2071
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 878 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f21283c6a00, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc000ca6420, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Accept(0xc000ca6400)
+        	/usr/local/go/src/internal/poll/fd_unix.go:618 +0x4ea
+        net.(*netFD).accept(0xc000ca6400)
+        	/usr/local/go/src/net/fd_unix.go:149 +0x45
+        net.(*TCPListener).accept(0xc000d02300)
+        	/usr/local/go/src/net/tcpsock_posix.go:159 +0x4e
+        net.(*TCPListener).Accept(0xc000d02300)
+        	/usr/local/go/src/net/tcpsock.go:387 +0x65
+        net/http.(*Server).Serve(0xc000604dc0, {0x1238230, 0xc000d02300})
+        	/usr/local/go/src/net/http/server.go:3551 +0x6ad
+        net/http/httptest.(*Server).goServe.func1()
+        	/usr/local/go/src/net/http/httptest/server.go:586 +0xad
+        created by net/http/httptest.(*Server).goServe in goroutine 877
+        	/usr/local/go/src/net/http/httptest/server.go:584 +0xeb
+        
+        goroutine 1527 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f21283c6800, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc0001c4220, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Read(0xc0001c4200, {0xc001234000, 0x1000, 0x1000})
+        	/usr/local/go/src/internal/poll/fd_unix.go:170 +0x499
+        net.(*netFD).Read(0xc0001c4200, {0xc001234000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/fd_posix.go:68 +0x4b
+        net.(*conn).Read(0xc000684058, {0xc001234000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/net.go:196 +0xad
+        net/http.(*persistConn).Read(0xc000da52c0, {0xc001234000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/http/transport.go:2300 +0x233
+        bufio.(*Reader).fill(0xc00121e120)
+        	/usr/local/go/src/bufio/bufio.go:113 +0x2a4
+        bufio.(*Reader).Peek(0xc00121e120, 0x1)
+        	/usr/local/go/src/bufio/bufio.go:152 +0xaf
+        net/http.(*persistConn).readLoop(0xc000da52c0)
+        	/usr/local/go/src/net/http/transport.go:2483 +0x31b
+        created by net/http.(*Transport).dialConn in goroutine 1526
+        	/usr/local/go/src/net/http/transport.go:2123 +0x38f2
+        
+        goroutine 2619 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc0004f8008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1229
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+    super_http_runtime_test.go:1217: wrong-key bootstrap leaked 3 goroutines
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/device	5.554s
+FAIL
+go_test_exit=1
+finished: 2026-09-16T04:04:07-04:00
+overall_exit=1
+
+=== POST-COMMIT ACCEPTANCE CHECKS ===
+commit=0050fe251fc0d2d655920659cdb6d9543ab726cc
+--- git status --porcelain ---
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+--- git log -1 --pretty=%s ---
+fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+--- git show --stat HEAD ---
+commit 0050fe251fc0d2d655920659cdb6d9543ab726cc
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 04:04:29 2026 -0400
+
+    fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+    
+    Pre-existing test failure: go build ./... passed; go test -race -shuffle=on -count=1 ./device failed (TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener goroutine leak). Recorded in .omo/evidence/super-multi-control-plane/task-1-super-multi-control-plane.txt.
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ device/device.go                  | 25 ++++++++++++++
+ device/p2p_endpoints.go           | 11 ++++++
+ device/p2p_endpoints_test.go      | 40 +++++++++++++++++++++
+ device/p2p_retry_test.go          | 18 ++++++----
+ device/peer.go                    | 33 ++++++++++++++++--
+ device/peer_endpoint_lock_test.go | 52 ++++++++++++++++++++++++++++
+ device/receivesendproc.go         | 13 +++++++
+ device/sticky_linux.go            | 15 ++++++--
+ device/sticky_linux_test.go       | 34 ++++++++++++++++++
+ device/super_http_client.go       |  9 +++++
+ device/super_http_runtime.go      | 73 ++++++++++++++++++++++++++++++++++++---
+ device/super_http_runtime_test.go | 38 ++++++++++++++++++++
+ device/super_stun_test.go         | 21 +++++++++++
+ 13 files changed, 366 insertions(+), 16 deletions(-)
+--- git show --stat HEAD | grep -c 'device/' ---
+device_path_count=13
+--- git show --stat HEAD | grep -E 'KexiSdnConfig|cmd/' ---
+kexi_cmd_grep_exit=1 (no match, expected)

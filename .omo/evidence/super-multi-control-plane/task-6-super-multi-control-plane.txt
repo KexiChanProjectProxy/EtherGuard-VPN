@@ -1,0 +1,4 @@
+exit code: 0
+command: go test -race -shuffle=on -count=1 -run 'TestClusterCrypto' -v . 2>&1 | grep -c '^--- PASS'
+output:
+10

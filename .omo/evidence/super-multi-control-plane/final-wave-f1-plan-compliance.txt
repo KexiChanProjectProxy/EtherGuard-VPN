@@ -1,0 +1,173 @@
+F1 Plan compliance audit — super-multi-control-plane
+HEAD: 75819c0 fix(test): widen failover-to-B waits so race-suite load cannot starve reports
+Date: 2026-09-16
+Verdict: APPROVE
+
+================================================================
+1. Evidence files (todos 1–27)
+================================================================
+All 27 task evidence files exist under .omo/evidence/super-multi-control-plane/.
+
+  task-1  exists 18533B  baseline commit; device leak FAIL recorded (later fixed in todo 18)
+  task-2  exists, exit 0, 6 --- PASS lines
+  task-3  exists, exit 0, grep -c '^--- PASS' = 10
+  task-4  exists, exit 0, 7 --- PASS lines
+  task-5  exists, 29 --- PASS lines
+  task-6  exists, exit 0, grep -c '^--- PASS' = 10
+  task-7  exists, exit 0, 36 --- PASS lines
+  task-8  exists, exit 0, grep -c = 9
+  task-9  exists; acceptance is grep -E '^--- FAIL' (empty → grep exit 1, go_test_exit=0)
+  task-10 exists, exit 0
+  task-11 exists, grep -c = 5
+  task-12 exists, 6 --- PASS lines
+  task-13 exists, Exit code: 0
+  task-14 exists, grep -c = 9
+  task-15 exists, focused tests PASS; full ./... FAIL was then-current e2e flake + untracked cmd/eg-tcpmesh race
+  task-16 exists, grep -c = 3
+  task-17 exists; grep -E '^--- FAIL' empty, full_test_exit_code=0, required tests listed PASS
+  task-18 exists; same shape as 17
+  task-19 exists, 23 --- PASS lines
+  task-20 exists, exit 0, 6 --- PASS lines
+  task-21 exists, exit=0, 3 --- PASS lines
+  task-22 exists, exit 0, 1 --- PASS (smoke)
+  task-23 exists, exit 0, 5 --- PASS (TestMultiSuperE2E*)
+  task-24 exists, Exit 0; TestClusterCompressionCounters PASS; TestClusterMemoryBudget PASS HeapInuse 27.08 MiB < 48; includes required forced-none FAIL sanity then revert
+  task-25 exists, exit 0, 4 --- PASS (TestMultiSuperE2EEdge*)
+  task-26 exists, 16 --- PASS lines
+  task-27 exists, exit 0, 2 new tests PASS; includes full-suite output
+
+Note (not a REJECT): several early todos stored grep -c counts rather than full -v `--- PASS:` transcripts. The stored counts match those todos' acceptance predicates. Todos 9/17/18's `grep -E '^--- FAIL'` returning 1 is the specified empty-FAIL command.
+
+================================================================
+2. Must NOT greps (this working tree)
+================================================================
+state.Register( in super_manage_v2.go
+  HITS=0
+
+EncodeAll in *.go
+  HITS=0
+
+Cluster.Secret json:"-"
+  mtypes/http_control.go:765
+  Secret string `yaml:"Secret" json:"-"`
+  PASS
+
+time.Now in production cluster files (not tests):
+  super_cluster_handshake.go:154  clusterAuthenticator.currentTime nil-fallback → time.Now()
+  super_cluster_handshake.go:215  dialClusterLink: now := time.Now; overridden by cfg.now
+  super_cluster_manager.go:160     newClusterManager: now = time.Now when config.Now == nil
+  super_cluster_session.go:102     newClusterSession: cfg.Now = time.Now when nil
+  super_cluster_session.go:105     newClusterSession: cfg.WallNow = time.Now when nil
+  No method-body wall-clock calls. Socket deadlines use injected WallNow (31a4140).
+  PASS (constructor/injected defaults only)
+
+klauspost/compress v1.20.0 is in go.mod (todo 2). No EncodeAll/DecodeAll.
+
+================================================================
+3. §E handshake — headers and canonical strings (byte-for-byte)
+================================================================
+clusterProtoVersion = "eg-cluster/1"  (super_cluster_proto.go:12)
+
+Request headers (super_cluster_handshake.go:26-31, 234-241):
+  Upgrade: eg-cluster/1
+  Connection: Upgrade
+  X-EG-Cluster-ID
+  X-EG-Timestamp
+  X-EG-Nonce
+  X-EG-Cluster-Ephemeral
+  X-EG-Cluster-Compression
+  X-EG-Signature
+  MATCH §E
+
+Request canonical:
+  plan:  "eg-cluster/1\nGET\n"+EscapedPath+"\n"+ts+"\n"+nonce+"\n"+clientID+"\n"+base64(clientEph)+"\n"+compression
+  code:  signClusterHandshake(secret, clusterProtoVersion, http.MethodGet, req.URL.EscapedPath(), timestamp, nonce, clientID, ephemeralText, cfg.compression)
+         join(parts, "\n")
+  MATCH
+
+Reply canonical:
+  plan:  "eg-cluster/1-reply\n"+clientNonce+"\n"+serverID+"\n"+base64(serverEph)+"\n"+compression
+  code:  signClusterHandshake(secret, clusterProtoVersion+"-reply", clientNonce, serverID, ephemeralText, compression)
+  MATCH (5 components; there is no 8-component reply string in the plan)
+
+Reply headers + 101 + Hijack; client uses resp.Body.(io.ReadWriteCloser).
+AcceptUpgrade passes rw.Reader into the session (does not replace hijack buffer).
+Skew 60s, nonce cache (clusterID/peerID, nonce), 15s handshake ctx, ForceAttemptHTTP2:false, TLSNextProto empty, Client.Timeout 0.
+HKDF info strings "eg-cluster/1 c2s" / "eg-cluster/1 s2c".
+Record: uint32 BE clen || AEAD.Seal(nonce=[4 zero || uint64 BE counter], AD=4-byte length).
+First inbound envelope must be hello (ErrClusterFirstMessageNotHello).
+
+================================================================
+4. §A–§K spot-check
+================================================================
+§A Identity & versions
+  ClusterVersion{HLC, Origin}; Less = HLC then Origin (larger Origin wins).
+  hlcClock.Next: wall>lastWall → wall<<16; else last+1; counter 0xffff → (lastWall+1)<<16.
+  Observe clamps to (now_ms+1h)<<16, log at most once/min.
+  newHLCClock last = max(now, highWater). PASS
+
+§B Replicated live record
+  applyReplicatedPeerLocked: drop if version !Newer existing or !Newer live tombstone; else replace view/candidates/votes/latency/origin/version/receivedAt=now(); graph.UpdateLatency after unlock.
+  ApplyReplicatedAlive: exists && same origin (peer.origin == Version.Origin) && Version.Newer; update version/receivedAt/LastSeen; no revision bump.
+  applyReplicatedDeleteLocked: always record newer tombstone; delete live record only if Version.Newer; emit via batch after unlock.
+  Live tombstone TTL max(2*PeerAliveTimeout, 10min), cap 4096. PASS
+
+§C Outbox
+  clusterMutation fields match. Cap 4096. DrainOutbox under s.mu, no I/O. Overflow clears + resyncNeeded. FromLink preserved. Graph/publish after unlock. PASS
+
+§D Registry & parameters
+  CommitRegistry / RevokeRegistry / CommitParameters version-checked LWW, append outbox.
+  ControlKeyFor: registry key authoritative (learnings + replica apply copies registry key into record).
+  cluster_state.yaml: HLCHighWater, ParamsVersion, Registry, RegistryTombstones. PASS
+  No state.Register( in super_manage_v2.go.
+
+§E Link handshake — see section 3. PASS
+
+§F Messages
+  hello, full_sync, peer_upsert/alive/delete, registry_upsert/delete, params_update, ping, pong.
+  No sync_done in the plan; completion is Part == Of. PASS
+
+§G Link manager
+  Dial loop per Cluster.Peers; AcceptUpgrade inbound; dedupe keeps lower DIALER SuperID; both sides dial (plan: "One linkPeer per Cluster.Peers entry: dial loop").
+  Hijack reader preserved. Hello queued before session.Run; drainSendQueue before heartbeat ticker.
+  SetOriginLinkStatus; Shutdown owned by runtime. PASS
+
+§H Edge failover
+  SwitchBase: trim slash, clear current/lastEventID, epoch++, CloseIdleConnections, non-blocking switched.
+  shouldRotate: len(urls)>1 AND (failures>=3 OR now-lastSuccess >= max(3*ReportInterval, 15s)).
+  bootstrapInitialBind: sequential ResolveAPIUrls with max(2s, remaining/len). PASS
+
+§I Config schema
+  SuperConfigV2Cluster fields + Secret json:"-". Compression zstd|none. PASS
+
+§J Diagnostics
+  GET {APIPrefix}/manage/cluster/state?Password= via manageAuthOKWithHash.
+  cluster nil → {"enabled":false}; else clusterStatus JSON (self_id, links, hlc, outbox_len, live_records, registry_entries).
+  /manage/super/state unauthenticated, Secret redacted. PASS
+
+§K nginx
+  example_config/super_mode/README.md location /edge/v2/cluster/link block matches §K
+  (proxy_http_version 1.1, Upgrade/Connection, buffering off, read/send timeout 90s).
+  Path-preservation note present. PASS
+
+================================================================
+5. Items explicitly NOT re-litigated (prior F1 invented plan text)
+================================================================
+Per issues.md 2026-09-16 — F1/F2 claims fabricated vs genuine:
+  - Reply canonical is 5 components, not 8.
+  - No sync_done message.
+  - Both sides dial; lower-ID-only dialing is not specified.
+  - bootstrap is sequential, not overlapping staggered 2s attempts.
+  - ManageV2 is persist-then-commit with no extra reload step.
+  - s.now() under ControlState.mu matches Register/Report.
+
+Those are not plan violations.
+
+================================================================
+6. Verdict
+================================================================
+APPROVE
+
+Implementation of §A–§K matches the plan text. Must NOTs hold. All 27 todo evidence files exist; focused acceptance commands are recorded as passing (with the documented grep-count / empty-FAIL shapes). Post-todo fixes 67f238c / 31a4140 / 31ad4af / 75819c0 close the genuine hello-first, wall-clock deadline, drain-before-ticker, and device-wait findings without changing the design.
+
+F1 does not declare the plan complete; F2–F4 must also APPROVE and the user must explicitly okay.

@@ -1,0 +1,8 @@
+exit_code=1
+command=go test -race -shuffle=on -count=1 -run 'TestSuperHTTPRuntime|TestSuperSelector' -v ./device 2>&1 | grep -E '^--- FAIL'
+stdout=
+interpretation=expected grep status: no matching FAIL lines
+full_test_exit_code=0
+build_exit_code=0
+vet_device_exit_code=0
+required_tests=PASS TestSuperSelectorThresholds; PASS TestSuperHTTPRuntimeFailoverAfterThreeReportFailures; PASS TestSuperHTTPRuntimeFailoverAfterNoSuccessWindow; PASS TestSuperHTTPRuntimeUnknownPeerDoesNotCountAsFailure; PASS TestSuperHTTPRuntimeReregisterBypassesThrottleOnSwitch; PASS TestSuperHTTPRuntimeStaleEpochRegisterIgnored; PASS TestSuperHTTPRuntimeNoRotateWithSingleURL

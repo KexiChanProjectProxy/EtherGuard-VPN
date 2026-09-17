@@ -1,0 +1,57 @@
+task-7-11-commits-super-multi-control-plane
+date: 2026-09-16
+branch: master
+strategy: NEW_COMMITS_ONLY (2 atomic commits for plan todos 7 and 11)
+
+=== git status --porcelain (after 2 commits) ===
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+=== git log --oneline -8 ===
+8933b36 feat(cluster): define replication wire protocol DTOs
+8814dcf feat(super): version-stamp control records and add replication outbox
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+
+=== git log -2 --format=%H %s ===
+8933b361ef2cfb3ba885e4eb22780f9d5e74581d feat(cluster): define replication wire protocol DTOs
+8814dcf9c0d98238c196b581e41741d4db4bd32d feat(super): version-stamp control records and add replication outbox
+
+=== HEAD~1 (todo 7) git show --stat ===
+commit 8814dcf9c0d98238c196b581e41741d4db4bd32d
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 05:26:33 2026 -0400
+
+    feat(super): version-stamp control records and add replication outbox
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_mutation.go    | 150 ++++++++++++++++++++++++
+ super_cluster_outbox_test.go | 263 +++++++++++++++++++++++++++++++++++++++++++
+ super_control_report.go      |  36 +++++-
+ super_control_state.go       |  83 +++++++++++++-
+ 4 files changed, 525 insertions(+), 7 deletions(-)
+
+=== HEAD (todo 11) git show --stat ===
+commit 8933b361ef2cfb3ba885e4eb22780f9d5e74581d
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 05:26:46 2026 -0400
+
+    feat(cluster): define replication wire protocol DTOs
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_proto.go      | 235 ++++++++++++++++++++++++++++++++++++++++++++
+ super_cluster_proto_test.go | 202 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 437 insertions(+)

@@ -1,0 +1,5 @@
+0
+$ go build ./... && go vet . && go test -race -shuffle=on -count=1 -run 'TestClusterProto' -v . 2>&1 | grep -c '^--- PASS'
+5
+
+The compound command ran with `set -o pipefail`; build, vet, the focused race test, and the exact acceptance grep all succeeded.

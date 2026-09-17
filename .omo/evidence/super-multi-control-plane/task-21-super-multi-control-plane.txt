@@ -1,0 +1,40 @@
+exit=0
+=== go test TestGenSuperCfg|TestManageBuildEdge ===
+exit=0
+--- FAIL lines ---
+--- PASS of required tests ---
+--- PASS: TestGenSuperCfgClusterRejectsSpecialSelfID (0.00s)
+--- PASS: TestGenSuperCfgClusterEmitsAPIUrls (0.05s)
+--- PASS: TestManageBuildEdgeConfigV2APIUrls (0.01s)
+
+=== go build ./... ===
+exit=0
+
+=== go vet ./gencfg . ===
+exit=0
+
+=== CLI gencfg gensuper_cluster.yaml ===
+/tmp/tmp.XeoAbNWNDx/out/EgNet_edge001.yaml
+/tmp/tmp.XeoAbNWNDx/out/EgNet_edge002.yaml
+/tmp/tmp.XeoAbNWNDx/out/EgNet_edge100.yaml
+/tmp/tmp.XeoAbNWNDx/out/EgNet_super.yaml
+exit=0
+generated:
+EgNet_edge001.yaml
+EgNet_edge002.yaml
+EgNet_edge100.yaml
+EgNet_super.yaml
+EgNet_edge001.yaml SuperNodeV2:
+SuperNodeV2:
+  APIUrl: ""
+  APIUrls:
+  - http://127.0.0.1:3000
+  - http://127.0.0.1:3001
+  APIPrefix: /edge/v2
+  NodeID: 10
+  ControlPSKey: /eD/VpaN8PhKdJPIVKrIMPI0udSwk9Mzn0dLY+pz/0Q=
+
+APIUrls count:
+2 ['http://127.0.0.1:3000', 'http://127.0.0.1:3001']
+
+=== existing example_config/super_mode generated files unchanged ===

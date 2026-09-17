@@ -1,0 +1,16 @@
+exit_code=0
+command: go test -race -shuffle=on -count=1 -run 'TestManage|TestClusterRegistryWrite|TestClusterState' -v . 2>&1 | grep -E '^--- FAIL'
+output: <no output>
+
+exit_code=0
+command: go test -race -shuffle=on -count=1 .
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN	68.055s
+
+exit_code=0
+command: go build ./...
+output: <no output>
+
+exit_code=0
+command: go vet .
+output: <no output>

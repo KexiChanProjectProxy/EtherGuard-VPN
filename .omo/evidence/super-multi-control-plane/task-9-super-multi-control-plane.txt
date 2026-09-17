@@ -1,0 +1,23 @@
+exit_code=1
+
+command: go test -race -shuffle=on -count=1 -run 'TestControlState|TestClusterRegistry|TestClusterSweep|TestControlAuth' -v . 2>&1 | grep -E '^--- FAIL'
+output: (none)
+go_test_exit=0
+grep_exit=1
+no_fail=true
+
+Verified in the same successful working-tree run before capture:
+- go build ./...
+- go test -race -shuffle=on -count=1 -run 'TestControlState|TestClusterRegistry|TestClusterSweep|TestControlAuth' -v .
+- go vet .
+
+Regression follow-up — registry-aware auth test seam:
+- Red: `TestControlAuthRegisterTestKeyOverridesRegistryCredential` accepted K1 and rejected K2 after `SetPreAuthorized(K1)` followed by `RegisterTestKey(K2)`.
+- Green: the helper now preserves its active test fixture while routing credential replacement through `SetPreAuthorized`; K1 is rejected and K2 is accepted.
+- Targeted affected tests pass under `-race -shuffle=on -count=1`:
+  - `TestControlAuthRegisterTestKeyOverridesRegistryCredential`
+  - `TestControlHTTPV2BootstrapSweptActiveRecordAuthenticatesViaRegistry`
+  - `TestControlHTTPV2BootstrapDeletedNodeRejected`
+- `go build ./...` exit code: 0
+- `go vet .` exit code: 0
+- Full `go test -race -shuffle=on -count=1 ./...` was run twice. It remains non-zero because of out-of-scope existing failures recorded in `issues.md`: a `cmd/eg-tcpmesh` concurrent log-buffer race and a `device` goroutine-leak assertion. No files under `cmd/` or `device/` were modified.

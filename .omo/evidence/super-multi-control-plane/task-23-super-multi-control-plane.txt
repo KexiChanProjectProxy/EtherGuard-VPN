@@ -1,0 +1,31 @@
+exit 0
+$ go build ./...
+
+exit 0
+$ go vet .
+
+exit 0
+$ go test -race -shuffle=on -count=1 -run 'TestMultiSuperE2E' -v .
+-test.shuffle 1789581508840742683
+=== RUN   TestMultiSuperE2ERegistryReplicates
+--- PASS: TestMultiSuperE2ERegistryReplicates (0.17s)
+=== RUN   TestMultiSuperE2ELinkCutKeepsBothHalves
+--- PASS: TestMultiSuperE2ELinkCutKeepsBothHalves (2.16s)
+=== RUN   TestMultiSuperE2EThreeSuperForwarding
+--- PASS: TestMultiSuperE2EThreeSuperForwarding (0.16s)
+=== RUN   TestMultiSuperE2EConverge
+--- PASS: TestMultiSuperE2EConverge (0.30s)
+=== RUN   TestMultiSuperE2ESuperDeathFailover
+--- PASS: TestMultiSuperE2ESuperDeathFailover (0.43s)
+PASS
+ok  github.com/KusakabeSi/EtherGuard-VPN  4.321s
+
+exit 0
+$ go test -race -shuffle=on -count=1 -run 'TestMultiSuperE2E' -v . 2>&1 | grep -c '^--- PASS: TestMultiSuperE2E'
+5
+
+exit 0
+$ go test -race -shuffle=on -count=3 -run 'TestMultiSuperE2E' .
+ok  github.com/KusakabeSi/EtherGuard-VPN  10.331s
+
+Note: gopls diagnostics could not run because the Go LSP server is not installed and installation was previously declined. The build, vet, race detector, five-test pass-count gate, and three-run flake check all passed.

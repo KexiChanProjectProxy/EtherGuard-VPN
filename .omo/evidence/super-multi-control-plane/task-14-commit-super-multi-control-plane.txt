@@ -1,0 +1,55 @@
+task-14 commit evidence — super-multi-control-plane
+====================================================
+Date: 2026-09-16
+Branch: master
+Strategy: NEW_COMMITS_ONLY (on master; no rewrite)
+
+Commit: 4ff613c9a22eff55051ed01d16fd475e010cb66b
+Subject: feat(cluster): link manager with dedupe, coalescing queues, full sync and forwarding
+
+Staged/committed exactly 2 paths:
+  super_cluster_manager.go (A)
+  super_cluster_manager_test.go (A)
+
+git log --oneline -16
+---------------------
+4ff613c feat(cluster): link manager with dedupe, coalescing queues, full sync and forwarding
+690a8fb feat(cluster): HTTP upgrade handshake with HMAC mutual authentication
+659d22a feat(cluster): add encrypted compressed link session with heartbeat and counters
+dd87d1c refactor(manage): persist-then-commit mutations with replicated registry and cluster state file
+290aa91 feat(super): versioned registry and parameters with origin-aware timeout sweep
+6a780f6 feat(super): idempotent replicated record apply with batch revisioning
+8933b36 feat(cluster): define replication wire protocol DTOs
+8814dcf feat(super): version-stamp control records and add replication outbox
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+524a1ea fix(super): drop closed SSE subscribers to stop OOM
+14d1be7 fix(control): reject mismatched pong sources
+
+git status --porcelain
+----------------------
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+git show --stat HEAD
+--------------------
+commit 4ff613c9a22eff55051ed01d16fd475e010cb66b
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 08:07:11 2026 -0400
+
+    feat(cluster): link manager with dedupe, coalescing queues, full sync and forwarding
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_manager.go      | 1009 +++++++++++++++++++++++++++++++++++++++++
+ super_cluster_manager_test.go |  613 +++++++++++++++++++++++++
+ 2 files changed, 1622 insertions(+)

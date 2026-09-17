@@ -1,0 +1,119 @@
+task-2-6-commits-super-multi-control-plane
+date: 2026-09-16
+branch: master
+strategy: NEW_COMMITS_ONLY (5 atomic commits for plan todos 2-6)
+
+=== git status --porcelain (after 5 commits) ===
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+=== git log --oneline -6 ===
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+
+=== git log -6 --format=%H %s ===
+bbabc63d49c43a6a63dcabdc022205e8e7c9ed3c feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc09e795d56d482f6690a86cda303f7ea2f fix(super): scope management password to the owning runtime
+f0b77781a4793f6b2a3b31e260e0ef1e30178a52 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8d8262eb26e90b6138d3c9c6bd740186b1 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969ab32f76996d815b7a960be337517829bab feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe251fc0d2d655920659cdb6d9543ab726cc fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+
+=== HEAD~4 (todo 2) git show --stat ===
+commit 46c969ab32f76996d815b7a960be337517829bab
+Author:     kexichan <183220149+kexichan@users.noreply.github.com>
+AuthorDate: Wed Sep 16 05:01:56 2026 -0400
+Commit:     kexichan <183220149+kexichan@users.noreply.github.com>
+CommitDate: Wed Sep 16 05:01:56 2026 -0400
+
+    feat(cluster): add zstd stream codec and klauspost/compress dependency
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ go.mod                      |   2 +-
+ go.sum                      |   4 +-
+ super_cluster_codec.go      | 259 ++++++++++++++++++++++++++++++++++++++++++++
+ super_cluster_codec_test.go | 220 +++++++++++++++++++++++++++++++++++++
+ 4 files changed, 482 insertions(+), 3 deletions(-)
+
+=== HEAD~3 (todo 3) git show --stat ===
+commit 66dffc8d8262eb26e90b6138d3c9c6bd740186b1
+Author:     kexichan <183220149+kexichan@users.noreply.github.com>
+AuthorDate: Wed Sep 16 05:02:08 2026 -0400
+Commit:     kexichan <183220149+kexichan@users.noreply.github.com>
+CommitDate: Wed Sep 16 05:02:08 2026 -0400
+
+    feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ gencfg/example_conf.go                    |  37 +++++
+ gencfg/example_conf_cluster_test.go       |  43 ++++++
+ mtypes/http_control.go                    | 178 +++++++++++++++++++--
+ mtypes/super_config_v2_cluster_test.go    | 248 ++++++++++++++++++++++++++++++
+ mtypes/super_node_v2_ref_api_urls_test.go | 103 +++++++++++++
+ 5 files changed, 594 insertions(+), 15 deletions(-)
+
+=== HEAD~2 (todo 4) git show --stat ===
+commit f0b77781a4793f6b2a3b31e260e0ef1e30178a52
+Author:     kexichan <183220149+kexichan@users.noreply.github.com>
+AuthorDate: Wed Sep 16 05:02:22 2026 -0400
+Commit:     kexichan <183220149+kexichan@users.noreply.github.com>
+CommitDate: Wed Sep 16 05:02:22 2026 -0400
+
+    feat(cluster): add hybrid logical clock and ClusterVersion ordering
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_hlc.go      | 108 ++++++++++++++++++++++++++++++
+ super_cluster_hlc_test.go | 166 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 274 insertions(+)
+
+=== HEAD~1 (todo 5) git show --stat ===
+commit f9b69bc09e795d56d482f6690a86cda303f7ea2f
+Author:     kexichan <183220149+kexichan@users.noreply.github.com>
+AuthorDate: Wed Sep 16 05:02:38 2026 -0400
+Commit:     kexichan <183220149+kexichan@users.noreply.github.com>
+CommitDate: Wed Sep 16 05:02:38 2026 -0400
+
+    fix(super): scope management password to the owning runtime
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ main_httpserver.go      |  34 +++++++++++-----
+ main_httpserver_test.go |  30 ++++++++++++++
+ main_super.go           |  10 ++---
+ main_super_http_test.go | 101 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 161 insertions(+), 14 deletions(-)
+
+=== HEAD (todo 6) git show --stat ===
+commit bbabc63d49c43a6a63dcabdc022205e8e7c9ed3c
+Author:     kexichan <183220149+kexichan@users.noreply.github.com>
+AuthorDate: Wed Sep 16 05:03:06 2026 -0400
+Commit:     kexichan <183220149+kexichan@users.noreply.github.com>
+CommitDate: Wed Sep 16 05:03:06 2026 -0400
+
+    feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_crypto.go      | 201 ++++++++++++++++++++++++++++++++++++
+ super_cluster_crypto_test.go | 238 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 439 insertions(+)

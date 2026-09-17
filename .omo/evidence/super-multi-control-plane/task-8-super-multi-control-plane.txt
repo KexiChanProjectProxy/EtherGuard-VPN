@@ -1,0 +1,10 @@
+exit_code=0
+9
+
+command: go test -race -shuffle=on -count=1 -run 'TestClusterReplay|TestClusterApply' -v . 2>&1 | grep -c '^--- PASS'
+no_fail=true
+
+Verified in the same successful working-tree run before capture:
+- go build ./...
+- go test -race -shuffle=on -count=1 -run 'TestClusterReplay|TestClusterApply' -v .
+- go vet .

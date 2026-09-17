@@ -1,0 +1,81 @@
+task-18-20 commits evidence — super-multi-control-plane
+=======================================================
+Date: 2026-09-16
+Branch: master
+Strategy: NEW_COMMITS_ONLY (on master; no rewrite)
+Parent: 85c9b9de86d740178e29b853d73c7b7889d93795 (todo 21)
+
+Two NEW_COMMITS_ONLY on master, in order:
+
+| Todo | Hash | Subject |
+|------|------|---------|
+| 18 | `9f4b24bb85b7571366289bb4008f094e81039df4` | feat(edge): sticky-current super failover with epoch-scoped re-registration |
+| 20 | `2091ede170cb2b173bbc0a6ee31dbb99e866a8b7` | feat(edge): ordered multi-super bootstrap with per-attempt budgets |
+
+git log --oneline -22
+---------------------
+2091ede feat(edge): ordered multi-super bootstrap with per-attempt budgets
+9f4b24b feat(edge): sticky-current super failover with epoch-scoped re-registration
+85c9b9d feat(gencfg): emit multi-super APIUrls in generated edge profiles
+55ee8e7 feat(edge): epoch-scoped control client with base switching and resilient sync
+917734b test(super): cover origin-aware sweep and grace eviction through the runtime ticker
+b1ffb47 feat(super): wire cluster link manager into the runtime and diagnostics
+4ff613c feat(cluster): link manager with dedupe, coalescing queues, full sync and forwarding
+690a8fb feat(cluster): HTTP upgrade handshake with HMAC mutual authentication
+659d22a feat(cluster): add encrypted compressed link session with heartbeat and counters
+dd87d1c refactor(manage): persist-then-commit mutations with replicated registry and cluster state file
+290aa91 feat(super): versioned registry and parameters with origin-aware timeout sweep
+6a780f6 feat(super): idempotent replicated record apply with batch revisioning
+8933b36 feat(cluster): define replication wire protocol DTOs
+8814dcf feat(super): version-stamp control records and add replication outbox
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+524a1ea fix(super): drop closed SSE subscribers to stop OOM
+14d1be7 fix(control): reject mismatched pong sources
+
+git status --porcelain
+----------------------
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+git show --stat HEAD~1 (todo 18)
+--------------------------------
+commit 9f4b24bb85b7571366289bb4008f094e81039df4
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 10:12:16 2026 -0400
+
+    feat(edge): sticky-current super failover with epoch-scoped re-registration
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ device/super_http_client.go                |  36 ++++-
+ device/super_http_failover_support_test.go | 164 +++++++++++++++++++
+ device/super_http_failover_test.go         | 249 +++++++++++++++++++++++++++++
+ device/super_http_runtime.go               | 192 +++++++++++++++++++---
+ device/super_http_selector_test.go         |  95 +++++++++++
+ 5 files changed, 711 insertions(+), 25 deletions(-)
+
+git show --stat HEAD (todo 20)
+------------------------------
+commit 2091ede170cb2b173bbc0a6ee31dbb99e866a8b7
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 10:12:23 2026 -0400
+
+    feat(edge): ordered multi-super bootstrap with per-attempt budgets
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ main_edge.go                |  95 ++++++++++++++++++++++++--------
+ main_edge_bootstrap_test.go | 129 ++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 196 insertions(+), 28 deletions(-)

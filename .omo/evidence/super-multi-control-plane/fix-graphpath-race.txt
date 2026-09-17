@@ -1,0 +1,121 @@
+exit code: 0
+command: go test -race -count=1 -run '^TestIGRoutingTablesRemainRaceFreeDuringConcurrentRecalculation$' ./path
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/path	22.682s
+
+exit code: 0
+command: go test -race -shuffle=on -count=1 ./path
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/path	23.119s
+
+exit code: 0
+command: go test -race -shuffle=on -count=1 -run 'TestProcessPongSuperMode(AddsOutboundRoute|UsesLocalRTTHalfWhenPingTimeEchoed|ClampsNegativeAdditionalCost|SkipsInvalidLegacyLatency)|TestApplySuperHTTPSnapshotUsesIncomingDestinationRelayCosts' ./device
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	1.191s
+
+exit code: 1
+command: go test -race -shuffle=on -count=5 .
+output:
+-test.shuffle 1789570250119892757
+2026/09/16 10:51:55 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.16s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 10:53:25 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.16s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 10:54:33 http: proxy error: context canceled
+2026/09/16 10:54:38 http: proxy error: context canceled
+2026/09/16 10:55:46 http: proxy error: context canceled
+2026/09/16 10:57:01 http: proxy error: context canceled
+2026/09/16 10:57:01 http: proxy error: context canceled
+2026/09/16 10:57:06 http: proxy error: context canceled
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	385.326s
+FAIL
+note: zero WARNING: DATA RACE reports. The sole failure class is the pre-existing E2E convergence flake reproduced below on detached baseline d833634.
+
+exit code: 0
+command: go test -race -shuffle=on -count=5 -run '^TestHTTPOnlySuperEndToEnd$' .
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.956s
+
+exit code: 1
+command: go test -race -shuffle=on -count=5 -run 'TestHTTPOnlySuperEndToEnd|TestSuperRuntime' .
+output:
+-test.shuffle 1789571080404404487
+2026/09/16 11:04:40 http: proxy error: context canceled
+2026/09/16 11:04:40 http: proxy error: context canceled
+2026/09/16 11:04:47 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.15s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 11:04:52 http: proxy error: context canceled
+2026/09/16 11:04:56 http: proxy error: context canceled
+2026/09/16 11:05:01 http: proxy error: context canceled
+2026/09/16 11:05:01 http: proxy error: context canceled
+2026/09/16 11:05:01 http: proxy error: context canceled
+2026/09/16 11:05:08 http: proxy error: context canceled
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	28.165s
+FAIL
+note: zero WARNING: DATA RACE reports.
+
+exit code: 1
+command: (detached baseline d833634) go test -race -shuffle=on -count=5 -run 'TestHTTPOnlySuperEndToEnd|TestSuperRuntime' .
+output:
+-test.shuffle 1789571196764758604
+2026/09/16 11:06:41 http: proxy error: context canceled
+2026/09/16 11:06:48 http: proxy error: context canceled
+2026/09/16 11:06:48 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.18s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 11:06:48 http: proxy error: context canceled
+2026/09/16 11:07:00 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.17s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 11:07:00 http: proxy error: context canceled
+2026/09/16 11:07:00 http: proxy error: context canceled
+2026/09/16 11:07:04 http: proxy error: context canceled
+2026/09/16 11:07:04 http: proxy error: context canceled
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	28.152s
+FAIL
+note: this proves the convergence failure is pre-existing and is not introduced by the graphpath synchronization fix.
+
+exit code: 0
+command: go build ./...
+output:
+(no output)
+
+exit code: 0
+command: go vet ./...
+output:
+(no output)
+
+exit code: 0
+command: packages=''; for pkg in $(go list ./...); do case "$pkg" in */cmd/eg-tcpmesh) ;; *) packages="$packages $pkg" ;; esac; done; go test -race -shuffle=on -count=1 $packages
+output:
+ok  	github.com/KusakabeSi/EtherGuard-VPN	78.194s
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn	[no test files]
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	3.824s
+?   	github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.176s
+?   	github.com/KusakabeSi/EtherGuard-VPN/ipc	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.081s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/orderdmap	1.025s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/path	22.971s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter	1.031s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay	1.028s
+?   	github.com/KusakabeSi/EtherGuard-VPN/rwcancel	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n	1.022s
+?   	github.com/KusakabeSi/EtherGuard-VPN/tap	[no test files]
+
+exit code: unavailable
+command: lsp_diagnostics path/path.go path/path_race_test.go
+output:
+LSP server 'gopls' (.go) is NOT INSTALLED; user previously declined installation — proceeded with compiler, race detector, build, and vet verification.

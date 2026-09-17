@@ -1,0 +1,65 @@
+task-8-9-commits-super-multi-control-plane
+date: 2026-09-16
+branch: master
+strategy: NEW_COMMITS_ONLY (2 atomic commits for plan todos 8 and 9)
+
+=== git status --porcelain (after 2 commits) ===
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+=== git log --oneline -10 ===
+290aa91 feat(super): versioned registry and parameters with origin-aware timeout sweep
+6a780f6 feat(super): idempotent replicated record apply with batch revisioning
+8933b36 feat(cluster): define replication wire protocol DTOs
+8814dcf feat(super): version-stamp control records and add replication outbox
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+
+=== git log -2 --format=%H %s ===
+290aa91e33acb75f111b9ea040eb1a7e7088c3b7 feat(super): versioned registry and parameters with origin-aware timeout sweep
+6a780f6e596b235754265915c08e2bca59f936d5 feat(super): idempotent replicated record apply with batch revisioning
+
+=== HEAD~1 (todo 8) git show --stat ===
+commit 6a780f6e596b235754265915c08e2bca59f936d5
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 06:17:09 2026 -0400
+
+    feat(super): idempotent replicated record apply with batch revisioning
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_control_replica.go      | 234 ++++++++++++++++++++++++++++++++++
+ super_control_replica_test.go | 290 ++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 524 insertions(+)
+
+=== HEAD (todo 9) git show --stat ===
+commit 290aa91e33acb75f111b9ea040eb1a7e7088c3b7
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 06:17:19 2026 -0400
+
+    feat(super): versioned registry and parameters with origin-aware timeout sweep
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ super_cluster_registry_test.go      | 179 ++++++++++++++++++++++++++++
+ super_cluster_sweep_test.go         |  98 ++++++++++++++++
+ super_control_auth.go               |  13 +-
+ super_control_auth_registry_test.go |  47 ++++++++
+ super_control_http_test.go          |   7 +-
+ super_control_registry.go           | 228 ++++++++++++++++++++++++++++++++++++
+ super_control_state.go              | 175 +++++++++++++--------------
+ super_control_state_test.go         |   4 +-
+ super_control_sweep.go              |  29 +++++
+ super_manage_v2_test.go             |  16 +--
+ 10 files changed, 678 insertions(+), 118 deletions(-)

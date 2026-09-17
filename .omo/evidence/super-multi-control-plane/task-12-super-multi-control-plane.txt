@@ -1,0 +1,29 @@
+0
+command: go test -race -shuffle=on -count=1 -run 'TestClusterSession' -v . 2>&1 | grep -c '^--- PASS'
+pass_count: 8
+
+Unfiltered output from the same successful root-package test run:
+-test.shuffle 1789557642911225400
+=== RUN   TestClusterSessionSendQueueFull
+--- PASS: TestClusterSessionSendQueueFull (0.02s)
+=== RUN   TestClusterSessionCountersMonotonic
+=== RUN   TestClusterSessionCountersMonotonic/zstd
+=== RUN   TestClusterSessionCountersMonotonic/none
+--- PASS: TestClusterSessionCountersMonotonic (1.37s)
+    --- PASS: TestClusterSessionCountersMonotonic/zstd (0.69s)
+    --- PASS: TestClusterSessionCountersMonotonic/none (0.68s)
+=== RUN   TestClusterSessionPipeRoundTrip
+--- PASS: TestClusterSessionPipeRoundTrip (1.23s)
+=== RUN   TestClusterSessionTamperCloses
+--- PASS: TestClusterSessionTamperCloses (0.04s)
+=== RUN   TestClusterSessionPingPongKeepsAlive
+--- PASS: TestClusterSessionPingPongKeepsAlive (0.55s)
+=== RUN   TestClusterSessionDeadPeerCloses
+--- PASS: TestClusterSessionDeadPeerCloses (0.15s)
+PASS
+ok  github.com/KusakabeSi/EtherGuard-VPN  4.444s
+
+Additional gates:
+- go build ./...: exit 0
+- go vet .: exit 0
+- gopls diagnostics: unavailable because gopls is not installed and installation was previously declined

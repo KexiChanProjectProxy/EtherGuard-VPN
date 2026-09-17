@@ -1,0 +1,84 @@
+0
+=== go build ./... ===
+build_exit=0
+=== go vet . ===
+vet_exit=0
+=== grep SuperNodeV2.APIUrl (acceptance) ===
+grep_output=<empty>
+grep_nonempty=0
+=== go test -race -shuffle=on -count=1 -run 'TestEdgeConfigV2|TestMainEdge|TestBootstrap' -v . ./mtypes ./device ===
+-test.shuffle 1789568700036638293
+=== RUN   TestMainEdgeLegacyExampleYAMLStillV2Enabled
+--- PASS: TestMainEdgeLegacyExampleYAMLStillV2Enabled (0.00s)
+=== RUN   TestBootstrapDecodeErrorStopsIteration
+--- PASS: TestBootstrapDecodeErrorStopsIteration (0.00s)
+=== RUN   TestBootstrapAllURLsFail
+--- PASS: TestBootstrapAllURLsFail (0.01s)
+=== RUN   TestBootstrapFirstURLHangsSecondHealthy
+--- PASS: TestBootstrapFirstURLHangsSecondHealthy (2.01s)
+=== RUN   TestMainEdgeV2EnabledFromAPIUrlsOnly
+--- PASS: TestMainEdgeV2EnabledFromAPIUrlsOnly (0.00s)
+=== RUN   TestMainEdgeV2EnabledFromLegacyAPIUrl
+--- PASS: TestMainEdgeV2EnabledFromLegacyAPIUrl (0.00s)
+=== RUN   TestMainEdgeHydrateV2FromAPIUrlsOnly
+--- PASS: TestMainEdgeHydrateV2FromAPIUrlsOnly (0.00s)
+=== RUN   TestMainEdgeV2DisabledWithoutSuperURLs
+--- PASS: TestMainEdgeV2DisabledWithoutSuperURLs (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	3.205s
+-test.shuffle 1789568700391558139
+=== RUN   TestEdgeConfigV2DirectConnectivityValidation
+=== RUN   TestEdgeConfigV2DirectConnectivityValidation/omitted
+=== RUN   TestEdgeConfigV2DirectConnectivityValidation/explicit
+=== RUN   TestEdgeConfigV2DirectConnectivityValidation/negative
+=== RUN   TestEdgeConfigV2DirectConnectivityValidation/absurd
+--- PASS: TestEdgeConfigV2DirectConnectivityValidation (0.00s)
+    --- PASS: TestEdgeConfigV2DirectConnectivityValidation/omitted (0.00s)
+    --- PASS: TestEdgeConfigV2DirectConnectivityValidation/explicit (0.00s)
+    --- PASS: TestEdgeConfigV2DirectConnectivityValidation/negative (0.00s)
+    --- PASS: TestEdgeConfigV2DirectConnectivityValidation/absurd (0.00s)
+=== RUN   TestEdgeConfigV2PrivateKeyIsExcludedFromJSON
+--- PASS: TestEdgeConfigV2PrivateKeyIsExcludedFromJSON (0.00s)
+=== RUN   TestEdgeConfigV2DirectConnectivityDefaults
+--- PASS: TestEdgeConfigV2DirectConnectivityDefaults (0.00s)
+=== RUN   TestEdgeConfigV2RelayCostMSYAMLRoundTrip
+--- PASS: TestEdgeConfigV2RelayCostMSYAMLRoundTrip (0.00s)
+=== RUN   TestEdgeConfigV2RejectsLegacySuperBlock
+=== RUN   TestEdgeConfigV2RejectsLegacySuperBlock/enabled
+=== RUN   TestEdgeConfigV2RejectsLegacySuperBlock/disabled
+--- PASS: TestEdgeConfigV2RejectsLegacySuperBlock (0.00s)
+    --- PASS: TestEdgeConfigV2RejectsLegacySuperBlock/enabled (0.00s)
+    --- PASS: TestEdgeConfigV2RejectsLegacySuperBlock/disabled (0.00s)
+=== RUN   TestEdgeConfigV2APIUrlsOnlyStillValid
+--- PASS: TestEdgeConfigV2APIUrlsOnlyStillValid (0.00s)
+=== RUN   TestEdgeConfigV2RejectsMissingAPIUrls
+--- PASS: TestEdgeConfigV2RejectsMissingAPIUrls (0.00s)
+=== RUN   TestEdgeConfigV2LegacySingleURLStillValid
+--- PASS: TestEdgeConfigV2LegacySingleURLStillValid (0.00s)
+=== RUN   TestEdgeConfigV2HappyPath
+--- PASS: TestEdgeConfigV2HappyPath (0.00s)
+=== RUN   TestEdgeConfigV2RequiresSuper
+--- PASS: TestEdgeConfigV2RequiresSuper (0.00s)
+=== RUN   TestEdgeConfigV2PrivateKeyYAMLRoundTrip
+--- PASS: TestEdgeConfigV2PrivateKeyYAMLRoundTrip (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.062s
+-test.shuffle 1789568700424197356
+=== RUN   TestEdgeConfigV2EnableSuperHTTPStartsAtIndex
+--- PASS: TestEdgeConfigV2EnableSuperHTTPStartsAtIndex (0.00s)
+=== RUN   TestEdgeConfigV2EnableSuperHTTPLegacySingleURL
+--- PASS: TestEdgeConfigV2EnableSuperHTTPLegacySingleURL (0.00s)
+=== RUN   TestEdgeConfigV2APIUrlsOnlyRuntimeSelector
+--- PASS: TestEdgeConfigV2APIUrlsOnlyRuntimeSelector (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	1.100s
+test_exit=0
+=== go test TestEdgeConfigLegacySingleURLStillValid ./mtypes ===
+-test.shuffle 1789568703967558966
+=== RUN   TestEdgeConfigLegacySingleURLStillValid
+--- PASS: TestEdgeConfigLegacySingleURLStillValid (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.028s
+legacy_test_exit=0
+=== overall ===
+exit_code=0

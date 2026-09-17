@@ -1,0 +1,14 @@
+exit_code=0
+command: set -o pipefail && test -z "$(gofmt -l super_cluster_codec.go super_cluster_codec_test.go)" && go vet . ./device ./mtypes ./gencfg && CGO_ENABLED=0 go build ./... && go test -race -shuffle=on -count=1 . && go test -race -shuffle=on -count=1 -run 'TestClusterCodec' -v . 2>&1 | grep -E '^--- PASS: TestClusterCodec(RoundTripZstd|RoundTripNone|OneChunkPerMessage|RepetitiveCompresses|RejectsOversized|TruncatedChunkErrors)' && grep 'github.com/klauspost/compress v1.20.0' go.mod && ls vendor/github.com/klauspost/compress/zstd/encoder.go
+ok  	github.com/KusakabeSi/EtherGuard-VPN	7.711s
+--- PASS: TestClusterCodecOneChunkPerMessage (0.01s)
+--- PASS: TestClusterCodecRoundTripZstd (0.01s)
+--- PASS: TestClusterCodecTruncatedChunkErrors (0.01s)
+--- PASS: TestClusterCodecRoundTripNone (0.00s)
+--- PASS: TestClusterCodecRepetitiveCompresses (0.03s)
+--- PASS: TestClusterCodecRejectsOversized (0.03s)
+	github.com/klauspost/compress v1.20.0
+vendor/github.com/klauspost/compress/zstd/encoder.go
+
+LSP note: gopls diagnostics were unavailable because the user previously declined installation. gofmt, go vet, race tests, and the CGO-disabled build all passed in the command chain above.
+Pure LOC: super_cluster_codec.go=227; super_cluster_codec_test.go=180.

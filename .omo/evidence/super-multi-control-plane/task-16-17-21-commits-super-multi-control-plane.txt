@@ -1,0 +1,97 @@
+task-16-17-21 commits evidence — super-multi-control-plane
+==========================================================
+Date: 2026-09-16
+Branch: master
+Strategy: NEW_COMMITS_ONLY (on master; no rewrite)
+Parent: b1ffb4744b86bd6ce1d6a816ebd2d1595fb3135f (todo 15)
+
+Three NEW_COMMITS_ONLY on master, in order:
+
+| Todo | Hash | Subject |
+|------|------|---------|
+| 16 | `917734b9fe6510067af015f98cbf553c9289c547` | test(super): cover origin-aware sweep and grace eviction through the runtime ticker |
+| 17 | `55ee8e78e05dde4c2b679b96667935a80559d3ed` | feat(edge): epoch-scoped control client with base switching and resilient sync |
+| 21 | `85c9b9de86d740178e29b853d73c7b7889d93795` | feat(gencfg): emit multi-super APIUrls in generated edge profiles |
+
+git log --oneline -20
+---------------------
+85c9b9d feat(gencfg): emit multi-super APIUrls in generated edge profiles
+55ee8e7 feat(edge): epoch-scoped control client with base switching and resilient sync
+917734b test(super): cover origin-aware sweep and grace eviction through the runtime ticker
+b1ffb47 feat(super): wire cluster link manager into the runtime and diagnostics
+4ff613c feat(cluster): link manager with dedupe, coalescing queues, full sync and forwarding
+690a8fb feat(cluster): HTTP upgrade handshake with HMAC mutual authentication
+659d22a feat(cluster): add encrypted compressed link session with heartbeat and counters
+dd87d1c refactor(manage): persist-then-commit mutations with replicated registry and cluster state file
+290aa91 feat(super): versioned registry and parameters with origin-aware timeout sweep
+6a780f6 feat(super): idempotent replicated record apply with batch revisioning
+8933b36 feat(cluster): define replication wire protocol DTOs
+8814dcf feat(super): version-stamp control records and add replication outbox
+bbabc63 feat(cluster): add X25519/HKDF key schedule and AEAD record layer
+f9b69bc fix(super): scope management password to the owning runtime
+f0b7778 feat(cluster): add hybrid logical clock and ClusterVersion ordering
+66dffc8 feat(mtypes): add Cluster config schema and multi-URL SuperNodeV2 reference
+46c969a feat(cluster): add zstd stream codec and klauspost/compress dependency
+0050fe2 fix(device): baseline network-recovery changes (InvalidateHTTP, netlink refresh, sticky endpoints)
+524a1ea fix(super): drop closed SSE subscribers to stop OOM
+14d1be7 fix(control): reject mismatched pong sources
+
+git status --porcelain
+----------------------
+?? .omo/evidence/super-multi-control-plane/
+?? .omo/notepads/super-multi-control-plane/
+?? .omo/plans/super-multi-control-plane.md
+?? KexiSdnConfig/
+?? cmd/
+
+git show --stat HEAD~2 (todo 16)
+--------------------------------
+commit 917734b9fe6510067af015f98cbf553c9289c547
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 08:57:56 2026 -0400
+
+    test(super): cover origin-aware sweep and grace eviction through the runtime ticker
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ main_super_sweep_integration_test.go | 253 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 253 insertions(+)
+
+git show --stat HEAD~1 (todo 17)
+--------------------------------
+commit 55ee8e78e05dde4c2b679b96667935a80559d3ed
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 08:58:08 2026 -0400
+
+    feat(edge): epoch-scoped control client with base switching and resilient sync
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ device/super_http_client.go      | 148 ++++++++++++--
+ device/super_http_client_test.go | 418 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 548 insertions(+), 18 deletions(-)
+
+git show --stat HEAD (todo 21)
+------------------------------
+commit 85c9b9de86d740178e29b853d73c7b7889d93795
+Author: kexichan <183220149+kexichan@users.noreply.github.com>
+Date:   Wed Sep 16 08:58:22 2026 -0400
+
+    feat(gencfg): emit multi-super APIUrls in generated edge profiles
+    
+    Ultraworked with [Sisyphus](https://github.com/code-yeongyu/oh-my-openagent)
+    
+    Co-authored-by: Sisyphus <clio-agent@sisyphuslabs.ai>
+
+ example_config/super_mode/gensuper_cluster.yaml |  42 +++++++
+ gencfg/gencfgSM.go                              |   5 +-
+ gencfg/gencfgSM_cluster.go                      |  45 ++++++++
+ gencfg/gencfgSM_test.go                         | 146 ++++++++++++++++++++++++
+ gencfg/types.go                                 |  31 ++---
+ super_manage_v2.go                              |  22 +++-
+ super_manage_v2_cluster_test.go                 |  42 +++++++
+ 7 files changed, 312 insertions(+), 21 deletions(-)

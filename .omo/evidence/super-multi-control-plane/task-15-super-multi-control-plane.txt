@@ -1,0 +1,970 @@
+1
+Task 15 verification completed 2026-09-16.
+
+Command:
+go build ./...
+Exit code: 0
+Output:
+
+Command:
+go vet .
+Exit code: 0
+Output:
+
+Command:
+go test -race -shuffle=on -count=1 -run 'TestSuperRuntimeCluster|TestMainSuper|TestRunWith' -v . 2>&1 | grep -E '^--- FAIL'
+Test exit code: 0
+FAIL lines:
+
+Full focused output:
+-test.shuffle 1789561497373020981
+=== RUN   TestSuperRuntimeClusterAbsent
+--- PASS: TestSuperRuntimeClusterAbsent (0.01s)
+=== RUN   TestSuperRuntimeClusterStartsAndLinks
+--- PASS: TestSuperRuntimeClusterStartsAndLinks (0.05s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.228s
+
+Command:
+go test -race -shuffle=on -count=1 -run 'TestClusterShutdownClosesHijacks' -v .
+Exit code: 0
+Output:
+-test.shuffle 1789561500121373067
+=== RUN   TestClusterShutdownClosesHijacks
+--- PASS: TestClusterShutdownClosesHijacks (0.03s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.103s
+
+Command:
+go run . -mode super -example | grep -c '^Cluster:'
+Exit code: 0
+Output:
+0
+
+Command:
+go test -race -shuffle=on -count=1 ./...
+Exit code: 1
+Output:
+-test.shuffle 1789561504652890938
+2026/09/16 08:26:21 http: proxy error: context canceled
+2026/09/16 08:26:21 http: proxy error: context canceled
+--- FAIL: TestHTTPOnlySuperEndToEnd (3.18s)
+    super_http_e2e_test.go:44: cap counter after topology start: 304=0 snapshots=0
+    super_http_e2e_test.go:125: end-to-end condition did not converge
+2026/09/16 08:26:25 http: proxy error: context canceled
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN	82.986s
+-test.shuffle 1789561504617317909
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a50 by goroutine 13:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:155 +0x439
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x6b0
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).clientLoop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:267 +0x4d7
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:211 +0x8b
+
+Previous read at 0x00c0001c4a50 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xb8e
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 13 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:209 +0x211
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:26 +0xa31
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a20 by goroutine 12:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:155 +0x439
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x6b0
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).clientLoop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:267 +0x4d7
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:211 +0x8b
+
+Previous read at 0x00c0001c4a20 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xae9
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 12 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:209 +0x211
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:25 +0xa24
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a68 by goroutine 15:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:172 +0x3b1
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Previous read at 0x00c0001c4a68 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xb75
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 15 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a38 by goroutine 14:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:172 +0x3b1
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Previous read at 0x00c0001c4a38 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xad0
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 14 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0001c4a20 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xae9
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c0001c4a20 by goroutine 14:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2cc
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 14 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c00022c080 by goroutine 9:
+  runtime.slicebytetostring()
+      /usr/local/go/src/runtime/string.go:140 +0x0
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xb33
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c00022c080 by goroutine 14:
+  runtime.slicecopy()
+      /usr/local/go/src/runtime/slice.go:392 +0x0
+  bytes.growSlice()
+      /usr/local/go/src/bytes/buffer.go:268 +0x16b
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2b0
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 14 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0001c4a50 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xb8e
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c0001c4a50 by goroutine 15:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2cc
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 15 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c000434080 by goroutine 9:
+  runtime.slicebytetostring()
+      /usr/local/go/src/runtime/string.go:140 +0x0
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xbd6
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:30 +0xac6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c000434080 by goroutine 15:
+  runtime.slicecopy()
+      /usr/local/go/src/runtime/slice.go:392 +0x0
+  bytes.growSlice()
+      /usr/local/go/src/bytes/buffer.go:268 +0x16b
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2b0
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x3c8
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:287 +0x1f2
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 15 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a20 by goroutine 14:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2cc
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x6db
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:291 +0x463
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Previous read at 0x00c0001c4a20 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xffd
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:49 +0xfd6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 14 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Write at 0x00c0001c4a38 by goroutine 14:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:172 +0x3b1
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x6db
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:291 +0x463
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Previous read at 0x00c0001c4a38 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xfe4
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:49 +0xfd6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Goroutine 14 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0001c4a38 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xfe4
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:49 +0xfd6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c0001c4a38 by goroutine 12:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:172 +0x3b1
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0xc68
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).clientLoop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:272 +0x999
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:211 +0x8b
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 12 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:209 +0x211
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:25 +0xa24
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0001c4a20 by goroutine 9:
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0xffd
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:49 +0xfd6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c0001c4a20 by goroutine 14:
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:173 +0x3f5
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0x6db
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).serve()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:291 +0x463
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:198 +0x91
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1.gowrap2()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:199 +0x46
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 14 (finished) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).listen.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:196 +0x23e
+==================
+==================
+WARNING: DATA RACE
+Read at 0x00c0002be200 by goroutine 9:
+  runtime.slicebytetostring()
+      /usr/local/go/src/runtime/string.go:140 +0x0
+  bytes.(*Buffer).String()
+      /usr/local/go/src/bytes/buffer.go:77 +0x1044
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:49 +0xfd6
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+
+Previous write at 0x00c0002be200 by goroutine 12:
+  runtime.slicecopy()
+      /usr/local/go/src/runtime/slice.go:392 +0x0
+  bytes.growSlice()
+      /usr/local/go/src/bytes/buffer.go:268 +0x16b
+  bytes.(*Buffer).grow()
+      /usr/local/go/src/bytes/buffer.go:169 +0x2b0
+  bytes.(*Buffer).Write()
+      /usr/local/go/src/bytes/buffer.go:197 +0xc4
+  log.(*Logger).output()
+      /usr/local/go/src/log/log.go:244 +0x655
+  log.(*Logger).Printf()
+      /usr/local/go/src/log/log.go:267 +0xc68
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).clientLoop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:272 +0x999
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll.func1()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:211 +0x8b
+
+Goroutine 9 (running) created at:
+  testing.(*T).Run()
+      /usr/local/go/src/testing/testing.go:2258 +0xb12
+  testing.runTests.func1()
+      /usr/local/go/src/testing/testing.go:2742 +0x84
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.runTests()
+      /usr/local/go/src/testing/testing.go:2740 +0x9e9
+  testing.(*M).Run()
+      /usr/local/go/src/testing/testing.go:2600 +0xf44
+  main.main()
+      _testmain.go:50 +0x164
+
+Goroutine 12 (running) created at:
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.(*mesh).dialAll()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main.go:209 +0x211
+  github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop()
+      /home/kexi/EtherGuard-VPN/cmd/eg-tcpmesh/main_test.go:25 +0xa24
+  testing.tRunner()
+      /usr/local/go/src/testing/testing.go:2193 +0x21c
+  testing.(*T).Run.gowrap1()
+      /usr/local/go/src/testing/testing.go:2258 +0x38
+==================
+--- FAIL: TestMeshConnectsBothWaysAndLogsDrop (0.04s)
+    testing.go:1865: race detected during execution of test
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/cmd/eg-tcpmesh	0.066s
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn	[no test files]
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest	[no test files]
+-test.shuffle 1789561504651256167
+--- FAIL: TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener (3.05s)
+    super_http_runtime_test.go:1203: goroutine delta = 3, all stacks:
+        goroutine 2628 [running]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.collectGoroutineDelta(0xc0001f78c8, 0xc00199beb0)
+        	/home/kexi/EtherGuard-VPN/device/super_http_runtime_test.go:1038 +0x13b
+        github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener(0xc0001f78c8)
+        	/home/kexi/EtherGuard-VPN/device/super_http_runtime_test.go:1203 +0x20e
+        testing.tRunner(0xc0001f78c8, 0x123c1d8)
+        	/usr/local/go/src/testing/testing.go:2193 +0x21d
+        created by testing.(*T).Run in goroutine 1
+        	/usr/local/go/src/testing/testing.go:2258 +0xb13
+        
+        goroutine 1 [chan receive]:
+        testing.(*T).Run(0xc000218248, {0xc8d798, 0x49}, 0x123c1d8)
+        	/usr/local/go/src/testing/testing.go:2266 +0xb3e
+        testing.runTests.func1(0xc000218248)
+        	/usr/local/go/src/testing/testing.go:2742 +0x85
+        testing.tRunner(0xc000218248, 0xc00003da40)
+        	/usr/local/go/src/testing/testing.go:2193 +0x21d
+        testing.runTests({0xc79e8d, 0x24}, {0xc7fbb0, 0x2b}, 0xc00024e000, {0x12a2648, 0x75, 0x75}, {0xc2a2c11e26d4f70f, 0x8bb4dcf2b5, ...})
+        	/usr/local/go/src/testing/testing.go:2740 +0x9ea
+        testing.(*M).Run(0xc0002440a0)
+        	/usr/local/go/src/testing/testing.go:2600 +0xf45
+        main.main()
+        	_testmain.go:280 +0x165
+        
+        goroutine 309 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 306
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 308 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc000996008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 306
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 28 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc00025c508)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 26
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 29 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 26
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 565 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 562
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 564 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc00066e008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 562
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 290 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc00025c508)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 26
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 1380 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc0010aa008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1263
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 1381 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1263
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 554 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc000996008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 306
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 949 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 946
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 948 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc00025c008)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 946
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 2332 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2325
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 932 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc00066e008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 562
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 2630 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f3168bc4e00, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc0001ff620, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Read(0xc0001ff600, {0xc000f60000, 0x1000, 0x1000})
+        	/usr/local/go/src/internal/poll/fd_unix.go:170 +0x499
+        net.(*netFD).Read(0xc0001ff600, {0xc000f60000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/fd_posix.go:68 +0x4b
+        net.(*conn).Read(0xc00078a1e0, {0xc000f60000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/net.go:196 +0xad
+        net/http.(*connReader).Read(0xc00028e040, {0xc000f60000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/http/server.go:856 +0x288
+        bufio.(*Reader).fill(0xc000f5e000)
+        	/usr/local/go/src/bufio/bufio.go:113 +0x2a4
+        bufio.(*Reader).Peek(0xc000f5e000, 0x4)
+        	/usr/local/go/src/bufio/bufio.go:152 +0xaf
+        net/http.(*conn).serve(0xc0001f9680, {0x1238188, 0xc0012820c0})
+        	/usr/local/go/src/net/http/server.go:2173 +0x112e
+        created by net/http.(*Server).Serve in goroutine 2629
+        	/usr/local/go/src/net/http/server.go:3581 +0x92a
+        
+        goroutine 1287 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x12381c0, 0xc0007b1220}, 0xc0007b11d0, 0xc000c14b30)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNDetectsMappedPortMismatch in goroutine 1286
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:454 +0x95d
+        
+        goroutine 1194 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc00025c008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 946
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 2331 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc001485908)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2325
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 1725 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineSendPacket(0xc001368f08)
+        	/home/kexi/EtherGuard-VPN/device/receivesendproc.go:81 +0xd4
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1719
+        	/home/kexi/EtherGuard-VPN/device/device.go:416 +0x120b
+        
+        goroutine 1248 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x12381c0, 0xc000f1ce60}, 0xc000f1ce10, 0xc001280db0)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNDiscoversBothFamiliesFromSingleHostname in goroutine 1247
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:395 +0x82b
+        
+        goroutine 1726 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind.func1()
+        	/home/kexi/EtherGuard-VPN/device/device.go:418 +0x4a
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1719
+        	/home/kexi/EtherGuard-VPN/device/device.go:417 +0x128b
+        
+        goroutine 1626 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc0010aa008)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1263
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 1634 [select]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*sameBindSTUNFake).receive(...)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:248
+        github.com/KusakabeSi/EtherGuard-VPN/device.receiveSTUNTestPackets({0x12381c0, 0xc000fda370}, 0xc000fda320, 0xc000c15610)
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:478 +0x62
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.TestSuperSTUNBypassesResolverForLiteralURI in goroutine 1361
+        	/home/kexi/EtherGuard-VPN/device/super_stun_test.go:148 +0x71d
+        
+        goroutine 2629 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f3168bc4c00, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc0001ff5a0, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Accept(0xc0001ff580)
+        	/usr/local/go/src/internal/poll/fd_unix.go:618 +0x4ea
+        net.(*netFD).accept(0xc0001ff580)
+        	/usr/local/go/src/net/fd_unix.go:149 +0x45
+        net.(*TCPListener).accept(0xc00098d8c0)
+        	/usr/local/go/src/net/tcpsock_posix.go:159 +0x4e
+        net.(*TCPListener).Accept(0xc00098d8c0)
+        	/usr/local/go/src/net/tcpsock.go:387 +0x65
+        net/http.(*Server).Serve(0xc0019fec80, {0x12371e0, 0xc00098d8c0})
+        	/usr/local/go/src/net/http/server.go:3551 +0x6ad
+        net/http/httptest.(*Server).goServe.func1()
+        	/usr/local/go/src/net/http/httptest/server.go:586 +0xad
+        created by net/http/httptest.(*Server).goServe in goroutine 2628
+        	/usr/local/go/src/net/http/httptest/server.go:584 +0xeb
+        
+        goroutine 1673 [IO wait]:
+        internal/poll.runtime_pollWait(0x7f3168bc5000, 0x72)
+        	/usr/local/go/src/runtime/netpoll.go:351 +0x85
+        internal/poll.(*pollDesc).wait(0xc001336020, 0x72, 0x0)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:84 +0xb1
+        internal/poll.(*pollDesc).waitRead(...)
+        	/usr/local/go/src/internal/poll/fd_poll_runtime.go:89
+        internal/poll.(*FD).Read(0xc001336000, {0xc0012c6000, 0x1000, 0x1000})
+        	/usr/local/go/src/internal/poll/fd_unix.go:170 +0x499
+        net.(*netFD).Read(0xc001336000, {0xc0012c6000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/fd_posix.go:68 +0x4b
+        net.(*conn).Read(0xc000882028, {0xc0012c6000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/net.go:196 +0xad
+        net/http.(*persistConn).Read(0xc001294280, {0xc0012c6000, 0x1000, 0x1000})
+        	/usr/local/go/src/net/http/transport.go:2300 +0x233
+        bufio.(*Reader).fill(0xc000ea0060)
+        	/usr/local/go/src/bufio/bufio.go:113 +0x2a4
+        bufio.(*Reader).Peek(0xc000ea0060, 0x1)
+        	/usr/local/go/src/bufio/bufio.go:152 +0xaf
+        net/http.(*persistConn).readLoop(0xc001294280)
+        	/usr/local/go/src/net/http/transport.go:2483 +0x31b
+        created by net/http.(*Transport).dialConn in goroutine 1672
+        	/usr/local/go/src/net/http/transport.go:2123 +0x38f2
+        
+        goroutine 1674 [select]:
+        net/http.(*persistConn).writeLoop(0xc001294280)
+        	/usr/local/go/src/net/http/transport.go:2810 +0x1b5
+        created by net/http.(*Transport).dialConn in goroutine 1672
+        	/usr/local/go/src/net/http/transport.go:2124 +0x397d
+        
+        goroutine 1971 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc001368f08)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 1719
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+        
+        goroutine 2577 [chan receive]:
+        github.com/KusakabeSi/EtherGuard-VPN/device.(*Device).RoutineTUNEventReader(0xc001485908)
+        	/home/kexi/EtherGuard-VPN/device/tap.go:20 +0xe5
+        created by github.com/KusakabeSi/EtherGuard-VPN/device.NewDeviceWithInitialBind in goroutine 2325
+        	/home/kexi/EtherGuard-VPN/device/device.go:451 +0x174b
+    super_http_runtime_test.go:1217: wrong-key bootstrap leaked 3 goroutines
+FAIL
+FAIL	github.com/KusakabeSi/EtherGuard-VPN/device	5.449s
+?   	github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.119s
+?   	github.com/KusakabeSi/EtherGuard-VPN/ipc	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.080s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/orderdmap	1.026s
+?   	github.com/KusakabeSi/EtherGuard-VPN/path	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter	1.025s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay	1.032s
+?   	github.com/KusakabeSi/EtherGuard-VPN/rwcancel	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n	1.026s
+?   	github.com/KusakabeSi/EtherGuard-VPN/tap	[no test files]
+FAIL
+
+Diagnostics note:
+gopls is not installed and installation was previously declined; go build, go vet, and race tests supplied compile/static verification.
+
+Full-suite failure classification:
+- Root `TestHTTPOnlySuperEndToEnd` did not converge. This is the same pre-existing root e2e test named in `problems.md` for the known ticker/graph concurrency flake; task-15 focused runtime tests passed under `-race`.
+- `cmd/eg-tcpmesh.TestMeshConnectsBothWaysAndLogsDrop` hit the pre-existing logger/bytes.Buffer race already recorded in `issues.md`; task 15 did not touch `cmd/`.
+- `device.TestSuperHTTPRuntimeListenPortBootstrapWrongKeyRefusesAndLeavesNoListener` hit the known pre-existing three-goroutine leak recorded in `problems.md`; task 15 did not touch `device/`.

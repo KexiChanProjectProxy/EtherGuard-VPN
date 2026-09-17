@@ -1,0 +1,17 @@
+exit code: 0
+command: go test -race -shuffle=on -count=1 -run 'TestE2EMultiSuperTopologySmoke' -v .
+-test.shuffle 1789578706971927417
+=== RUN   TestE2EMultiSuperTopologySmoke
+=== RUN   TestE2EMultiSuperTopologySmoke/two_supers_link_through_reverse_proxies
+=== RUN   TestE2EMultiSuperTopologySmoke/three_supers_form_a_full_mesh
+2026/09/16 13:11:47 http: proxy error: dial tcp 127.0.0.1:45227: connect: connection refused
+--- PASS: TestE2EMultiSuperTopologySmoke (0.58s)
+    --- PASS: TestE2EMultiSuperTopologySmoke/two_supers_link_through_reverse_proxies (0.41s)
+    --- PASS: TestE2EMultiSuperTopologySmoke/three_supers_form_a_full_mesh (0.17s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.653s
+
+additional gates:
+- go build ./...: exit 0
+- go vet .: exit 0
+- go test -race -shuffle=on -count=1 -run 'TestClusterManager' .: exit 0

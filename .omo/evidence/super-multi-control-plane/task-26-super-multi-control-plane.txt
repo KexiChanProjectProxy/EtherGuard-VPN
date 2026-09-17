@@ -1,0 +1,134 @@
+0
+=== 1. go test -race -shuffle=on -count=1 -run 'TestDocs|TestCorpus' -v . ===
+-test.shuffle 1789578807398584786
+=== RUN   TestDocsNoLegacyUDPSuperKeys
+=== PAUSE TestDocsNoLegacyUDPSuperKeys
+=== RUN   TestCorpusSuperYAMLPolicyIsRange
+=== PAUSE TestCorpusSuperYAMLPolicyIsRange
+=== RUN   TestDocsReferenceValidYAMLKeys
+=== PAUSE TestDocsReferenceValidYAMLKeys
+=== RUN   TestDocsDirectConnectivity
+=== PAUSE TestDocsDirectConnectivity
+=== RUN   TestDocsSTUNRefresh
+=== PAUSE TestDocsSTUNRefresh
+=== RUN   TestDocsProtocolVersionMatch
+=== PAUSE TestDocsProtocolVersionMatch
+=== RUN   TestDocsRejectedLegacyFieldsEnumerated
+=== PAUSE TestDocsRejectedLegacyFieldsEnumerated
+=== RUN   TestDocsReferenceV2APIRoutes
+=== PAUSE TestDocsReferenceV2APIRoutes
+=== RUN   TestDocsVPPExcluded
+=== PAUSE TestDocsVPPExcluded
+=== RUN   TestCorpusEdgeRecvSendUnchanged
+=== PAUSE TestCorpusEdgeRecvSendUnchanged
+=== RUN   TestDocsClusterExamplesValidate
+=== PAUSE TestDocsClusterExamplesValidate
+=== RUN   TestDocsSSEPollingIsFallbackOnly
+=== PAUSE TestDocsSSEPollingIsFallbackOnly
+=== RUN   TestCorpusSuperYAMLOtherFieldsUnchanged
+=== PAUSE TestCorpusSuperYAMLOtherFieldsUnchanged
+=== RUN   TestDocsEventTypesMatch
+=== PAUSE TestDocsEventTypesMatch
+=== RUN   TestDocsControlAPIHeadersMatch
+=== PAUSE TestDocsControlAPIHeadersMatch
+=== RUN   TestCorpusEdgeNoLocalPortPolicy
+=== PAUSE TestCorpusEdgeNoLocalPortPolicy
+=== RUN   TestDocsSTUNURIAcceptsHostnames
+=== PAUSE TestDocsSTUNURIAcceptsHostnames
+=== RUN   TestDocsEdgeLegacyRejection
+=== PAUSE TestDocsEdgeLegacyRejection
+=== RUN   TestDocsNoServerUpdateUDPConcept
+=== PAUSE TestDocsNoServerUpdateUDPConcept
+=== CONT  TestCorpusSuperYAMLPolicyIsRange
+=== CONT  TestDocsProtocolVersionMatch
+=== CONT  TestDocsClusterExamplesValidate
+=== CONT  TestDocsDirectConnectivity
+=== CONT  TestDocsControlAPIHeadersMatch
+=== CONT  TestDocsSTUNRefresh
+=== CONT  TestDocsSSEPollingIsFallbackOnly
+--- PASS: TestDocsProtocolVersionMatch (0.00s)
+=== CONT  TestDocsSTUNURIAcceptsHostnames
+=== CONT  TestCorpusEdgeRecvSendUnchanged
+--- PASS: TestDocsDirectConnectivity (0.00s)
+=== CONT  TestCorpusSuperYAMLOtherFieldsUnchanged
+=== CONT  TestDocsReferenceV2APIRoutes
+=== CONT  TestDocsRejectedLegacyFieldsEnumerated
+=== CONT  TestDocsNoServerUpdateUDPConcept
+=== CONT  TestDocsEventTypesMatch
+=== CONT  TestDocsReferenceValidYAMLKeys
+=== CONT  TestDocsVPPExcluded
+=== CONT  TestCorpusEdgeNoLocalPortPolicy
+=== CONT  TestDocsNoLegacyUDPSuperKeys
+=== NAME  TestCorpusEdgeNoLocalPortPolicy
+    docs_contract_test.go:618: operational corpus not present at /home/kexi/KexiSdnConfig/http-sse: stat /home/kexi/KexiSdnConfig/http-sse: no such file or directory
+=== NAME  TestCorpusSuperYAMLPolicyIsRange
+    docs_contract_test.go:677: operational Super YAML not present at /home/kexi/KexiSdnConfig/http-sse/ngsdn_super.yaml: stat /home/kexi/KexiSdnConfig/http-sse/ngsdn_super.yaml: no such file or directory
+=== CONT  TestDocsEdgeLegacyRejection
+=== RUN   TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+=== NAME  TestCorpusEdgeRecvSendUnchanged
+    docs_contract_test.go:645: operational corpus not present at /home/kexi/KexiSdnConfig/http-sse: stat /home/kexi/KexiSdnConfig/http-sse: no such file or directory
+=== NAME  TestCorpusSuperYAMLOtherFieldsUnchanged
+    docs_contract_test.go:734: operational Super YAML not present at /home/kexi/KexiSdnConfig/http-sse/ngsdn_super.yaml: stat /home/kexi/KexiSdnConfig/http-sse/ngsdn_super.yaml: no such file or directory
+--- PASS: TestDocsSTUNURIAcceptsHostnames (0.00s)
+=== PAUSE TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+--- PASS: TestDocsEventTypesMatch (0.00s)
+--- PASS: TestDocsControlAPIHeadersMatch (0.00s)
+--- SKIP: TestCorpusEdgeNoLocalPortPolicy (0.00s)
+--- PASS: TestDocsRejectedLegacyFieldsEnumerated (0.00s)
+--- SKIP: TestCorpusEdgeRecvSendUnchanged (0.00s)
+--- SKIP: TestCorpusSuperYAMLPolicyIsRange (0.00s)
+--- SKIP: TestCorpusSuperYAMLOtherFieldsUnchanged (0.00s)
+--- PASS: TestDocsReferenceV2APIRoutes (0.00s)
+--- PASS: TestDocsReferenceValidYAMLKeys (0.00s)
+--- PASS: TestDocsEdgeLegacyRejection (0.00s)
+=== RUN   TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+=== PAUSE TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+=== CONT  TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+=== CONT  TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+--- PASS: TestDocsClusterExamplesValidate (0.00s)
+    --- PASS: TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml (0.01s)
+    --- PASS: TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml (0.01s)
+--- PASS: TestDocsSSEPollingIsFallbackOnly (0.02s)
+--- PASS: TestDocsSTUNRefresh (0.02s)
+--- PASS: TestDocsVPPExcluded (0.02s)
+--- PASS: TestDocsNoServerUpdateUDPConcept (0.03s)
+--- PASS: TestDocsNoLegacyUDPSuperKeys (0.12s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	1.226s
+test_exit=0
+
+=== 2. grep -E '^--- FAIL' (must be empty) ===
+fail_grep_exit=0 (1 means no FAIL lines, which is success for this check)
+
+=== 3. grep -c 'cluster/link' example_config/super_mode/README.md (want >= 2) ===
+7
+
+=== 4. grep -c 'Cluster' example_config/super_mode/README_zh.md (want >= 3) ===
+13
+
+=== 5. go test -run TestDocsClusterExamplesValidate -v . ===
+=== RUN   TestDocsClusterExamplesValidate
+=== PAUSE TestDocsClusterExamplesValidate
+=== CONT  TestDocsClusterExamplesValidate
+=== RUN   TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+=== PAUSE TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+=== RUN   TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+=== PAUSE TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+=== CONT  TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml
+=== CONT  TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml
+--- PASS: TestDocsClusterExamplesValidate (0.00s)
+    --- PASS: TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_a.yaml (0.00s)
+    --- PASS: TestDocsClusterExamplesValidate/example_config/super_mode/EgNet_super_cluster_b.yaml (0.00s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	0.017s
+cluster_examples_exit=0
+
+=== 6. go vet . ===
+vet_exit=0
+
+=== 7. QA: bogus Foo key was added to ### Cluster table, TestDocsReferenceValidYAMLKeys failed with:
+    docs_contract_test.go: Cluster table key "Foo" is not in validClusterKeys
+    then reverted. Audit is live.
+
+=== OVERALL ===
+0
