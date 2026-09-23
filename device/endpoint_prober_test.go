@@ -768,3 +768,90 @@ func TestApplyProbedEndpointPinsBeforePublishing(t *testing.T) {
 		peer.Unlock()
 	}
 }
+
+// --- P2P advertisement of reflexive addresses ---
+
+func TestPeerAdvertisementsIncludeReflexiveAddresses(t *testing.T) {
+	// Given a live peer whose packets were also seen from two other addresses,
+	// one of them blacklisted and one equal to the current endpoint
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	device.EdgeConfig.DynamicRoute.P2P.UseP2P = true
+	_, pub := RandomKeyPair()
+	device.peers.keyMap = map[NoisePublicKey]*Peer{pub: peer}
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.11:3001")
+	now := time.Now()
+	peer.reflexive.note("203.0.113.12:50000", now)
+	peer.reflexive.note("203.0.113.11:3001", now)
+	peer.reflexive.note("198.51.100.66:3001", now)
+	prefixes, _ := mtypes.ParseEndpointBlacklist([]string{"198.51.100.66"})
+	device.setEndpointBlacklist(prefixes)
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.11:3001")
+
+	// When
+	messages := device.peerAdvertisements(7, now)
+
+	// Then the current endpoint and the usable reflexive address are advertised
+	var got []string
+	for _, message := range messages {
+		if message.NodeID != peer.ID || message.PubKey != pub || message.Request_ID != 7 {
+			t.Fatalf("message = %+v", message)
+		}
+		got = append(got, message.ConnURL)
+	}
+	if strings.Join(got, ",") != "203.0.113.11:3001,203.0.113.12:50000" {
+		t.Fatalf("advertised = %v", got)
+	}
+}
+
+func TestPeerAdvertisementsSkipDeadPeers(t *testing.T) {
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	_, pub := RandomKeyPair()
+	device.peers.keyMap = map[NoisePublicKey]*Peer{pub: peer}
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.11:3001")
+	peer.reflexive.note("203.0.113.12:50000", time.Now())
+	old := time.Now().Add(-time.Hour)
+	peer.LastPacketReceivedAdd1Sec.Store(&old)
+	if messages := device.peerAdvertisements(7, time.Now()); len(messages) != 0 {
+		t.Fatalf("dead peer advertised: %+v", messages)
+	}
+}
+
+func TestAdvertisedReflexiveAddressReachesReceiverTrylist(t *testing.T) {
+	// Given node X advertising its live peer B, seen from a second uplink
+	bindX := newPinningSTUNFake(3001)
+	deviceX, peerBAtX := newProberTestDevice(t, bindX)
+	deviceX.EdgeConfig.DynamicRoute.P2P.UseP2P = true
+	_, pubB := RandomKeyPair()
+	deviceX.peers.keyMap = map[NoisePublicKey]*Peer{pubB: peerBAtX}
+	peerBAtX.endpoint, _ = bindX.ParseEndpoint("203.0.113.11:3001")
+	peerBAtX.reflexive.note("203.0.113.12:50000", time.Now())
+	messages := deviceX.peerAdvertisements(9, time.Now())
+
+	// and a receiver Y whose own session to B is dead
+	bindY := newPinningSTUNFake(3002)
+	deviceY, peerBAtY := newProberTestDevice(t, bindY)
+	deviceY.EdgeConfig.DynamicRoute.P2P.UseP2P = true
+	deviceY.ID = 5
+	deviceY.peers.keyMap = map[NoisePublicKey]*Peer{pubB: peerBAtY}
+	dead := time.Now().Add(-time.Hour)
+	peerBAtY.LastPacketReceivedAdd1Sec.Store(&dead)
+	deviceY.event_tryendpoint = make(chan struct{}, 8)
+
+	// When Y processes X's advertisements
+	for _, message := range messages {
+		if err := deviceY.process_BoardcastPeerMsg(peerBAtY, message); err != nil {
+			t.Fatalf("process_BoardcastPeerMsg: %v", err)
+		}
+	}
+
+	// Then B's second uplink is a retry candidate at Y
+	candidates, _ := peerBAtY.endpoint_trylist.candidates()
+	for _, candidate := range candidates {
+		if candidate.address == "203.0.113.12:50000" {
+			return
+		}
+	}
+	t.Fatalf("receiver candidates = %+v, want 203.0.113.12:50000", candidates)
+}

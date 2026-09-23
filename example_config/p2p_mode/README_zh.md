@@ -141,6 +141,8 @@ DynamicRoute:
   EndpointSwitchRounds: 0           # 0 = 連續3輪
 ```
 
+各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge在自己與該peer的連線中斷時，會把這些廣播的位址加入候選。
+
 ## Endpoint黑名單
 
 `DynamicRoute.EndpointBlacklist`列出永遠不可作為peer endpoint使用的IP位址或CIDR（最多256項）。被列入的位址會從每個peer的候選清單中移除，不會被探測或切換過去，不會作為本edge自己的endpoint廣播，來自這些位址的封包也會被丟棄。若某peer目前使用的endpoint被列入，會改用其他候選位址。清單在啟動時讀取；格式錯誤的項目，或在P2P模式以外設定此項，會導致啟動失敗。Super模式請改用Super的`EndpointBlacklist`參數。

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"math"
+	"net/netip"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/conn"
@@ -385,37 +386,66 @@ func isValidLatencySample(latency float64) bool {
 
 func (device *Device) process_RequestPeerMsg(content mtypes.QueryPeerMsg) error { //Send all my peers to all my peers
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
-		device.peers.RLock()
-		for pubkey, peer := range device.peers.keyMap {
-			if peer.ID >= mtypes.NodeID_Special {
-				continue
-			}
-			if peer.endpoint == nil {
-				// I don't have the infomation of this peer, skip
-				continue
-			}
-			if !peer.IsPeerAlive() {
-				// peer died, skip
-				continue
-			}
-
-			peer.handshake.mutex.RLock()
-			response := mtypes.BoardcastPeerMsg{
-				Request_ID: content.Request_ID,
-				NodeID:     peer.ID,
-				PubKey:     pubkey,
-				ConnURL:    peer.endpoint.DstToString(),
-			}
-			peer.handshake.mutex.RUnlock()
+		for _, response := range device.peerAdvertisements(content.Request_ID, time.Now()) {
 			if err := device.spreadPeerAdvertisement(response); err != nil {
-				device.log.Errorf("Error at receivesendproc.go line221: ", err)
-				continue
+				device.log.Errorf("P2P peer advertisement failed: node=%v endpoint=%s error=%v", response.NodeID, response.ConnURL, err)
 			}
 		}
-		device.peers.RUnlock()
 		device.spreadLocalEndpoints(content.Request_ID)
 	}
 	return nil
+}
+
+// peerAdvertisements lists, for every live peer, the endpoint this node uses
+// for it plus the peer-reflexive addresses it has seen the peer's packets
+// come from. The latter carry a multi-WAN peer's other uplinks to the rest of
+// the mesh. Blacklisted addresses are left out.
+func (device *Device) peerAdvertisements(requestID uint32, now time.Time) []mtypes.BoardcastPeerMsg {
+	type liveEndpoint struct {
+		peer    *Peer
+		pubkey  NoisePublicKey
+		current string
+	}
+	device.peers.RLock()
+	live := make([]liveEndpoint, 0, len(device.peers.keyMap))
+	for pubkey, peer := range device.peers.keyMap {
+		if peer.ID >= mtypes.NodeID_Special {
+			continue
+		}
+		peer.RLock()
+		endpoint := peer.endpoint
+		peer.RUnlock()
+		if endpoint == nil {
+			// I don't have the infomation of this peer, skip
+			continue
+		}
+		live = append(live, liveEndpoint{peer: peer, pubkey: pubkey, current: endpoint.DstToString()})
+	}
+	device.peers.RUnlock()
+
+	maxAge := mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)
+	var out []mtypes.BoardcastPeerMsg
+	for _, entry := range live {
+		if !entry.peer.IsPeerAlive() {
+			// peer died, skip
+			continue
+		}
+		advertise := func(address string) {
+			out = append(out, mtypes.BoardcastPeerMsg{Request_ID: requestID, NodeID: entry.peer.ID, PubKey: entry.pubkey, ConnURL: address})
+		}
+		advertise(entry.current)
+		current := entry.current
+		if addrPort, err := netip.ParseAddrPort(current); err == nil {
+			current = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String()
+		}
+		for _, candidate := range entry.peer.reflexive.candidates(now, maxAge) {
+			if candidate.address == current || device.endpointURLBlacklistedReadLocked(candidate.address) {
+				continue
+			}
+			advertise(candidate.address)
+		}
+	}
+	return out
 }
 
 func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.BoardcastPeerMsg) (err error) {

@@ -62,6 +62,8 @@ DynamicRoute:
   EndpointSwitchRounds: 0           # 0 = 3 consecutive rounds
 ```
 
+Edges also share what they observe. Besides the endpoint an edge uses for each live peer, it advertises that peer's peer-reflexive addresses: sources of the peer's authenticated packets that it did not adopt, for example a multi-WAN peer's other uplinks. Other edges add advertised addresses to a peer's candidates when their own session to that peer is down.
+
 ## Endpoint blacklist
 
 `DynamicRoute.EndpointBlacklist` lists IP addresses or CIDRs (up to 256) that must never be used as a peer endpoint. Blacklisted addresses are removed from every peer's candidate list, are never probed or switched to, are not advertised as this edge's own endpoints, and datagrams from them are dropped. A peer currently on a blacklisted endpoint is moved to another candidate. The list is read at startup; an invalid entry, or setting it outside P2P mode, is a startup error. In Super mode use the Super's `EndpointBlacklist` parameter instead.
