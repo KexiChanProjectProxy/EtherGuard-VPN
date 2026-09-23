@@ -31,14 +31,14 @@ func TestSelectEndpointPair(t *testing.T) {
 		wantKey    string
 		wantSwitch bool
 	}{
-		{"faster by margin", []pairStats{{"a", ms(80), 3}, {"b", ms(20), 3}}, "a", "b", true},
-		{"within absolute margin", []pairStats{{"a", ms(24), 3}, {"b", ms(20), 3}}, "a", "b", false},
-		{"within relative margin", []pairStats{{"a", ms(200), 3}, {"b", ms(180), 3}}, "a", "b", false},
-		{"current is best", []pairStats{{"a", ms(10), 3}, {"b", ms(20), 3}}, "a", "", false},
-		{"unmeasured current is replaceable", []pairStats{{"a", math.Inf(1), 0}, {"b", ms(50), 3}}, "a", "b", true},
-		{"too few samples", []pairStats{{"a", ms(80), 3}, {"b", ms(10), 2}}, "a", "", false},
-		{"nothing measured", []pairStats{{"a", math.Inf(1), 0}, {"b", math.Inf(1), 0}}, "a", "", false},
-		{"tie breaks by key", []pairStats{{"c", ms(90), 3}, {"b", ms(10), 3}, {"a", ms(10), 3}}, "c", "a", true},
+		{"faster by margin", []pairStats{{"a", ms(80), 3, 0}, {"b", ms(20), 3, 0}}, "a", "b", true},
+		{"within absolute margin", []pairStats{{"a", ms(24), 3, 0}, {"b", ms(20), 3, 0}}, "a", "b", false},
+		{"within relative margin", []pairStats{{"a", ms(200), 3, 0}, {"b", ms(180), 3, 0}}, "a", "b", false},
+		{"current is best", []pairStats{{"a", ms(10), 3, 0}, {"b", ms(20), 3, 0}}, "a", "", false},
+		{"unmeasured current is replaceable", []pairStats{{"a", math.Inf(1), 0, 0}, {"b", ms(50), 3, 0}}, "a", "b", true},
+		{"too few samples", []pairStats{{"a", ms(80), 3, 0}, {"b", ms(10), 2, 0}}, "a", "", false},
+		{"nothing measured", []pairStats{{"a", math.Inf(1), 0, 0}, {"b", math.Inf(1), 0, 0}}, "a", "", false},
+		{"tie breaks by key", []pairStats{{"c", ms(90), 3, 0}, {"b", ms(10), 3, 0}, {"a", ms(10), 3, 0}}, "c", "a", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -722,5 +722,49 @@ func TestProbeRoundsBackOffForPeersThatNeverAnswer(t *testing.T) {
 	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
 	if len(drainProbes(device)) == 0 {
 		t.Fatal("probing did not resume after a reply")
+	}
+}
+
+func TestEndpointProberLeavesFailingCurrentPathAfterOneRound(t *testing.T) {
+	// Given the current pair stopped answering and another pair is healthy
+	var prober endpointProber
+	prober.rebuild([]*probePair{{key: "a", rtt: math.Inf(1), misses: endpointProbeMissLimit}, {key: "b", rtt: 0.02, samples: 3}})
+
+	// When / Then one round is enough
+	if target := prober.decide("a", testSelection); target == nil || target.key != "b" {
+		t.Fatalf("target = %+v, want immediate switch to b", target)
+	}
+}
+
+func TestApplyProbedEndpointPinsBeforePublishing(t *testing.T) {
+	// Given a live peer and concurrent inbound packets from another address
+	now := time.Now()
+	peer := &Peer{device: &Device{EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 70}}}}
+	peer.LastPacketReceivedAdd1Sec.Store(&now)
+	peer.endpoint = staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("192.0.2.1")}
+	chosen := staticTestEndpoint{dst: net.ParseIP("192.0.2.20"), src: net.ParseIP("198.51.100.1")}
+	// Same remote IP as the choice but arriving on another local source: the
+	// unpinned guard would accept it and overwrite the chosen source.
+	inbound := staticTestEndpoint{dst: net.ParseIP("192.0.2.20"), src: net.ParseIP("192.0.2.1")}
+	for i := 0; i < 200; i++ {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			peer.SetEndpointFromPacket(inbound)
+		}()
+		peer.applyProbedEndpoint(chosen, "old", &probePair{key: "new", remote: "192.0.2.20:51820"})
+		<-done
+		// Then whenever the prober's choice is visible it is pinned, so the
+		// inbound packet can only have been refused.
+		peer.RLock()
+		got := peer.endpoint.SrcIP()
+		peer.RUnlock()
+		if !got.Equal(chosen.src) {
+			t.Fatalf("iteration %d: inbound packet overwrote the probed endpoint source (%v)", i, got)
+		}
+		peer.Lock()
+		peer.endpoint = staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("192.0.2.1")}
+		peer.endpointPinned.Store(false)
+		peer.Unlock()
 	}
 }

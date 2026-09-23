@@ -328,6 +328,7 @@ type pairStats struct {
 	key     string
 	rtt     float64
 	samples int
+	misses  int
 }
 
 // selectEndpointPair returns the fastest measured pair and whether it beats
@@ -362,8 +363,14 @@ func (p *endpointProber) decide(currentKey string, settings endpointSelectionSet
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	stats := make([]pairStats, 0, len(p.pairs))
+	rounds := settings.rounds
 	for _, pair := range p.pairs {
-		stats = append(stats, pairStats{key: pair.key, rtt: pair.rtt, samples: pair.samples})
+		stats = append(stats, pairStats{key: pair.key, rtt: pair.rtt, samples: pair.samples, misses: pair.misses})
+		if pair.key == currentKey && pair.misses >= endpointProbeMissLimit {
+			// The current path stopped answering: leave it after one round
+			// instead of waiting out the full streak.
+			rounds = 1
+		}
 	}
 	key, better := selectEndpointPair(stats, currentKey, settings.minMargin, settings.marginFrac, endpointProbeMinSamples)
 	if !better {
@@ -375,7 +382,7 @@ func (p *endpointProber) decide(currentKey string, settings endpointSelectionSet
 	} else {
 		p.bestKey, p.bestStreak = key, 1
 	}
-	if p.bestStreak < settings.rounds {
+	if p.bestStreak < rounds {
 		return nil
 	}
 	p.bestKey, p.bestStreak = "", 0
@@ -562,11 +569,13 @@ func (peer *Peer) applyProbedEndpoint(endpoint conn.Endpoint, fromKey string, ta
 		peer.Unlock()
 		return false
 	}
+	// Pin before publishing the endpoint so SetEndpointFromPacket, which
+	// checks the pin under the same lock, can never overwrite the choice.
+	peer.endpointPinned.Store(true)
 	device.SaveToConfig(peer, endpoint)
 	peer.endpoint = endpoint
 	peer.ConnURL = target.remote
 	peer.Unlock()
-	peer.endpointPinned.Store(true)
 	peer.lastEndpointChange.Store(time.Now().UnixNano())
 	if device.LogLevel.LogControl {
 		fmt.Printf("Control: Peer %v switched to lower-latency path %v (%.1f ms), was %v\n", peer.ID.ToString(), target.String(), target.rtt*1000, fromKey)
