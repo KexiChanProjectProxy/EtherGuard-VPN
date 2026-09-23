@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"runtime"
 	"strings"
@@ -108,6 +109,19 @@ type PeekLookAtSocketFd interface {
 	PeekLookAtSocketFd6() (fd int, err error)
 }
 
+// EndpointSourcePinner is implemented by Binds whose endpoints can pin the
+// local source address and outgoing interface of each datagram (Linux sendmsg
+// IP_PKTINFO / IPV6_PKTINFO). Both the source and the interface are pinned so
+// the kernel honours per-interface default routes and "ip rule from <src>"
+// policy routing.
+//
+// A pinned Endpoint may lose its pin on Send when the kernel rejects it (for
+// example a tentative IPv6 address). Callers that need to attribute a reply to
+// the pinned source must check Endpoint.SrcIP().IsUnspecified() after Send.
+type EndpointSourcePinner interface {
+	ParseEndpointFrom(dst string, src netip.Addr, ifindex int) (Endpoint, error)
+}
+
 // An Endpoint maintains the source/destination caching for a peer.
 //
 //	dst: the remote address of a peer ("endpoint" in uapi terminology)
@@ -124,6 +138,12 @@ type Endpoint interface {
 var (
 	ErrBindAlreadyOpen   = errors.New("bind is already open")
 	ErrWrongEndpointType = errors.New("endpoint type does not correspond with bind type")
+	// ErrSourceFamilyMismatch is returned when a pinned source address and the
+	// destination address belong to different address families.
+	ErrSourceFamilyMismatch = errors.New("source and destination address families differ")
+	// ErrInvalidSource is returned when a pinned source is unspecified or has no
+	// valid interface index.
+	ErrInvalidSource = errors.New("invalid pinned source address or interface")
 )
 
 func (fn ReceiveFunc) PrettyName() string {

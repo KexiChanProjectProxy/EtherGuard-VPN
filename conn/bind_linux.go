@@ -7,6 +7,7 @@ package conn
 
 import (
 	"errors"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -101,6 +102,35 @@ func NewDefaultBind(Af EnabledAf, bindmode string, fwmark uint32) Bind {
 
 var _ Endpoint = (*LinuxSocketEndpoint)(nil)
 var _ Bind = (*LinuxSocketBind)(nil)
+var _ EndpointSourcePinner = (*LinuxSocketBind)(nil)
+
+// ParseEndpointFrom parses dst and pins the datagram source address and
+// outgoing interface, so sends leave through that interface with that source.
+func (bind *LinuxSocketBind) ParseEndpointFrom(dst string, src netip.Addr, ifindex int) (Endpoint, error) {
+	if !src.IsValid() || src.IsUnspecified() || ifindex <= 0 || ifindex > math.MaxInt32 {
+		return nil, ErrInvalidSource
+	}
+	parsed, err := bind.ParseEndpoint(dst)
+	if err != nil {
+		return nil, err
+	}
+	end := parsed.(*LinuxSocketEndpoint)
+	src = src.Unmap()
+	if !end.isV6 {
+		if !src.Is4() {
+			return nil, ErrSourceFamilyMismatch
+		}
+		end.src4().Src = src.As4()
+		end.src4().Ifindex = int32(ifindex)
+		return end, nil
+	}
+	if !src.Is6() {
+		return nil, ErrSourceFamilyMismatch
+	}
+	end.src6().src = src.As16()
+	end.dst6().ZoneId = uint32(ifindex)
+	return end, nil
+}
 
 func (s *LinuxSocketBind) EnabledAf() EnabledAf {
 	return EnabledAf{
