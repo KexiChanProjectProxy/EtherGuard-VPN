@@ -121,6 +121,9 @@ func (e e2eEndpoint) SrcIP() net.IP { return nil }
 type e2eFabric struct {
 	mu    sync.RWMutex
 	binds map[string]*e2eBind
+	// delay, when set, returns an extra one-way delay for datagrams sent to
+	// destination, emulating paths with different latency.
+	delay func(destination string) time.Duration
 }
 
 func newE2EFabric() *e2eFabric {
@@ -156,17 +159,28 @@ func (f *e2eFabric) deliver(packet []byte, destination, source string) error {
 			}
 		}
 	}
+	delay := f.delay
 	f.mu.RUnlock()
 	if bind == nil {
 		return nil
 	}
-	bind.observe(packet)
-	select {
-	case <-bind.closed:
-		return net.ErrClosed
-	case bind.inbox <- e2eDatagram{packet: append([]byte(nil), packet...), endpoint: e2eEndpoint{destination: source, source: source}}:
-		return nil
+	datagram := e2eDatagram{packet: append([]byte(nil), packet...), endpoint: e2eEndpoint{destination: source, source: source}}
+	push := func() error {
+		bind.observe(datagram.packet)
+		select {
+		case <-bind.closed:
+			return net.ErrClosed
+		case bind.inbox <- datagram:
+			return nil
+		}
 	}
+	if delay != nil {
+		if d := delay(destination); d > 0 {
+			time.AfterFunc(d, func() { _ = push() })
+			return nil
+		}
+	}
+	return push()
 }
 
 func (b *e2eBind) observe(packet []byte) {
