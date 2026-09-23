@@ -333,7 +333,10 @@ func TestEdgeConfigV2DirectConnectivityDefaults(t *testing.T) {
 	resolved := cfg.ResolveDirectConnectivity()
 
 	// Then
-	want := ControlV2DirectConnectivity{PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5}
+	want := ControlV2DirectConnectivity{
+		PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5,
+		EndpointProbeIntervalSeconds: 16, EndpointSwitchMarginMS: 5, EndpointSwitchMarginPercent: 15, EndpointSwitchRounds: 3,
+	}
 	if resolved != want {
 		t.Fatalf("resolved defaults = %+v, want %+v", resolved, want)
 	}
@@ -351,6 +354,12 @@ func TestEdgeConfigV2DirectConnectivityValidation(t *testing.T) {
 		{"explicit", ControlV2DirectConnectivity{PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5}, true},
 		{"negative", ControlV2DirectConnectivity{PingIntervalSeconds: -1}, false},
 		{"absurd", ControlV2DirectConnectivity{OfflineCheckSeconds: 86401}, false},
+		{"endpoint selection explicit", ControlV2DirectConnectivity{DisableEndpointSelection: true, EndpointProbeIntervalSeconds: 8, EndpointSwitchMarginMS: 10, EndpointSwitchMarginPercent: 20, EndpointSwitchRounds: 4}, true},
+		{"negative probe interval", ControlV2DirectConnectivity{EndpointProbeIntervalSeconds: -1}, false},
+		{"NaN switch margin", ControlV2DirectConnectivity{EndpointSwitchMarginMS: math.NaN()}, false},
+		{"switch margin percent over 100", ControlV2DirectConnectivity{EndpointSwitchMarginPercent: 101}, false},
+		{"negative switch rounds", ControlV2DirectConnectivity{EndpointSwitchRounds: -1}, false},
+		{"absurd switch rounds", ControlV2DirectConnectivity{EndpointSwitchRounds: 101}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

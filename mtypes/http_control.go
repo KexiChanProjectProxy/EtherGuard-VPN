@@ -1009,6 +1009,41 @@ type ControlV2DirectConnectivity struct {
 	PeerAliveTimeoutSeconds    float64 `yaml:"PeerAliveTimeoutSeconds,omitempty" json:"peer_alive_timeout_seconds,omitempty"`
 	OfflineCheckSeconds        float64 `yaml:"OfflineCheckSeconds,omitempty" json:"offline_check_seconds,omitempty"`
 	NextEndpointTrySeconds     float64 `yaml:"NextEndpointTrySeconds,omitempty" json:"next_endpoint_try_seconds,omitempty"`
+	// Lowest-latency endpoint selection among a live peer's candidates.
+	// Zero values resolve to documented defaults.
+	DisableEndpointSelection     bool    `yaml:"DisableEndpointSelection,omitempty" json:"disable_endpoint_selection,omitempty"`
+	EndpointProbeIntervalSeconds float64 `yaml:"EndpointProbeIntervalSeconds,omitempty" json:"endpoint_probe_interval_seconds,omitempty"`
+	EndpointSwitchMarginMS       float64 `yaml:"EndpointSwitchMarginMS,omitempty" json:"endpoint_switch_margin_ms,omitempty"`
+	EndpointSwitchMarginPercent  float64 `yaml:"EndpointSwitchMarginPercent,omitempty" json:"endpoint_switch_margin_percent,omitempty"`
+	EndpointSwitchRounds         int     `yaml:"EndpointSwitchRounds,omitempty" json:"endpoint_switch_rounds,omitempty"`
+}
+
+// Endpoint selection defaults and bounds.
+const (
+	DefaultEndpointSwitchMarginMS      = 5
+	DefaultEndpointSwitchMarginPercent = 15
+	DefaultEndpointSwitchRounds        = 3
+	maxEndpointSwitchMarginMS          = 60000
+	maxEndpointSwitchRounds            = 100
+)
+
+// ValidateEndpointSelection checks the endpoint selection knobs shared by the
+// v2 DirectConnectivity block and the legacy DynamicRoute block.
+func ValidateEndpointSelection(probeIntervalSeconds, marginMS, marginPercent float64, rounds int) error {
+	finite := func(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+	if !finite(probeIntervalSeconds) || probeIntervalSeconds < 0 || probeIntervalSeconds > controlV2MaxDirectConnectivitySecs {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "EndpointProbeIntervalSeconds", "must be between 0 and %d seconds", controlV2MaxDirectConnectivitySecs)
+	}
+	if !finite(marginMS) || marginMS < 0 || marginMS > maxEndpointSwitchMarginMS {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "EndpointSwitchMarginMS", "must be between 0 and %d milliseconds", maxEndpointSwitchMarginMS)
+	}
+	if !finite(marginPercent) || marginPercent < 0 || marginPercent > 100 {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "EndpointSwitchMarginPercent", "must be between 0 and 100")
+	}
+	if rounds < 0 || rounds > maxEndpointSwitchRounds {
+		return newControlV2Error(ControlV2ErrInvalidDuration, "EndpointSwitchRounds", "must be between 0 and %d", maxEndpointSwitchRounds)
+	}
+	return nil
 }
 
 // Validate rejects negative, non-finite, and impractically large intervals.
@@ -1027,7 +1062,7 @@ func (c *ControlV2DirectConnectivity) Validate() error {
 			return newControlV2Error(ControlV2ErrInvalidDuration, field.name, "must be between 0 and %d seconds", controlV2MaxDirectConnectivitySecs)
 		}
 	}
-	return nil
+	return ValidateEndpointSelection(c.EndpointProbeIntervalSeconds, c.EndpointSwitchMarginMS, c.EndpointSwitchMarginPercent, c.EndpointSwitchRounds)
 }
 
 // ResolveDirectConnectivity returns explicit timings or safe defaults for
@@ -1048,6 +1083,18 @@ func (c *EdgeConfigV2) ResolveDirectConnectivity() ControlV2DirectConnectivity {
 	}
 	if resolved.NextEndpointTrySeconds == 0 {
 		resolved.NextEndpointTrySeconds = 5
+	}
+	if resolved.EndpointProbeIntervalSeconds == 0 {
+		resolved.EndpointProbeIntervalSeconds = resolved.PingIntervalSeconds
+	}
+	if resolved.EndpointSwitchMarginMS == 0 {
+		resolved.EndpointSwitchMarginMS = DefaultEndpointSwitchMarginMS
+	}
+	if resolved.EndpointSwitchMarginPercent == 0 {
+		resolved.EndpointSwitchMarginPercent = DefaultEndpointSwitchMarginPercent
+	}
+	if resolved.EndpointSwitchRounds == 0 {
+		resolved.EndpointSwitchRounds = DefaultEndpointSwitchRounds
 	}
 	return resolved
 }

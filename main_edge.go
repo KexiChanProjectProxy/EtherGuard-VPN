@@ -47,6 +47,11 @@ func hydrateV2DirectConnectivity(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.E
 	econfig.DynamicRoute.PeerAliveTimeout = resolved.PeerAliveTimeoutSeconds
 	econfig.DynamicRoute.TimeoutCheckInterval = resolved.OfflineCheckSeconds
 	econfig.DynamicRoute.ConnNextTry = resolved.NextEndpointTrySeconds
+	econfig.DynamicRoute.DisableEndpointSelection = resolved.DisableEndpointSelection
+	econfig.DynamicRoute.EndpointProbeInterval = resolved.EndpointProbeIntervalSeconds
+	econfig.DynamicRoute.EndpointSwitchMarginMS = resolved.EndpointSwitchMarginMS
+	econfig.DynamicRoute.EndpointSwitchMarginPercent = resolved.EndpointSwitchMarginPercent
+	econfig.DynamicRoute.EndpointSwitchRounds = resolved.EndpointSwitchRounds
 }
 
 func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfigV2) {
@@ -235,6 +240,9 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 
 	if econfig.DefaultTTL <= 0 {
 		return errors.New("DefaultTTL must > 0")
+	}
+	if err := mtypes.ValidateEndpointSelection(econfig.DynamicRoute.EndpointProbeInterval, econfig.DynamicRoute.EndpointSwitchMarginMS, econfig.DynamicRoute.EndpointSwitchMarginPercent, econfig.DynamicRoute.EndpointSwitchRounds); err != nil {
+		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
 	}
 
 	////////////////////////////////////////////////////

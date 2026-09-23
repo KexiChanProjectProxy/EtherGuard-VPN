@@ -129,6 +129,14 @@ type DynamicRouteInfo struct {
 	SaveNewPeers         bool    `yaml:"SaveNewPeers"`
 	P2P                  P2PInfo `yaml:"P2P"`
 	NTPConfig            NTPInfo `yaml:"NTPConfig"`
+	// Lowest-latency endpoint selection among a live peer's candidates.
+	// Zero values use the defaults (probe every SendPingInterval, 5 ms or
+	// 15 % margin, 3 consecutive rounds).
+	DisableEndpointSelection    bool    `yaml:"DisableEndpointSelection,omitempty"`
+	EndpointProbeInterval       float64 `yaml:"EndpointProbeInterval,omitempty"`
+	EndpointSwitchMarginMS      float64 `yaml:"EndpointSwitchMarginMS,omitempty"`
+	EndpointSwitchMarginPercent float64 `yaml:"EndpointSwitchMarginPercent,omitempty"`
+	EndpointSwitchRounds        int     `yaml:"EndpointSwitchRounds,omitempty"`
 }
 
 type NTPInfo struct {

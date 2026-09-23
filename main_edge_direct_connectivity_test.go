@@ -37,6 +37,10 @@ func TestEdgeDirectConnectivityOmittedHydratesDefaults(t *testing.T) {
 	if got, want := legacy.DynamicRoute.ConnNextTry, float64(5); got != want {
 		t.Fatalf("next endpoint try interval = %v, want %v", got, want)
 	}
+	route := legacy.DynamicRoute
+	if route.DisableEndpointSelection || route.EndpointProbeInterval != 16 || route.EndpointSwitchMarginMS != 5 || route.EndpointSwitchMarginPercent != 15 || route.EndpointSwitchRounds != 3 {
+		t.Fatalf("endpoint selection defaults = %+v", route)
+	}
 	if got, want := legacy.Peers[0].PersistentKeepalive, uint32(0); got != want {
 		t.Fatalf("static peer keepalive = %v, want %v", got, want)
 	}
@@ -71,6 +75,24 @@ func TestEdgeDirectConnectivityExplicitValuesHydrateBeforeDeviceStartup(t *testi
 	}
 }
 
+func TestEdgeEndpointSelectionExplicitValuesHydrateBeforeDeviceStartup(t *testing.T) {
+	legacy := mtypes.EdgeConfig{}
+	v2 := mtypes.EdgeConfigV2{DirectConnectivity: mtypes.ControlV2DirectConnectivity{
+		DisableEndpointSelection:     true,
+		EndpointProbeIntervalSeconds: 7,
+		EndpointSwitchMarginMS:       12,
+		EndpointSwitchMarginPercent:  25,
+		EndpointSwitchRounds:         4,
+	}}
+
+	hydrateV2DirectConnectivity(&legacy, &v2)
+
+	route := legacy.DynamicRoute
+	if !route.DisableEndpointSelection || route.EndpointProbeInterval != 7 || route.EndpointSwitchMarginMS != 12 || route.EndpointSwitchMarginPercent != 25 || route.EndpointSwitchRounds != 4 {
+		t.Fatalf("hydrated endpoint selection = %+v", route)
+	}
+}
+
 func TestExampleEdgeConfigV2EmitsDirectConnectivity(t *testing.T) {
 	config, err := gencfg.GetExampleEdgeConfV2("")
 	if err != nil {
@@ -90,11 +112,14 @@ func TestExampleEdgeConfigV2EmitsDirectConnectivity(t *testing.T) {
 		t.Fatalf("decode generated edge config: %v", err)
 	}
 	if got, want := decoded.DirectConnectivity, (mtypes.ControlV2DirectConnectivity{
-		PersistentKeepaliveSeconds: 25,
-		PingIntervalSeconds:        16,
-		PeerAliveTimeoutSeconds:    70,
-		OfflineCheckSeconds:        10,
-		NextEndpointTrySeconds:     5,
+		PersistentKeepaliveSeconds:  25,
+		PingIntervalSeconds:         16,
+		PeerAliveTimeoutSeconds:     70,
+		OfflineCheckSeconds:         10,
+		NextEndpointTrySeconds:      5,
+		EndpointSwitchMarginMS:      5,
+		EndpointSwitchMarginPercent: 15,
+		EndpointSwitchRounds:        3,
 	}); got != want {
 		t.Fatalf("generated DirectConnectivity = %#v, want %#v", got, want)
 	}
