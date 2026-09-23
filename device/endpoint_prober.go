@@ -30,6 +30,12 @@ const (
 	endpointProbeEWMAAlpha  = 0.3
 	endpointProbeMinSamples = 3
 	endpointProbeMissLimit  = 2
+	// A peer that never answers probes (for example an older version that
+	// does not echo RequestID) is probed only every endpointProbeBackoffEvery
+	// rounds after endpointProbeSilentRounds silent rounds, which bounds the
+	// legacy pongs such peers send back.
+	endpointProbeSilentRounds = 5
+	endpointProbeBackoffEvery = 8
 )
 
 // endpointSelectionSettings is the resolved endpoint selection policy.
@@ -93,6 +99,9 @@ type endpointProber struct {
 	nextID     uint32
 	bestKey    string
 	bestStreak int
+	// silentRounds counts consecutive rounds in which no probe was answered.
+	silentRounds int
+	answered     bool
 }
 
 func probePairKey(local *stunSource, remote string) string {
@@ -216,6 +225,8 @@ func (p *endpointProber) reset() {
 }
 
 func (p *endpointProber) resetLocked() {
+	p.silentRounds = 0
+	p.answered = false
 	p.pending = make(map[uint32]pendingProbe)
 	p.pinnedSent = nil
 	p.bestKey = ""
@@ -242,6 +253,23 @@ func (p *endpointProber) expire(now time.Time, maxAge time.Duration) {
 			}
 		}
 	}
+}
+
+// shouldProbe closes the previous round's reply accounting and reports
+// whether this round should send probes.
+func (p *endpointProber) shouldProbe() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.answered {
+		p.silentRounds = 0
+	} else {
+		p.silentRounds++
+	}
+	p.answered = false
+	if p.silentRounds <= endpointProbeSilentRounds {
+		return true
+	}
+	return (p.silentRounds-endpointProbeSilentRounds)%endpointProbeBackoffEvery == 0
 }
 
 // register records a probe for pair and returns its non-zero RequestID.
@@ -277,6 +305,7 @@ func (p *endpointProber) onPong(id uint32, now time.Time) {
 		return
 	}
 	delete(p.pending, id)
+	p.answered = true
 	rtt := now.Sub(probe.sentAt).Seconds()
 	if rtt < 0 {
 		return
@@ -498,6 +527,9 @@ func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []s
 		}
 	}
 
+	if !peer.prober.shouldProbe() {
+		return
+	}
 	for _, pair := range pairs {
 		endpoint, err := makePairEndpoint(bind, pair)
 		if err != nil {

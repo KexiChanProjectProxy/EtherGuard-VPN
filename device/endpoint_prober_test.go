@@ -692,3 +692,35 @@ func TestProbeRoundProbesReflexiveAddressAheadOfPublishedCandidates(t *testing.T
 	}
 	t.Fatal("reflexive address was not probed")
 }
+
+func TestProbeRoundsBackOffForPeersThatNeverAnswer(t *testing.T) {
+	// Given a peer whose probes are never answered (for example an older version)
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
+	setTrylist(peer, "203.0.113.20:3001", "203.0.113.21:3001")
+
+	// When many rounds run
+	var probingRounds int
+	for round := 0; round < 30; round++ {
+		device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+		if len(drainProbes(device)) > 0 {
+			probingRounds++
+		}
+	}
+
+	// Then probing continues only occasionally after the silent threshold
+	// (the first round has no previous round, so it counts as silent too)
+	if probingRounds >= 10 || probingRounds < endpointProbeSilentRounds {
+		t.Fatalf("probing rounds = %d of 30, want backoff after %d silent rounds", probingRounds, endpointProbeSilentRounds)
+	}
+
+	// When a probe is answered again, probing resumes every round
+	peer.prober.mu.Lock()
+	peer.prober.answered = true
+	peer.prober.mu.Unlock()
+	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+	if len(drainProbes(device)) == 0 {
+		t.Fatal("probing did not resume after a reply")
+	}
+}
