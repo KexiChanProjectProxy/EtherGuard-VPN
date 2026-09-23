@@ -62,4 +62,15 @@ DynamicRoute:
   EndpointSwitchRounds: 0           # 0 = 3 consecutive rounds
 ```
 
+## Endpoint blacklist
+
+`DynamicRoute.EndpointBlacklist` lists IP addresses or CIDRs (up to 256) that must never be used as a peer endpoint. Blacklisted addresses are removed from every peer's candidate list, are never probed or switched to, are not advertised as this edge's own endpoints, and datagrams from them are dropped. A peer currently on a blacklisted endpoint is moved to another candidate. The list is read at startup; an invalid entry, or setting it outside P2P mode, is a startup error. In Super mode use the Super's `EndpointBlacklist` parameter instead.
+
+```yaml
+DynamicRoute:
+  EndpointBlacklist:
+    - 203.0.113.12      # a single address
+    - 100.64.0.0/10     # a whole range
+```
+
 [WIP]

@@ -141,6 +141,17 @@ DynamicRoute:
   EndpointSwitchRounds: 0           # 0 = 連續3輪
 ```
 
+## Endpoint黑名單
+
+`DynamicRoute.EndpointBlacklist`列出永遠不可作為peer endpoint使用的IP位址或CIDR（最多256項）。被列入的位址會從每個peer的候選清單中移除，不會被探測或切換過去，不會作為本edge自己的endpoint廣播，來自這些位址的封包也會被丟棄。若某peer目前使用的endpoint被列入，會改用其他候選位址。清單在啟動時讀取；格式錯誤的項目，或在P2P模式以外設定此項，會導致啟動失敗。Super模式請改用Super的`EndpointBlacklist`參數。
+
+```yaml
+DynamicRoute:
+  EndpointBlacklist:
+    - 203.0.113.12      # 單一位址
+    - 100.64.0.0/10     # 整個範圍
+```
+
 ## Note
 P2P模式下，PSK是禁用的。因為n個節點有n(n-1)/2的連線，每個連線都要使用不同PSK  
 又不像static mode提前設好，peer數固定不再變動  
