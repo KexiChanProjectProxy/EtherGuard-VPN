@@ -124,3 +124,28 @@ func TestExampleEdgeConfigV2EmitsDirectConnectivity(t *testing.T) {
 		t.Fatalf("generated DirectConnectivity = %#v, want %#v", got, want)
 	}
 }
+
+func TestValidateDynamicRouteEndpointBlacklist(t *testing.T) {
+	p2p := func(entries ...string) *mtypes.EdgeConfig {
+		return &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{UseP2P: true}, EndpointBlacklist: entries}}
+	}
+	cases := []struct {
+		name   string
+		config *mtypes.EdgeConfig
+		ok     bool
+	}{
+		{"empty", p2p(), true},
+		{"ip and cidr", p2p("203.0.113.12", "10.0.0.0/8", "2001:db8::/32"), true},
+		{"invalid entry", p2p("not-an-ip"), false},
+		{"static mode", &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{EndpointBlacklist: []string{"203.0.113.12"}}}, false},
+		{"super mode", func() *mtypes.EdgeConfig { c := p2p("203.0.113.12"); c.SuperNodeV2Enabled = true; return c }(), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDynamicRoute(tc.config)
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateDynamicRoute() error = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}

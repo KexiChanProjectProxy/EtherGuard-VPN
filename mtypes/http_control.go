@@ -572,6 +572,13 @@ func (p *ControlV2Parameters) ParseEndpointBlacklist() ([]netip.Prefix, error) {
 	return parseEndpointBlacklist(p.EndpointBlacklist)
 }
 
+// ParseEndpointBlacklist parses endpoint IP and CIDR strings (at most 256)
+// into canonical prefixes. It is shared by the Super-published parameter and
+// the P2P-mode DynamicRoute.EndpointBlacklist setting.
+func ParseEndpointBlacklist(entries []string) ([]netip.Prefix, error) {
+	return parseEndpointBlacklist(entries)
+}
+
 func parseEndpointBlacklist(entries []string) ([]netip.Prefix, error) {
 	if len(entries) > controlV2MaxEndpointBlacklist {
 		return nil, newControlV2Error(ControlV2ErrInvalidCandidate, "EndpointBlacklist", "contains %d entries, maximum is %d", len(entries), controlV2MaxEndpointBlacklist)

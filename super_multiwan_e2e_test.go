@@ -129,6 +129,8 @@ type e2eMultiWANEdgeConfig struct {
 	p2p     bool
 	// disableSelection turns lowest-latency endpoint selection off.
 	disableSelection bool
+	// blacklist sets DynamicRoute.EndpointBlacklist (P2P mode only).
+	blacklist []string
 }
 
 // newE2EMultiWANEdge starts a real edge device with fast direct-connectivity
@@ -153,6 +155,7 @@ func newE2EMultiWANEdge(t *testing.T, cfg e2eMultiWANEdgeConfig, baseURL string,
 			DupCheckTimeout:          5,
 			P2P:                      mtypes.P2PInfo{UseP2P: cfg.p2p, SendPeerInterval: 5},
 			DisableEndpointSelection: cfg.disableSelection,
+			EndpointBlacklist:        cfg.blacklist,
 		},
 		SuperNodeV2Enabled: !cfg.p2p,
 	}
@@ -393,12 +396,11 @@ func TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled(t *testing.T) {
 	}
 }
 
-func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
-	// Given two P2P edges without a Super; B has two public uplinks and A
-	// knows both as retry candidates
-	var fast atomic.Value
-	fabric := newE2EFabric()
-	fabric.delay = shapedLatency(&fast)
+// newE2EP2PPair connects single-homed P2P edge A (101) to multi-WAN P2P edge
+// B (102), whose uplinks sit behind 203.0.113.11 and .12. A knows both public
+// addresses as retry candidates and starts on .11.
+func newE2EP2PPair(t *testing.T, fabric *e2eFabric, configureA func(*e2eMultiWANEdgeConfig)) (edgeA *device.Device, peerB *device.Peer, pubB device.NoisePublicKey) {
+	t.Helper()
 	privateA, pubA := device.RandomKeyPair()
 	privateB, pubB := device.RandomKeyPair()
 	bindA := newE2EBind(fabric, net.ParseIP("198.51.100.101"), net.ParseIP("198.51.100.101"), 101, true)
@@ -407,7 +409,11 @@ func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
 		"198.51.100.2": net.ParseIP("203.0.113.12"),
 	})
 	bindB.dropInitiation.Store(true)
-	edgeA, _ := newE2EMultiWANEdge(t, e2eMultiWANEdgeConfig{id: 101, name: "edge-a", bind: bindA, port: 101, uplinks: []device.UplinkForTest{}, p2p: true}, "", privateA)
+	configA := e2eMultiWANEdgeConfig{id: 101, name: "edge-a", bind: bindA, port: 101, uplinks: []device.UplinkForTest{}, p2p: true}
+	if configureA != nil {
+		configureA(&configA)
+	}
+	edgeA, _ = newE2EMultiWANEdge(t, configA, "", privateA)
 	edgeB, _ := newE2EMultiWANEdge(t, e2eMultiWANEdgeConfig{id: 102, name: "edge-b", bind: bindB, port: 102, p2p: true, uplinks: []device.UplinkForTest{
 		{Addr: netip.MustParseAddr("192.0.2.2"), Ifindex: 3, Name: "wan1"},
 		{Addr: netip.MustParseAddr("198.51.100.2"), Ifindex: 4, Name: "wan2"},
@@ -431,6 +437,16 @@ func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
 	if err := peerB.SendHandshakeInitiation(false); err != nil {
 		t.Fatalf("A handshake: %v", err)
 	}
+	return edgeA, peerB, pubB
+}
+
+func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
+	// Given two P2P edges without a Super; B has two public uplinks and A
+	// knows both as retry candidates
+	var fast atomic.Value
+	fabric := newE2EFabric()
+	fabric.delay = shapedLatency(&fast)
+	edgeA, peerB, pubB := newE2EP2PPair(t, fabric, nil)
 	_, target := awaitLiveOnUplink(t, edgeA, pubB)
 
 	// When every path to B except the other uplink becomes slow
@@ -444,6 +460,31 @@ func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
 	}
 	if !peerB.IsPeerAlive() {
 		t.Fatal("B is no longer alive after the switch")
+	}
+}
+
+func TestP2PEdgeNeverUsesBlacklistedEndpoint(t *testing.T) {
+	// Given A blacklists B's second uplink via DynamicRoute.EndpointBlacklist
+	var fast atomic.Value
+	fabric := newE2EFabric()
+	fabric.delay = shapedLatency(&fast)
+	edgeA, peerB, pubB := newE2EP2PPair(t, fabric, func(cfg *e2eMultiWANEdgeConfig) {
+		cfg.blacklist = []string{"203.0.113.12/32"}
+	})
+	awaitE2E(t, 10*time.Second, func() bool {
+		return edgeA.LookupPeer(pubB).IsPeerAlive() && edgeA.GetConnurl(102) == "203.0.113.11:102"
+	})
+
+	// When the blacklisted uplink is the only fast path
+	fast.Store("203.0.113.12:102")
+	time.Sleep(3 * time.Second)
+
+	// Then A keeps using the allowed uplink and B stays alive
+	if got := edgeA.GetConnurl(102); got != "203.0.113.11:102" {
+		t.Fatalf("A uses %s, want the non-blacklisted 203.0.113.11:102", got)
+	}
+	if !peerB.IsPeerAlive() {
+		t.Fatal("B is no longer alive")
 	}
 }
 

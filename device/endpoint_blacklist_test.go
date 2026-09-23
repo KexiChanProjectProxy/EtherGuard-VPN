@@ -297,3 +297,28 @@ func TestSendBufferRejectsBlacklistedEndpoint(t *testing.T) {
 		t.Fatalf("blacklisted endpoint was written %d times", bind.sends)
 	}
 }
+
+func TestLocalEndpointBlacklistLoadsOnlyInP2PMode(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		route mtypes.DynamicRouteInfo
+		super bool
+		want  bool
+	}{
+		{"p2p", mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{UseP2P: true}, EndpointBlacklist: []string{"203.0.113.0/24"}}, false, true},
+		{"static", mtypes.DynamicRouteInfo{EndpointBlacklist: []string{"203.0.113.0/24"}}, false, false},
+		{"super", mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{UseP2P: true}, EndpointBlacklist: []string{"203.0.113.0/24"}}, true, false},
+		{"invalid", mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{UseP2P: true}, EndpointBlacklist: []string{"bogus"}}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			device := &Device{log: NewLogger(LogLevelSilent, "blacklist-test"), EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: tc.route, SuperNodeV2Enabled: tc.super}}
+			device.loadLocalEndpointBlacklist()
+			if got := device.endpointBlacklisted(net.ParseIP("203.0.113.12")); got != tc.want {
+				t.Fatalf("203.0.113.12 blacklisted = %v, want %v", got, tc.want)
+			}
+			if device.endpointBlacklisted(net.ParseIP("198.51.100.1")) {
+				t.Fatal("address outside the list was blacklisted")
+			}
+		})
+	}
+}

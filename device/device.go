@@ -408,6 +408,7 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 	device.EdgeConfigPath = configpath
 	device.EdgeConfig = econfig
 	device.dampingFilterRadius = econfig.DynamicRoute.DampingFilterRadius
+	device.loadLocalEndpointBlacklist()
 	device.DupData = *fixed_time_cache.NewCache(mtypes.S2TD(econfig.DynamicRoute.DupCheckTimeout), false, mtypes.S2TD(1))
 	device.event_tryendpoint = make(chan struct{}, 1<<6)
 	device.Chan_save_config = make(chan struct{}, 1<<5)

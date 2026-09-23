@@ -66,6 +66,24 @@ func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfi
 	hydrateV2DirectConnectivity(econfig, econfigV2)
 }
 
+// validateDynamicRoute checks the legacy DynamicRoute settings that the
+// device consumes directly.
+func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
+	route := econfig.DynamicRoute
+	if err := mtypes.ValidateEndpointSelection(route.EndpointProbeInterval, route.EndpointSwitchMarginMS, route.EndpointSwitchMarginPercent, route.EndpointSwitchRounds); err != nil {
+		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
+	}
+	if len(route.EndpointBlacklist) > 0 {
+		if !route.P2P.UseP2P || econfig.SuperNodeV2Enabled {
+			return errors.New("DynamicRoute.EndpointBlacklist is only supported in P2P mode; Super mode uses the Super's EndpointBlacklist parameter")
+		}
+		if _, err := mtypes.ParseEndpointBlacklist(route.EndpointBlacklist); err != nil {
+			return fmt.Errorf("DynamicRoute.EndpointBlacklist: %w", err)
+		}
+	}
+	return nil
+}
+
 func edgeSuperNodeV2Enabled(config mtypes.EdgeConfigV2) bool {
 	return len(config.SuperNodeV2.ResolveAPIUrls()) > 0
 }
@@ -241,8 +259,8 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 	if econfig.DefaultTTL <= 0 {
 		return errors.New("DefaultTTL must > 0")
 	}
-	if err := mtypes.ValidateEndpointSelection(econfig.DynamicRoute.EndpointProbeInterval, econfig.DynamicRoute.EndpointSwitchMarginMS, econfig.DynamicRoute.EndpointSwitchMarginPercent, econfig.DynamicRoute.EndpointSwitchRounds); err != nil {
-		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
+	if err := validateDynamicRoute(&econfig); err != nil {
+		return err
 	}
 
 	////////////////////////////////////////////////////

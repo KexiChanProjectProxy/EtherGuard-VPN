@@ -84,6 +84,28 @@ func (device *Device) applyEndpointBlacklist(parameters mtypes.ControlV2Paramete
 		device.log.Errorf("HTTP control endpoint blacklist update rejected: %v", err)
 		return
 	}
+	device.setEndpointBlacklist(prefixes)
+}
+
+// loadLocalEndpointBlacklist installs the P2P-mode DynamicRoute.EndpointBlacklist.
+// Super mode ignores it: there the Super-published parameter is authoritative.
+func (device *Device) loadLocalEndpointBlacklist() {
+	route := device.EdgeConfig.DynamicRoute
+	if len(route.EndpointBlacklist) == 0 || !route.P2P.UseP2P || device.EdgeConfig.SuperNodeV2Enabled {
+		return
+	}
+	prefixes, err := mtypes.ParseEndpointBlacklist(route.EndpointBlacklist)
+	if err != nil {
+		device.log.Errorf("DynamicRoute.EndpointBlacklist rejected: %v", err)
+		return
+	}
+	device.setEndpointBlacklist(prefixes)
+	device.log.Verbosef("Endpoint blacklist loaded from DynamicRoute: entries=%d", len(prefixes))
+}
+
+// setEndpointBlacklist replaces the blacklist and evicts blacklisted
+// candidates and current endpoints from every peer.
+func (device *Device) setEndpointBlacklist(prefixes []netip.Prefix) {
 	device.endpointBlacklistMu.Lock()
 	device.endpointBlacklist.Store(&endpointBlacklist{prefixes: prefixes})
 	for _, peer := range device.allPeersSnapshot() {

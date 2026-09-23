@@ -137,6 +137,10 @@ type DynamicRouteInfo struct {
 	EndpointSwitchMarginMS      float64 `yaml:"EndpointSwitchMarginMS,omitempty"`
 	EndpointSwitchMarginPercent float64 `yaml:"EndpointSwitchMarginPercent,omitempty"`
 	EndpointSwitchRounds        int     `yaml:"EndpointSwitchRounds,omitempty"`
+	// EndpointBlacklist lists IP addresses or CIDRs that must never be used
+	// as peer endpoints (P2P mode only; Super mode uses the Super-published
+	// parameter). Up to 256 entries.
+	EndpointBlacklist []string `yaml:"EndpointBlacklist,omitempty"`
 }
 
 type NTPInfo struct {
