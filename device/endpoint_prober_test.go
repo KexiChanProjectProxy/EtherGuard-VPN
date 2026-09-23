@@ -4,6 +4,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -618,4 +619,76 @@ func TestTransmitOutboundOffPathLeavesKeepaliveTimersAlone(t *testing.T) {
 	}
 	device.PutMessageBuffer(elem.buffer)
 	device.PutOutboundElement(elem)
+}
+
+// --- peer-reflexive candidates ---
+
+func TestSetEndpointFromPacketRecordsRefusedSourcesAsReflexive(t *testing.T) {
+	// Given a live peer
+	now := time.Now()
+	current := staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("192.0.2.1")}
+	peer := &Peer{device: &Device{EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 70}}}}
+	peer.LastPacketReceivedAdd1Sec.Store(&now)
+	peer.endpoint = current
+
+	// When authenticated packets arrive from another IP (roaming refused)
+	peer.SetEndpointFromPacket(staticTestEndpoint{dst: net.ParseIP("203.0.113.12"), src: net.ParseIP("192.0.2.1")})
+	// and, once pinned, from the same IP on another port
+	peer.endpointPinned.Store(true)
+	peer.SetEndpointFromPacket(staticTestEndpoint{dst: net.ParseIP("192.0.2.10"), src: net.ParseIP("198.51.100.1")})
+
+	// Then both sources become candidates, and the endpoint is unchanged
+	got := peer.reflexive.candidates(time.Now(), time.Minute)
+	if len(got) != 2 {
+		t.Fatalf("reflexive candidates = %+v, want 2", got)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range got {
+		seen[candidate.address] = true
+	}
+	if !seen["203.0.113.12:51820"] || !seen["192.0.2.10:51820"] {
+		t.Fatalf("reflexive candidates = %+v", got)
+	}
+	if !peer.endpoint.DstIP().Equal(current.dst) {
+		t.Fatal("refused packet changed the endpoint")
+	}
+}
+
+func TestReflexiveEndpointsAreBoundedAndExpire(t *testing.T) {
+	var reflexive reflexiveEndpoints
+	base := time.Now()
+	for i := 0; i < maxReflexiveEndpoints+2; i++ {
+		reflexive.note(net.JoinHostPort("203.0.113.1", strconv.Itoa(1000+i)), base.Add(time.Duration(i)*time.Second))
+	}
+	got := reflexive.candidates(base.Add(10*time.Second), time.Minute)
+	if len(got) != maxReflexiveEndpoints {
+		t.Fatalf("kept %d, want %d", len(got), maxReflexiveEndpoints)
+	}
+	if got[0].address != "203.0.113.1:1005" || got[len(got)-1].address != "203.0.113.1:1002" {
+		t.Fatalf("order = %+v, want newest first and oldest evicted", got)
+	}
+	if expired := reflexive.candidates(base.Add(time.Hour), time.Minute); len(expired) != 0 {
+		t.Fatalf("expired entries kept: %+v", expired)
+	}
+}
+
+func TestProbeRoundProbesReflexiveAddressAheadOfPublishedCandidates(t *testing.T) {
+	// Given six published candidates that fill the remote cap and a reflexive
+	// address learned from the peer's traffic
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
+	setTrylist(peer, "10.0.0.1:3001", "10.0.0.2:3001", "10.0.0.3:3001", "10.0.0.4:3001", "10.0.0.5:3001", "10.0.0.6:3001")
+	peer.reflexive.note("203.0.113.12:50000", time.Now())
+
+	// When
+	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+
+	// Then the reflexive address is probed
+	for _, probe := range drainProbes(device) {
+		if probe.endpoint.DstToString() == "203.0.113.12:50000" {
+			return
+		}
+	}
+	t.Fatal("reflexive address was not probed")
 }

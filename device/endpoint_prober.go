@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
@@ -464,7 +465,10 @@ func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []s
 	if currentEndpoint != nil {
 		current = currentEndpoint.DstToString()
 	}
-	candidates, _ := peer.endpoint_trylist.candidates()
+	// Reflexive addresses are proven to carry the peer's traffic, so they
+	// rank ahead of published candidates under the remote cap.
+	trylist, _ := peer.endpoint_trylist.candidates()
+	candidates := append(peer.reflexive.candidates(now, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)), trylist...)
 	allow := func(addrPort netip.AddrPort) bool {
 		if addrPort.Addr().Is4() && !device.enabledAf.IPv4 {
 			return false
@@ -558,4 +562,69 @@ func (device *Device) RoutineProbeEndpoints() {
 		}
 		device.probeEndpointsRound(settings, time.Now())
 	}
+}
+
+const (
+	maxReflexiveEndpoints  = 4
+	reflexiveCandidateCost = 30000
+)
+
+// reflexiveEndpoints is a small, recency-bounded set of peer-reflexive
+// addresses (ICE prflx): sources of authenticated packets from the peer.
+type reflexiveEndpoints struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
+
+func (r *reflexiveEndpoints) note(address string, now time.Time) {
+	addrPort, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return
+	}
+	address = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.seen == nil {
+		r.seen = make(map[string]time.Time)
+	}
+	if _, ok := r.seen[address]; !ok && len(r.seen) >= maxReflexiveEndpoints {
+		oldest := ""
+		for candidate, seenAt := range r.seen {
+			if oldest == "" || seenAt.Before(r.seen[oldest]) {
+				oldest = candidate
+			}
+		}
+		delete(r.seen, oldest)
+	}
+	r.seen[address] = now
+}
+
+// candidates returns addresses seen within maxAge, most recent first, and
+// forgets older ones.
+func (r *reflexiveEndpoints) candidates(now time.Time, maxAge time.Duration) []trylistCandidate {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	type entry struct {
+		address string
+		seenAt  time.Time
+	}
+	var fresh []entry
+	for address, seenAt := range r.seen {
+		if now.Sub(seenAt) > maxAge {
+			delete(r.seen, address)
+			continue
+		}
+		fresh = append(fresh, entry{address, seenAt})
+	}
+	sort.Slice(fresh, func(i, j int) bool {
+		if !fresh[i].seenAt.Equal(fresh[j].seenAt) {
+			return fresh[i].seenAt.After(fresh[j].seenAt)
+		}
+		return fresh[i].address < fresh[j].address
+	})
+	out := make([]trylistCandidate, 0, len(fresh))
+	for _, e := range fresh {
+		out = append(out, trylistCandidate{address: e.address, cost: reflexiveCandidateCost})
+	}
+	return out
 }

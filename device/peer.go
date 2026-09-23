@@ -442,6 +442,11 @@ type Peer struct {
 	// so inbound packets do not overwrite it.
 	prober         endpointProber
 	endpointPinned atomic.Bool
+	// reflexive records addresses the peer's authenticated packets arrived
+	// from while roaming was refused. Behind NATs with endpoint-dependent
+	// mapping these are the only reachable addresses of the peer's other
+	// uplinks, so the prober treats them as candidates.
+	reflexive reflexiveEndpoints
 
 	SingleWayLatency filterwindow
 	OutboundLatency  filterwindow
@@ -829,11 +834,13 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 						if peer.endpointPinned.Load() {
 							// The prober chose this path; inbound packets from the
 							// remote's own choice must not replace it while alive.
+							peer.reflexive.note(endpoint.DstToString(), time.Now())
 							return false, false
 						}
 						oldIP := peer.endpoint.DstIP()
 						newIP := endpoint.DstIP()
 						if oldIP != nil && newIP != nil && !oldIP.Equal(newIP) {
+							peer.reflexive.note(endpoint.DstToString(), time.Now())
 							return false, false
 						}
 					}
