@@ -1,0 +1,17 @@
+exit_code=0
+command: go test -race -shuffle=on -count=1 ./...
+ok  	github.com/KusakabeSi/EtherGuard-VPN	98.948s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/conn	1.022s
+?   	github.com/KusakabeSi/EtherGuard-VPN/conn/bindtest	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/device	4.897s
+?   	github.com/KusakabeSi/EtherGuard-VPN/example_config/super_mode/testfd	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/gencfg	1.094s
+?   	github.com/KusakabeSi/EtherGuard-VPN/ipc	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/mtypes	1.065s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/orderdmap	1.023s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/path	10.785s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/ratelimiter	1.019s
+ok  	github.com/KusakabeSi/EtherGuard-VPN/replay	1.021s
+?   	github.com/KusakabeSi/EtherGuard-VPN/rwcancel	[no test files]
+ok  	github.com/KusakabeSi/EtherGuard-VPN/tai64n	1.016s
+?   	github.com/KusakabeSi/EtherGuard-VPN/tap	[no test files]

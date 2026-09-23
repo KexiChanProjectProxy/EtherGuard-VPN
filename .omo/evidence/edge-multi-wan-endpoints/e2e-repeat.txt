@@ -1,0 +1,60 @@
+exit_code=0
+command: go test -race -shuffle=on -count=5 -run 'MultiWAN|LowestLatency|SelectionDisabled|EndpointDependentNAT' -v .
+-test.shuffle 1790158005572504299
+=== RUN   TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink
+--- PASS: TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink (0.03s)
+=== RUN   TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT
+    super_multiwan_e2e_test.go:471: A reaches B at 203.0.113.11:102 before shaping
+--- PASS: TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT (1.42s)
+=== RUN   TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint (2.22s)
+=== RUN   TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled
+--- PASS: TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled (3.07s)
+=== RUN   TestP2PEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestP2PEdgeConvergesToLowestLatencyEndpoint (2.41s)
+=== RUN   TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink
+--- PASS: TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink (3.04s)
+=== RUN   TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT
+    super_multiwan_e2e_test.go:471: A reaches B at 203.0.113.11:102 before shaping
+--- PASS: TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT (1.42s)
+=== RUN   TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint (2.22s)
+=== RUN   TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled
+--- PASS: TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled (3.10s)
+=== RUN   TestP2PEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestP2PEdgeConvergesToLowestLatencyEndpoint (2.42s)
+=== RUN   TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink
+--- PASS: TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink (0.05s)
+=== RUN   TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT
+    super_multiwan_e2e_test.go:471: A reaches B at 203.0.113.11:102 before shaping
+--- PASS: TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT (1.43s)
+=== RUN   TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint (2.22s)
+=== RUN   TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled
+--- PASS: TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled (3.10s)
+=== RUN   TestP2PEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestP2PEdgeConvergesToLowestLatencyEndpoint (2.42s)
+=== RUN   TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink
+--- PASS: TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink (0.04s)
+=== RUN   TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT
+    super_multiwan_e2e_test.go:471: A reaches B at 203.0.113.11:102 before shaping
+--- PASS: TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT (1.43s)
+=== RUN   TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint (2.22s)
+=== RUN   TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled
+--- PASS: TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled (3.10s)
+=== RUN   TestP2PEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestP2PEdgeConvergesToLowestLatencyEndpoint (2.42s)
+=== RUN   TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink
+--- PASS: TestHTTPOnlySuperMultiWANEdgeReportsOneSTUNCandidatePerUplink (3.05s)
+=== RUN   TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT
+    super_multiwan_e2e_test.go:471: A reaches B at 203.0.113.11:102 before shaping
+--- PASS: TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT (1.43s)
+=== RUN   TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint (2.22s)
+=== RUN   TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled
+--- PASS: TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled (3.10s)
+=== RUN   TestP2PEdgeConvergesToLowestLatencyEndpoint
+--- PASS: TestP2PEdgeConvergesToLowestLatencyEndpoint (2.42s)
+PASS
+ok  	github.com/KusakabeSi/EtherGuard-VPN	53.514s

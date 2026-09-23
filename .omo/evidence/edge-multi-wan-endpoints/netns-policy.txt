@@ -1,0 +1,28 @@
+exit_code=0
+command: unshare --user --map-root-user --net --mount --fork ./netns.sh $S policy   (binary built from 5d7c5bd)
+
+nat ok on n1out
+nat ok on n2out
+== routes (policy)
+default via 192.0.2.1 dev wan1 metric 100 
+192.0.2.0/24 dev wan1 proto kernel scope link src 192.0.2.2 
+198.51.100.0/24 dev wan2 proto kernel scope link src 198.51.100.2 
+32765:	from 198.51.100.2 lookup 200
+== phase1 done
+== netem on wan1 path at 02:57:59
+== netem moved to wan2 path at 02:58:24
+== done
+
+--- STUN server bindings by source
+     53 203.0.113.100:16386
+     28 203.0.113.11:16386
+     14 203.0.113.12:16386
+--- edge B (multi-WAN) STUN mappings
+     14 STUN mapped: source=default server=203.0.113.100:3478 mapped=203.0.113.11:16386
+     14 STUN mapped: source=wan1/192.0.2.2#2 server=203.0.113.100:3478 mapped=203.0.113.11:16386
+     14 STUN mapped: source=wan2/198.51.100.2#3 server=203.0.113.100:3478 mapped=203.0.113.12:16386
+--- endpoint selection switches (EgNet1 = edge A in inet, EgNet2 = edge B multi-WAN)
+02:58:02 EgNet1 peer=2 path=default->203.0.113.12:16386 rtt_ms=1.732 previous=default|203.0.113.11:40977
+02:58:02 EgNet2 peer=1 path=wan2/198.51.100.2#3->203.0.113.100:16386 rtt_ms=41.060 previous=192.0.2.2#2|203.0.113.100:16386
+02:58:29 EgNet1 peer=2 path=default->203.0.113.11:40977 rtt_ms=61.601 previous=default|203.0.113.12:16386
+02:58:29 EgNet2 peer=1 path=default->203.0.113.100:16386 rtt_ms=61.838 previous=198.51.100.2#3|203.0.113.100:16386

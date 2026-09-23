@@ -1,0 +1,46 @@
+// Minimal STUN binding responder: replies with XOR-MAPPED-ADDRESS and FINGERPRINT.
+package main
+
+import (
+	"encoding/binary"
+	"hash/crc32"
+	"log"
+	"net"
+	"os"
+)
+
+func main() {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP(os.Args[1]), Port: 3478})
+	if err != nil {
+		log.Fatal(err)
+	}
+	buf := make([]byte, 1500)
+	for {
+		n, from, err := conn.ReadFromUDP(buf)
+		if err != nil || n < 20 || binary.BigEndian.Uint16(buf[0:2]) != 0x0001 {
+			continue
+		}
+		ip := from.IP.To4()
+		resp := make([]byte, 20, 64)
+		binary.BigEndian.PutUint16(resp[0:2], 0x0101)
+		copy(resp[4:20], buf[4:20]) // magic cookie + transaction id
+		attr := make([]byte, 12)
+		binary.BigEndian.PutUint16(attr[0:2], 0x0020)
+		binary.BigEndian.PutUint16(attr[2:4], 8)
+		attr[5] = 0x01
+		binary.BigEndian.PutUint16(attr[6:8], uint16(from.Port)^0x2112)
+		for i := 0; i < 4; i++ {
+			attr[8+i] = ip[i] ^ buf[4+i]
+		}
+		resp = append(resp, attr...)
+		binary.BigEndian.PutUint16(resp[2:4], uint16(len(resp)-20+8))
+		crc := crc32.ChecksumIEEE(resp) ^ 0x5354554e
+		fp := make([]byte, 8)
+		binary.BigEndian.PutUint16(fp[0:2], 0x8028)
+		binary.BigEndian.PutUint16(fp[2:4], 4)
+		binary.BigEndian.PutUint32(fp[4:8], crc)
+		resp = append(resp, fp...)
+		conn.WriteToUDP(resp, from)
+		log.Printf("binding from %v", from)
+	}
+}
