@@ -52,6 +52,7 @@ func hydrateV2DirectConnectivity(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.E
 	econfig.DynamicRoute.EndpointSwitchMarginMS = resolved.EndpointSwitchMarginMS
 	econfig.DynamicRoute.EndpointSwitchMarginPercent = resolved.EndpointSwitchMarginPercent
 	econfig.DynamicRoute.EndpointSwitchRounds = resolved.EndpointSwitchRounds
+	econfig.DynamicRoute.EndpointSwitchPersistRounds = resolved.EndpointSwitchPersistRounds
 }
 
 func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfigV2) {
@@ -70,7 +71,7 @@ func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfi
 // device consumes directly.
 func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
 	route := econfig.DynamicRoute
-	if err := mtypes.ValidateEndpointSelection(route.EndpointProbeInterval, route.EndpointSwitchMarginMS, route.EndpointSwitchMarginPercent, route.EndpointSwitchRounds); err != nil {
+	if err := mtypes.ValidateEndpointSelection(route.EndpointProbeInterval, route.EndpointSwitchMarginMS, route.EndpointSwitchMarginPercent, route.EndpointSwitchRounds, route.EndpointSwitchPersistRounds); err != nil {
 		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
 	}
 	if len(route.EndpointBlacklist) > 0 {

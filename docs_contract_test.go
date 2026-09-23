@@ -506,6 +506,7 @@ func TestDocsDirectConnectivity(t *testing.T) {
 			"EndpointSwitchMarginMS | 5",
 			"EndpointSwitchMarginPercent | 15",
 			"EndpointSwitchRounds | 3",
+			"EndpointSwitchPersistRounds | 10",
 			"256",
 			"16",
 			"14",

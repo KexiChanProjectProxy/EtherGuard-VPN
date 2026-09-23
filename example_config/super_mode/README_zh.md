@@ -161,7 +161,7 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 #### 最低延遲endpoint選擇
 
-peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地上行鏈路, 遠端候選位址）組合每輪發送一個加密探測，當某條路徑連續數輪明顯更快時，peer就會切換到該路徑。雙方各自只評估自己的出站路徑，兩個方向可以使用不同的上行鏈路。探測同時維持備用上行鏈路的NAT mapping，因此探測間隔應低於NAT的UDP超時（約25秒以內較安全）。只有單一路徑的peer不會產生額外開銷。探測結果不會影響路由延遲。
+peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地上行鏈路, 遠端候選位址）組合每輪發送一個加密探測，peer會以兩種方式切換到更快的路徑：以明顯差距勝出的路徑，連續數輪後即切換；每一輪都更快的路徑，即使只快一點，在較長的連續輪數後也會切換，不受門檻限制。後者比較的是每輪各自的樣本，因此兩條同樣快的路徑不會來回切換。雙方各自只評估自己的出站路徑，兩個方向可以使用不同的上行鏈路。探測同時維持備用上行鏈路的NAT mapping，因此探測間隔應低於NAT的UDP超時（約25秒以內較安全）。只有單一路徑的peer不會產生額外開銷。探測結果不會影響路由延遲。
 
 除了發布的候選位址，Edge也會探測peer-reflexive位址：來自該peer、經過驗證但未被漫遊保護採用的封包來源位址。在endpoint-dependent mapping的NAT之後，peer看到的port與STUN回報的port不同，因此這些位址是抵達該上行鏈路的唯一途徑。每個peer最多保留四個，並在Edge本地peer存活超時後過期。
 
@@ -171,7 +171,8 @@ peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地
 | EndpointProbeIntervalSeconds | ping間隔 | 探測輪次之間的秒數 |
 | EndpointSwitchMarginMS | 5 | 切換前RTT至少需改善的毫秒數 |
 | EndpointSwitchMarginPercent | 15 | 切換前RTT至少需改善的百分比（相對目前RTT），取兩者中較大的門檻 |
-| EndpointSwitchRounds | 3 | 較快路徑需連續勝出的輪數 |
+| EndpointSwitchRounds | 3 | 較快路徑需以門檻差距連續勝出的輪數 |
+| EndpointSwitchPersistRounds | 10 | 路徑每個樣本都更快時，不受門檻限制而切換所需的連續輪數 |
 
 每個Edge在每次report最多可回報256個觀察目標endpoint。Super只發布匿名聚合的回退位址：每個目標最多16個hint，其中IPv4與IPv6各最多14個。snapshot絕不包含reporter身分或時間戳記。投票依Super端的`PeerAliveTimeoutSeconds`到期。
 

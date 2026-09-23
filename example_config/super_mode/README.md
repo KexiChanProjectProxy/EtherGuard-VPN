@@ -161,7 +161,7 @@ These settings apply only to Super-discovered peers; static peer policy is uncha
 
 #### Lowest-latency endpoint selection
 
-Once a peer is alive, the Edge keeps measuring every path to it: each (local uplink, remote candidate) pair gets one encrypted probe per round, and the peer moves to the fastest pair when it is clearly better for several rounds in a row. Each side only ranks its own outbound paths; the two directions may use different uplinks. Probes also keep the NAT mappings of alternate uplinks alive, so keep the probe interval below your NAT's UDP timeout (about 25 seconds is safe). Peers with a single path cost nothing. Probe results never feed route latency.
+Once a peer is alive, the Edge keeps measuring every path to it: each (local uplink, remote candidate) pair gets one encrypted probe per round, and the peer moves to a faster pair in either of two ways. A pair that is faster by a clear margin wins after a few rounds in a row. A pair that is faster in every single round, however slightly, wins after a longer run with no margin; comparing each round's own samples keeps two equally fast paths from flapping. Each side only ranks its own outbound paths; the two directions may use different uplinks. Probes also keep the NAT mappings of alternate uplinks alive, so keep the probe interval below your NAT's UDP timeout (about 25 seconds is safe). Peers with a single path cost nothing. Probe results never feed route latency.
 
 Besides published candidates, the Edge also probes peer-reflexive addresses: sources of authenticated packets from the peer that the roaming guard did not adopt. Behind a NAT with endpoint-dependent mapping, the port a peer sees differs from the STUN-reported port, so these addresses are the only way to reach that uplink. At most four are kept per peer, and they expire after the Edge-local peer alive timeout.
 
@@ -171,7 +171,8 @@ Besides published candidates, the Edge also probes peer-reflexive addresses: sou
 | EndpointProbeIntervalSeconds | ping interval | Seconds between probe rounds |
 | EndpointSwitchMarginMS | 5 | Minimum RTT gain in milliseconds before switching |
 | EndpointSwitchMarginPercent | 15 | Minimum RTT gain as a percentage of the current RTT; the larger margin applies |
-| EndpointSwitchRounds | 3 | Consecutive rounds the faster path must win before switching |
+| EndpointSwitchRounds | 3 | Consecutive rounds the faster path must win by the margin before switching |
+| EndpointSwitchPersistRounds | 10 | Consecutive rounds a path must be faster in every sample to switch regardless of the margin |
 
 An Edge may report at most 256 observed target endpoints per report. The Super publishes anonymous aggregate fallbacks only: at most 16 hints per target, including at most 14 IPv4 and 14 IPv6 hints. Reporter identities and timestamps are never included. Votes expire using the Super-side `PeerAliveTimeoutSeconds`.
 

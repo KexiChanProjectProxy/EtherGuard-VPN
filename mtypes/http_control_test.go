@@ -336,6 +336,7 @@ func TestEdgeConfigV2DirectConnectivityDefaults(t *testing.T) {
 	want := ControlV2DirectConnectivity{
 		PersistentKeepaliveSeconds: 25, PingIntervalSeconds: 16, PeerAliveTimeoutSeconds: 70, OfflineCheckSeconds: 10, NextEndpointTrySeconds: 5,
 		EndpointProbeIntervalSeconds: 16, EndpointSwitchMarginMS: 5, EndpointSwitchMarginPercent: 15, EndpointSwitchRounds: 3,
+		EndpointSwitchPersistRounds: 10,
 	}
 	if resolved != want {
 		t.Fatalf("resolved defaults = %+v, want %+v", resolved, want)
@@ -360,6 +361,8 @@ func TestEdgeConfigV2DirectConnectivityValidation(t *testing.T) {
 		{"switch margin percent over 100", ControlV2DirectConnectivity{EndpointSwitchMarginPercent: 101}, false},
 		{"negative switch rounds", ControlV2DirectConnectivity{EndpointSwitchRounds: -1}, false},
 		{"absurd switch rounds", ControlV2DirectConnectivity{EndpointSwitchRounds: 101}, false},
+		{"negative persist rounds", ControlV2DirectConnectivity{EndpointSwitchPersistRounds: -1}, false},
+		{"absurd persist rounds", ControlV2DirectConnectivity{EndpointSwitchPersistRounds: 101}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2,6 +2,7 @@ package device
 
 import (
 	"math"
+	"math/rand"
 	"net"
 	"net/netip"
 	"strconv"
@@ -15,11 +16,12 @@ import (
 )
 
 var testSelection = endpointSelectionSettings{
-	enabled:    true,
-	interval:   time.Second,
-	minMargin:  5 * time.Millisecond,
-	marginFrac: 0.15,
-	rounds:     3,
+	enabled:       true,
+	interval:      time.Second,
+	minMargin:     5 * time.Millisecond,
+	marginFrac:    0.15,
+	rounds:        3,
+	persistRounds: 10,
 }
 
 func TestSelectEndpointPair(t *testing.T) {
@@ -362,6 +364,8 @@ func TestProbeRoundsSwitchToLowestLatencyPairAndPinIt(t *testing.T) {
 	}
 }
 
+// A 2 ms gain is inside the margin, so only the persistence rule can act on
+// it, and not within the first persistRounds rounds.
 func TestProbeRoundsKeepCurrentPathWhenNothingIsClearlyFaster(t *testing.T) {
 	bind := newPinningSTUNFake(3001)
 	device, peer := newProberTestDevice(t, bind)
@@ -960,4 +964,138 @@ func TestAdvertisedEndpointMaxAgeCoversTwoBroadcastRounds(t *testing.T) {
 	if got := device.advertisedEndpointMaxAge(); got != 70*time.Second {
 		t.Fatalf("max age = %v, want 70s", got)
 	}
+}
+
+// --- persistence rule ---
+
+// proberRound feeds one round of raw samples (seconds; missing keys get no
+// reply) and runs the decision for current pair "a".
+func proberRound(p *endpointProber, samples map[string]float64, settings endpointSelectionSettings) *probePair {
+	base := time.Now()
+	for key, rtt := range samples {
+		id := p.register(key, base)
+		p.onPong(id, base.Add(time.Duration(rtt*float64(time.Second))))
+	}
+	return p.decide("a", settings)
+}
+
+func persistSettings() endpointSelectionSettings {
+	settings := testSelection
+	settings.persistRounds = 10
+	return settings
+}
+
+func TestPersistentlyFasterPathWinsWithoutMargin(t *testing.T) {
+	// Given b is 2 ms faster than a every round: below the 5 ms margin
+	var prober endpointProber
+	prober.rebuild([]*probePair{{key: "a", rtt: math.Inf(1)}, {key: "b", rtt: math.Inf(1)}})
+	settings := persistSettings()
+
+	// When / Then: no switch until b has won persistRounds rounds in a row.
+	// The first endpointProbeMinSamples-1 rounds only build samples.
+	switchedAt := -1
+	for round := 1; round <= 30 && switchedAt < 0; round++ {
+		if target := proberRound(&prober, map[string]float64{"a": 0.040, "b": 0.038}, settings); target != nil {
+			if target.key != "b" {
+				t.Fatalf("switched to %s", target.key)
+			}
+			switchedAt = round
+		}
+	}
+	want := endpointProbeMinSamples - 1 + settings.persistRounds
+	if switchedAt != want {
+		t.Fatalf("switched at round %d, want %d", switchedAt, want)
+	}
+}
+
+func TestPersistenceStreakResetsWhenCandidateLosesARound(t *testing.T) {
+	var prober endpointProber
+	prober.rebuild([]*probePair{{key: "a", rtt: 0.040, samples: 5, last: 0.040}, {key: "b", rtt: 0.038, samples: 5, last: 0.038}})
+	settings := persistSettings()
+	for round := 1; round < settings.persistRounds; round++ {
+		if proberRound(&prober, map[string]float64{"a": 0.040, "b": 0.038}, settings) != nil {
+			t.Fatalf("switched after %d rounds", round)
+		}
+	}
+	// One round where a's sample is faster breaks the run
+	if proberRound(&prober, map[string]float64{"a": 0.036, "b": 0.038}, settings) != nil {
+		t.Fatal("switched on a losing round")
+	}
+	for round := 1; round < settings.persistRounds; round++ {
+		if proberRound(&prober, map[string]float64{"a": 0.040, "b": 0.038}, settings) != nil {
+			t.Fatalf("streak was not reset; switched %d rounds later", round)
+		}
+	}
+	if target := proberRound(&prober, map[string]float64{"a": 0.040, "b": 0.038}, settings); target == nil || target.key != "b" {
+		t.Fatalf("target = %+v, want b after a fresh full run", target)
+	}
+}
+
+func TestPersistenceNeedsFreshSamplesFromBothPaths(t *testing.T) {
+	var prober endpointProber
+	prober.rebuild([]*probePair{{key: "a", rtt: 0.040, samples: 5}, {key: "b", rtt: 0.038, samples: 5}})
+	settings := persistSettings()
+	for round := 1; round < settings.persistRounds; round++ {
+		proberRound(&prober, map[string]float64{"a": 0.040, "b": 0.038}, settings)
+	}
+	// A round where the current path's probe went unanswered is not a win
+	if proberRound(&prober, map[string]float64{"b": 0.038}, settings) != nil {
+		t.Fatal("switched on a round without a fresh sample from the current path")
+	}
+	if prober.persistStreak != 0 {
+		t.Fatalf("persist streak = %d after a round without comparison", prober.persistStreak)
+	}
+}
+
+func TestEquallyFastNoisyPathsDoNotFlap(t *testing.T) {
+	// Given two paths with the same mean latency and independent jitter
+	var prober endpointProber
+	prober.rebuild([]*probePair{{key: "a", rtt: math.Inf(1)}, {key: "b", rtt: math.Inf(1)}})
+	settings := persistSettings()
+	rng := rand.New(rand.NewSource(1))
+	jitter := func() float64 { return 0.030 + (rng.Float64()-0.5)*0.004 }
+
+	// When many rounds run
+	for round := 1; round <= 2000; round++ {
+		if target := proberRound(&prober, map[string]float64{"a": jitter(), "b": jitter()}, settings); target != nil {
+			t.Fatalf("switched between equal paths at round %d", round)
+		}
+	}
+}
+
+func TestEndpointSelectionSettingsPersistRoundsDefault(t *testing.T) {
+	device := &Device{EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{SendPingInterval: 16}}}
+	if got := device.endpointSelectionSettings().persistRounds; got != 10 {
+		t.Fatalf("default persistRounds = %d, want 10", got)
+	}
+	device.EdgeConfig.DynamicRoute.EndpointSwitchPersistRounds = 25
+	if got := device.endpointSelectionSettings().persistRounds; got != 25 {
+		t.Fatalf("explicit persistRounds = %d, want 25", got)
+	}
+}
+
+func TestProbeRoundsEventuallyFollowAConsistentlySlightlyFasterPath(t *testing.T) {
+	// Given .21 is 2 ms faster than the current .20 in every round
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
+	setTrylist(peer, "203.0.113.20:3001", "203.0.113.21:3001")
+	rtt := func(endpoint conn.Endpoint) time.Duration {
+		if endpoint.DstToString() == "203.0.113.21:3001" {
+			return 48 * time.Millisecond
+		}
+		return 50 * time.Millisecond
+	}
+
+	// When rounds keep running
+	for round := 0; round < 3*testSelection.persistRounds; round++ {
+		device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+		answerProbes(peer, drainProbes(device), rtt)
+		if peer.endpoint.DstToString() == "203.0.113.21:3001" {
+			return
+		}
+	}
+
+	// Then the persistence rule switches despite the margin
+	t.Fatalf("endpoint = %s, want the persistently faster 203.0.113.21:3001", peer.endpoint.DstToString())
 }

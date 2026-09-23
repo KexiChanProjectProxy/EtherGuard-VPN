@@ -51,7 +51,7 @@ you can turn off unnecessary logs to increase performance after it works.
 
 ## Lowest-latency endpoint selection
 
-When a peer is alive and has more than one path (several known endpoints, or several local uplinks on Linux), the edge sends one encrypted probe per path each round and moves the peer to the fastest path once it wins by a clear margin for several rounds in a row. Probes keep alternate NAT mappings alive and never feed route latency. Tune it under `DynamicRoute`:
+When a peer is alive and has more than one path (several known endpoints, or several local uplinks on Linux), the edge sends one encrypted probe per path each round and moves the peer to a faster path once it wins by a clear margin for several rounds in a row, or once it is faster in every round, however slightly, for a longer run. Probes keep alternate NAT mappings alive and never feed route latency. Tune it under `DynamicRoute`:
 
 ```yaml
 DynamicRoute:
@@ -59,7 +59,8 @@ DynamicRoute:
   EndpointProbeInterval: 0          # seconds between rounds; 0 = SendPingInterval
   EndpointSwitchMarginMS: 0         # 0 = 5 ms
   EndpointSwitchMarginPercent: 0    # 0 = 15 %; the larger margin applies
-  EndpointSwitchRounds: 0           # 0 = 3 consecutive rounds
+  EndpointSwitchRounds: 0           # 0 = 3 consecutive rounds winning by the margin
+  EndpointSwitchPersistRounds: 0    # 0 = 10 consecutive rounds faster in every sample, no margin
 ```
 
 Edges also share what they observe. Besides the endpoint an edge uses for each live peer, it advertises that peer's peer-reflexive addresses: sources of the peer's authenticated packets that it did not adopt, for example a multi-WAN peer's other uplinks. When an edge's own session to that peer is down, advertised addresses become retry candidates. While the session is up they are probe-only candidates for lowest-latency selection (at most six per peer, kept for at least two broadcast rounds), so a faster path learned from another edge is measured without disturbing the working one.

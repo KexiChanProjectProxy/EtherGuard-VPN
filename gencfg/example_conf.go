@@ -230,6 +230,7 @@ func GetExampleEdgeConfV2(templatePath string) (mtypes.EdgeConfigV2, error) {
 			EndpointSwitchMarginMS:      5,
 			EndpointSwitchMarginPercent: 15,
 			EndpointSwitchRounds:        3,
+			EndpointSwitchPersistRounds: 10,
 		},
 		Peers: []mtypes.PeerInfo{},
 	}, nil

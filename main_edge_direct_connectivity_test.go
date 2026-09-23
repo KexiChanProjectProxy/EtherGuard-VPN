@@ -38,7 +38,7 @@ func TestEdgeDirectConnectivityOmittedHydratesDefaults(t *testing.T) {
 		t.Fatalf("next endpoint try interval = %v, want %v", got, want)
 	}
 	route := legacy.DynamicRoute
-	if route.DisableEndpointSelection || route.EndpointProbeInterval != 16 || route.EndpointSwitchMarginMS != 5 || route.EndpointSwitchMarginPercent != 15 || route.EndpointSwitchRounds != 3 {
+	if route.DisableEndpointSelection || route.EndpointProbeInterval != 16 || route.EndpointSwitchMarginMS != 5 || route.EndpointSwitchMarginPercent != 15 || route.EndpointSwitchRounds != 3 || route.EndpointSwitchPersistRounds != 10 {
 		t.Fatalf("endpoint selection defaults = %+v", route)
 	}
 	if got, want := legacy.Peers[0].PersistentKeepalive, uint32(0); got != want {
@@ -83,12 +83,13 @@ func TestEdgeEndpointSelectionExplicitValuesHydrateBeforeDeviceStartup(t *testin
 		EndpointSwitchMarginMS:       12,
 		EndpointSwitchMarginPercent:  25,
 		EndpointSwitchRounds:         4,
+		EndpointSwitchPersistRounds:  20,
 	}}
 
 	hydrateV2DirectConnectivity(&legacy, &v2)
 
 	route := legacy.DynamicRoute
-	if !route.DisableEndpointSelection || route.EndpointProbeInterval != 7 || route.EndpointSwitchMarginMS != 12 || route.EndpointSwitchMarginPercent != 25 || route.EndpointSwitchRounds != 4 {
+	if !route.DisableEndpointSelection || route.EndpointProbeInterval != 7 || route.EndpointSwitchMarginMS != 12 || route.EndpointSwitchMarginPercent != 25 || route.EndpointSwitchRounds != 4 || route.EndpointSwitchPersistRounds != 20 {
 		t.Fatalf("hydrated endpoint selection = %+v", route)
 	}
 }
@@ -120,6 +121,7 @@ func TestExampleEdgeConfigV2EmitsDirectConnectivity(t *testing.T) {
 		EndpointSwitchMarginMS:      5,
 		EndpointSwitchMarginPercent: 15,
 		EndpointSwitchRounds:        3,
+		EndpointSwitchPersistRounds: 10,
 	}); got != want {
 		t.Fatalf("generated DirectConnectivity = %#v, want %#v", got, want)
 	}

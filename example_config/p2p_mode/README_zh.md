@@ -130,7 +130,7 @@ b1message
 
 ## 最低延遲endpoint選擇
 
-當peer存活且有多條路徑（多個已知endpoint，或在Linux上有多個本地上行鏈路）時，edge每輪對每條路徑發送一個加密探測，當某條路徑連續數輪以明顯差距勝出時，就把peer切換過去。探測會維持備用NAT mapping，且不會影響路由延遲。可在`DynamicRoute`下調整：
+當peer存活且有多條路徑（多個已知endpoint，或在Linux上有多個本地上行鏈路）時，edge每輪對每條路徑發送一個加密探測，當某條路徑連續數輪以明顯差距勝出，或在較長的連續輪數內每一輪都更快（即使只快一點）時，就把peer切換過去。探測會維持備用NAT mapping，且不會影響路由延遲。可在`DynamicRoute`下調整：
 
 ```yaml
 DynamicRoute:
@@ -138,7 +138,8 @@ DynamicRoute:
   EndpointProbeInterval: 0          # 探測輪次間隔秒數；0 = SendPingInterval
   EndpointSwitchMarginMS: 0         # 0 = 5 ms
   EndpointSwitchMarginPercent: 0    # 0 = 15 %；取兩者中較大的門檻
-  EndpointSwitchRounds: 0           # 0 = 連續3輪
+  EndpointSwitchRounds: 0           # 0 = 以門檻差距連續勝出3輪
+  EndpointSwitchPersistRounds: 0    # 0 = 每個樣本都更快連續10輪，不受門檻限制
 ```
 
 各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge與該peer的連線中斷時，廣播來的位址會成為重試候選；連線正常時，它們只作為最低延遲選擇的探測候選（每個peer最多六個，至少保留兩個廣播週期），讓從其他edge得知的更快路徑能被量測，而不干擾目前正在使用的連線。

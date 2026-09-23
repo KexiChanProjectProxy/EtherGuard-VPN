@@ -45,6 +45,9 @@ type endpointSelectionSettings struct {
 	minMargin  time.Duration
 	marginFrac float64
 	rounds     int
+	// persistRounds is how many consecutive rounds a path must beat the
+	// current one, sample for sample, to be chosen without any margin.
+	persistRounds int
 }
 
 func (device *Device) endpointSelectionSettings() endpointSelectionSettings {
@@ -55,6 +58,8 @@ func (device *Device) endpointSelectionSettings() endpointSelectionSettings {
 		minMargin:  time.Duration(route.EndpointSwitchMarginMS * float64(time.Millisecond)),
 		marginFrac: route.EndpointSwitchMarginPercent / 100,
 		rounds:     route.EndpointSwitchRounds,
+
+		persistRounds: route.EndpointSwitchPersistRounds,
 	}
 	if settings.interval <= 0 {
 		settings.interval = mtypes.S2TD(route.SendPingInterval)
@@ -67,6 +72,9 @@ func (device *Device) endpointSelectionSettings() endpointSelectionSettings {
 	}
 	if settings.rounds <= 0 {
 		settings.rounds = mtypes.DefaultEndpointSwitchRounds
+	}
+	if settings.persistRounds <= 0 {
+		settings.persistRounds = mtypes.DefaultEndpointSwitchPersistRounds
 	}
 	if settings.interval <= 0 {
 		settings.enabled = false
@@ -81,6 +89,10 @@ type probePair struct {
 	rtt     float64     // seconds; +Inf until measured or after repeated misses
 	samples int
 	misses  int
+	// last is the latest raw RTT sample; fresh reports it arrived since the
+	// previous decision round.
+	last  float64
+	fresh bool
 }
 
 type pendingProbe struct {
@@ -99,6 +111,10 @@ type endpointProber struct {
 	nextID     uint32
 	bestKey    string
 	bestStreak int
+	// persistKey/persistStreak track a path that beat the current one in
+	// every recent round, however small the gain.
+	persistKey    string
+	persistStreak int
 	// silentRounds counts consecutive rounds in which no probe was answered.
 	silentRounds int
 	answered     bool
@@ -206,6 +222,7 @@ func (p *endpointProber) rebuild(pairs []*probePair) {
 	for _, pair := range pairs {
 		if previous, ok := old[pair.key]; ok {
 			pair.rtt, pair.samples, pair.misses = previous.rtt, previous.samples, previous.misses
+			pair.last, pair.fresh = previous.last, previous.fresh
 		}
 	}
 	p.pairs = pairs
@@ -231,6 +248,8 @@ func (p *endpointProber) resetLocked() {
 	p.pinnedSent = nil
 	p.bestKey = ""
 	p.bestStreak = 0
+	p.persistKey = ""
+	p.persistStreak = 0
 }
 
 // expire counts probes older than maxAge as misses.
@@ -321,6 +340,8 @@ func (p *endpointProber) onPong(id uint32, now time.Time) {
 		}
 		pair.samples++
 		pair.misses = 0
+		pair.last = rtt
+		pair.fresh = true
 	}
 }
 
@@ -358,10 +379,48 @@ func selectEndpointPair(pairs []pairStats, currentKey string, minMargin time.Dur
 	return pairs[best].key, current-pairs[best].rtt > margin
 }
 
-// decide advances the hysteresis streak and returns the pair to switch to.
+// decide runs one decision round and returns the pair to switch to, if any.
+//
+// Two rules can switch:
+//   - Margin rule: the fastest pair beats the current one by more than
+//     max(minMargin, marginFrac*current) for settings.rounds rounds in a row
+//     (one round when the current pair is failing).
+//   - Persistence rule: the fastest other pair beat the current one in every
+//     one of the last settings.persistRounds rounds, comparing that round's
+//     fresh raw samples, with a lower smoothed RTT as well. No margin applies.
+//     Raw per-round samples make this a sign test: for two equally fast paths
+//     each round is a coin flip, so a long unbroken run is very unlikely and
+//     the paths do not flap.
 func (p *endpointProber) decide(currentKey string, settings endpointSelectionSettings) *probePair {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	defer func() {
+		for _, pair := range p.pairs {
+			pair.fresh = false
+		}
+	}()
+	if target := p.decideMarginLocked(currentKey, settings); target != nil {
+		p.persistKey, p.persistStreak = "", 0
+		return target
+	}
+	if target := p.decidePersistentLocked(currentKey, settings); target != nil {
+		p.bestKey, p.bestStreak = "", 0
+		return target
+	}
+	return nil
+}
+
+func (p *endpointProber) pairLocked(key string) *probePair {
+	for _, pair := range p.pairs {
+		if pair.key == key {
+			copied := *pair
+			return &copied
+		}
+	}
+	return nil
+}
+
+func (p *endpointProber) decideMarginLocked(currentKey string, settings endpointSelectionSettings) *probePair {
 	stats := make([]pairStats, 0, len(p.pairs))
 	rounds := settings.rounds
 	for _, pair := range p.pairs {
@@ -386,13 +445,42 @@ func (p *endpointProber) decide(currentKey string, settings endpointSelectionSet
 		return nil
 	}
 	p.bestKey, p.bestStreak = "", 0
+	return p.pairLocked(key)
+}
+
+func (p *endpointProber) decidePersistentLocked(currentKey string, settings endpointSelectionSettings) *probePair {
+	var current, best *probePair
 	for _, pair := range p.pairs {
-		if pair.key == key {
-			copied := *pair
-			return &copied
+		if pair.key == currentKey {
+			current = pair
+			continue
+		}
+		if pair.samples < endpointProbeMinSamples || math.IsInf(pair.rtt, 1) || math.IsNaN(pair.rtt) {
+			continue
+		}
+		if best == nil || pair.rtt < best.rtt || (pair.rtt == best.rtt && pair.key < best.key) {
+			best = pair
 		}
 	}
-	return nil
+	if settings.persistRounds <= 0 {
+		return nil
+	}
+	won := current != nil && best != nil && current.fresh && best.fresh &&
+		best.last < current.last && best.rtt < current.rtt
+	if !won {
+		p.persistKey, p.persistStreak = "", 0
+		return nil
+	}
+	if best.key == p.persistKey {
+		p.persistStreak++
+	} else {
+		p.persistKey, p.persistStreak = best.key, 1
+	}
+	if p.persistStreak < settings.persistRounds {
+		return nil
+	}
+	p.persistKey, p.persistStreak = "", 0
+	return p.pairLocked(best.key)
 }
 
 // checkDroppedPins discards measurements of pairs whose last pinned probe lost
