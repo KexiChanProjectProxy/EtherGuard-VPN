@@ -501,10 +501,13 @@ func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []s
 	if currentEndpoint != nil {
 		current = currentEndpoint.DstToString()
 	}
-	// Reflexive addresses are proven to carry the peer's traffic, so they
-	// rank ahead of published candidates under the remote cap.
+	// Order under the remote cap: addresses this node saw the peer's packets
+	// come from, then addresses other edges advertised, then published
+	// candidates.
 	trylist, _ := peer.endpoint_trylist.candidates()
-	candidates := append(peer.reflexive.candidates(now, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout)), trylist...)
+	candidates := peer.reflexive.candidates(now, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout))
+	candidates = append(candidates, peer.advertised.candidates(now, device.advertisedEndpointMaxAge())...)
+	candidates = append(candidates, trylist...)
 	allow := func(addrPort netip.AddrPort) bool {
 		if addrPort.Addr().Is4() && !device.enabledAf.IPv4 {
 			return false
@@ -608,6 +611,9 @@ func (device *Device) RoutineProbeEndpoints() {
 const (
 	maxReflexiveEndpoints  = 4
 	reflexiveCandidateCost = 30000
+	// maxAdvertisedEndpoints bounds addresses other P2P edges advertised for a
+	// live peer; they are probe-only candidates.
+	maxAdvertisedEndpoints = 6
 )
 
 // reflexiveEndpoints is a small, recency-bounded set of peer-reflexive
@@ -615,6 +621,8 @@ const (
 type reflexiveEndpoints struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
+	// limit caps the set; zero means maxReflexiveEndpoints.
+	limit int
 }
 
 func (r *reflexiveEndpoints) note(address string, now time.Time) {
@@ -628,7 +636,11 @@ func (r *reflexiveEndpoints) note(address string, now time.Time) {
 	if r.seen == nil {
 		r.seen = make(map[string]time.Time)
 	}
-	if _, ok := r.seen[address]; !ok && len(r.seen) >= maxReflexiveEndpoints {
+	limit := r.limit
+	if limit <= 0 {
+		limit = maxReflexiveEndpoints
+	}
+	if _, ok := r.seen[address]; !ok && len(r.seen) >= limit {
 		oldest := ""
 		for candidate, seenAt := range r.seen {
 			if oldest == "" || seenAt.Before(r.seen[oldest]) {
@@ -668,4 +680,15 @@ func (r *reflexiveEndpoints) candidates(now time.Time, maxAge time.Duration) []t
 		out = append(out, trylistCandidate{address: e.address, cost: reflexiveCandidateCost})
 	}
 	return out
+}
+
+// advertisedEndpointMaxAge keeps advertised addresses across at least two
+// broadcast rounds, and never shorter than the peer alive timeout.
+func (device *Device) advertisedEndpointMaxAge() time.Duration {
+	route := device.EdgeConfig.DynamicRoute
+	maxAge := mtypes.S2TD(route.PeerAliveTimeout)
+	if twoRounds := 2 * mtypes.S2TD(route.P2P.SendPeerInterval); twoRounds > maxAge {
+		maxAge = twoRounds
+	}
+	return maxAge
 }

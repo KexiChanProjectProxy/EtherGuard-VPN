@@ -855,3 +855,109 @@ func TestAdvertisedReflexiveAddressReachesReceiverTrylist(t *testing.T) {
 	}
 	t.Fatalf("receiver candidates = %+v, want 203.0.113.12:50000", candidates)
 }
+
+// --- advertised addresses for live peers ---
+
+func newBroadcastReceiver(t *testing.T) (*Device, *Peer, NoisePublicKey) {
+	t.Helper()
+	bind := newPinningSTUNFake(3002)
+	device, peer := newProberTestDevice(t, bind)
+	device.EdgeConfig.DynamicRoute.P2P.UseP2P = true
+	device.ID = 5
+	_, pub := RandomKeyPair()
+	device.peers.keyMap = map[NoisePublicKey]*Peer{pub: peer}
+	device.event_tryendpoint = make(chan struct{}, 8)
+	peer.advertised.limit = maxAdvertisedEndpoints
+	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.11:3001")
+	return device, peer, pub
+}
+
+func TestBroadcastForLivePeerBecomesProbeOnlyCandidate(t *testing.T) {
+	// Given a live peer
+	device, peer, pub := newBroadcastReceiver(t)
+
+	// When another edge advertises a different address for it
+	err := device.process_BoardcastPeerMsg(peer, mtypes.BoardcastPeerMsg{NodeID: peer.ID, PubKey: pub, ConnURL: "203.0.113.12:50000"})
+	if err != nil {
+		t.Fatalf("process_BoardcastPeerMsg: %v", err)
+	}
+
+	// Then it is recorded for probing, the retry list and retry loop are untouched
+	if got := peer.advertised.candidates(time.Now(), time.Minute); len(got) != 1 || got[0].address != "203.0.113.12:50000" {
+		t.Fatalf("advertised = %+v", got)
+	}
+	if trylist, _ := peer.endpoint_trylist.candidates(); len(trylist) != 0 {
+		t.Fatalf("live-peer broadcast reached the retry list: %+v", trylist)
+	}
+	if len(device.event_tryendpoint) != 0 {
+		t.Fatal("live-peer broadcast signalled the retry loop")
+	}
+
+	// And the next probe round measures it
+	device.probePeerEndpoints(peer, device.net.bind, nil, true, testSelection, time.Now())
+	for _, probe := range drainProbes(device) {
+		if probe.endpoint.DstToString() == "203.0.113.12:50000" {
+			return
+		}
+	}
+	t.Fatal("advertised address was not probed")
+}
+
+func TestBroadcastForStaticPeerIsIgnored(t *testing.T) {
+	device, peer, pub := newBroadcastReceiver(t)
+	peer.StaticConn = true
+	if err := device.process_BoardcastPeerMsg(peer, mtypes.BoardcastPeerMsg{NodeID: peer.ID, PubKey: pub, ConnURL: "203.0.113.12:50000"}); err != nil {
+		t.Fatalf("process_BoardcastPeerMsg: %v", err)
+	}
+	if got := peer.advertised.candidates(time.Now(), time.Minute); len(got) != 0 {
+		t.Fatalf("static peer recorded advertised addresses: %+v", got)
+	}
+}
+
+func TestProbeOrderRanksOwnObservationsBeforeAdvertisedBeforePublished(t *testing.T) {
+	// Given candidates of every kind, more than the remote cap
+	device, peer, _ := newBroadcastReceiver(t)
+	setTrylist(peer, "10.0.0.1:3001", "10.0.0.2:3001", "10.0.0.3:3001")
+	now := time.Now()
+	peer.reflexive.note("198.51.100.7:4000", now)
+	for i := 1; i <= 4; i++ {
+		peer.advertised.note(net.JoinHostPort("192.0.2.1", strconv.Itoa(5000+i)), now.Add(time.Duration(i)*time.Millisecond))
+	}
+
+	// When
+	device.probePeerEndpoints(peer, device.net.bind, nil, true, testSelection, now)
+
+	// Then current, reflexive and the newest advertised addresses fill the cap;
+	// published candidates are left out
+	var got []string
+	for _, pair := range peer.prober.snapshot() {
+		got = append(got, pair.remote)
+	}
+	want := "203.0.113.11:3001,198.51.100.7:4000,192.0.2.1:5004,192.0.2.1:5003,192.0.2.1:5002,192.0.2.1:5001"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("probe order = %v\nwant %s", got, want)
+	}
+}
+
+func TestAdvertisedEndpointsKeepTheirOwnLimit(t *testing.T) {
+	var advertised reflexiveEndpoints
+	advertised.limit = maxAdvertisedEndpoints
+	base := time.Now()
+	for i := 0; i < maxAdvertisedEndpoints+3; i++ {
+		advertised.note(net.JoinHostPort("192.0.2.1", strconv.Itoa(6000+i)), base.Add(time.Duration(i)*time.Millisecond))
+	}
+	if got := advertised.candidates(base.Add(time.Second), time.Minute); len(got) != maxAdvertisedEndpoints {
+		t.Fatalf("kept %d, want %d", len(got), maxAdvertisedEndpoints)
+	}
+}
+
+func TestAdvertisedEndpointMaxAgeCoversTwoBroadcastRounds(t *testing.T) {
+	device := &Device{EdgeConfig: &mtypes.EdgeConfig{DynamicRoute: mtypes.DynamicRouteInfo{PeerAliveTimeout: 30, P2P: mtypes.P2PInfo{SendPeerInterval: 20}}}}
+	if got := device.advertisedEndpointMaxAge(); got != 40*time.Second {
+		t.Fatalf("max age = %v, want 40s", got)
+	}
+	device.EdgeConfig.DynamicRoute.PeerAliveTimeout = 70
+	if got := device.advertisedEndpointMaxAge(); got != 70*time.Second {
+		t.Fatalf("max age = %v, want 70s", got)
+	}
+}

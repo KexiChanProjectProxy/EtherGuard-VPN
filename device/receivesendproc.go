@@ -474,10 +474,17 @@ func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.Boardc
 				return err
 			}
 		}
-		if !thepeer.IsPeerAlive() && thepeer.acceptsDiscoveredEndpoints() {
-			//Peer died, try to switch to this new endpoint
-			thepeer.endpoint_trylist.UpdateP2P(content.ConnURL) //another gorouting will process it
-			device.signalEndpointRetry()
+		if thepeer.acceptsDiscoveredEndpoints() {
+			if !thepeer.IsPeerAlive() {
+				//Peer died, try to switch to this new endpoint
+				thepeer.endpoint_trylist.UpdateP2P(content.ConnURL) //another gorouting will process it
+				device.signalEndpointRetry()
+			} else {
+				// Peer alive: keep the address as a probe-only candidate so
+				// endpoint selection can measure it without disturbing the
+				// working session.
+				thepeer.advertised.note(content.ConnURL, time.Now())
+			}
 		}
 
 	}

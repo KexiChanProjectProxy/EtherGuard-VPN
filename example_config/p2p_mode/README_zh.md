@@ -141,7 +141,7 @@ DynamicRoute:
   EndpointSwitchRounds: 0           # 0 = 連續3輪
 ```
 
-各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge在自己與該peer的連線中斷時，會把這些廣播的位址加入候選。
+各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge與該peer的連線中斷時，廣播來的位址會成為重試候選；連線正常時，它們只作為最低延遲選擇的探測候選（每個peer最多六個，至少保留兩個廣播週期），讓從其他edge得知的更快路徑能被量測，而不干擾目前正在使用的連線。
 
 ## Endpoint黑名單
 

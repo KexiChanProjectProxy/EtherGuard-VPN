@@ -447,6 +447,9 @@ type Peer struct {
 	// mapping these are the only reachable addresses of the peer's other
 	// uplinks, so the prober treats them as candidates.
 	reflexive reflexiveEndpoints
+	// advertised records addresses other P2P edges advertised for this peer
+	// while it was alive. They are probe-only: the retry loop never uses them.
+	advertised reflexiveEndpoints
 
 	SingleWayLatency filterwindow
 	OutboundLatency  filterwindow
@@ -542,6 +545,7 @@ func (device *Device) NewPeer(pk NoisePublicKey, id mtypes.Vertex, isSuper bool,
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
 	peer.endpoint_trylist = NewEndpoint_trylist(peer, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout), device.enabledAf)
+	peer.advertised.limit = maxAdvertisedEndpoints
 	peer.SingleWayLatency.device = device
 	peer.SingleWayLatency.Push(mtypes.Infinity)
 	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P {
