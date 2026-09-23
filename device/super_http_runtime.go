@@ -445,28 +445,47 @@ func mergeControlCandidates(previous, refreshed []mtypes.ControlV2Candidate) []m
 	return merged
 }
 
+func (runtime *SuperHTTPRuntime) stunRefreshInterval() (time.Duration, mtypes.ControlV2Parameters) {
+	runtime.mu.RLock()
+	parameters := runtime.parameters
+	runtime.mu.RUnlock()
+	interval := parameters.STUNRefreshInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	return interval, parameters
+}
+
+// stunLoop refreshes STUN candidates every STUNRefreshInterval. Snapshot
+// applies signal parameterUpdates on every revision; they restart the timer
+// only when the interval itself changed, otherwise frequent revisions would
+// postpone the periodic refresh forever.
 func (runtime *SuperHTTPRuntime) stunLoop(ctx context.Context) {
+	interval, _ := runtime.stunRefreshInterval()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
-		runtime.mu.RLock()
-		parameters := runtime.parameters
-		runtime.mu.RUnlock()
-		interval := parameters.STUNRefreshInterval
-		if interval <= 0 {
-			interval = time.Second
-		}
-		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
 			return
 		case <-runtime.parameterUpdates:
-			if !timer.Stop() {
-				<-timer.C
+			next, _ := runtime.stunRefreshInterval()
+			if next == interval {
+				continue
 			}
+			interval = next
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(interval)
 		case <-timer.C:
+			_, parameters := runtime.stunRefreshInterval()
 			runtime.refreshSTUN(ctx, parameters)
+			interval, _ = runtime.stunRefreshInterval()
+			timer.Reset(interval)
 		}
 	}
 }

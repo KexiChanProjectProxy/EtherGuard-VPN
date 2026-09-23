@@ -470,3 +470,37 @@ func TestSuperSTUNRequestsUseDistinctRandomTransactionIDs(t *testing.T) {
 		seen[record.txID] = struct{}{}
 	}
 }
+
+func TestSTUNLoopKeepsRefreshingWhileSnapshotsArrive(t *testing.T) {
+	// Given a runtime whose parameters ask for a STUN refresh every 60ms
+	bind := newPinningSTUNFake(40300)
+	device := &Device{EdgeConfig: &mtypes.EdgeConfig{}, enabledAf: conn.EnabledAf46}
+	device.net.bind = bind
+	device.superSTUN = NewSuperSTUNManager(device)
+	device.superSTUN.sources = func() []stunSource { return nil }
+	t.Cleanup(device.superSTUN.Close)
+	runtime := NewSuperHTTPRuntime(device, mtypes.EdgeConfigV2{})
+	runtime.parameters = mtypes.ControlV2Parameters{
+		STUNServers:         []string{"stun:203.0.113.100:3478"},
+		STUNRequestTimeout:  5 * time.Millisecond,
+		STUNRefreshInterval: 60 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go runtime.stunLoop(ctx)
+
+	// When snapshot revisions arrive far more often than the refresh interval
+	deadline := time.Now().Add(400 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case runtime.parameterUpdates <- struct{}{}:
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Then periodic refreshes still happen
+	if sent := len(bind.sendRecords()); sent < 3 {
+		t.Fatalf("STUN requests during 400ms of snapshot churn = %d, want >= 3", sent)
+	}
+}
