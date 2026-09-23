@@ -163,6 +163,8 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地上行鏈路, 遠端候選位址）組合每輪發送一個加密探測，當某條路徑連續數輪明顯更快時，peer就會切換到該路徑。雙方各自只評估自己的出站路徑，兩個方向可以使用不同的上行鏈路。探測同時維持備用上行鏈路的NAT mapping，因此探測間隔應低於NAT的UDP超時（約25秒以內較安全）。只有單一路徑的peer不會產生額外開銷。探測結果不會影響路由延遲。
 
+除了發布的候選位址，Edge也會探測peer-reflexive位址：來自該peer、經過驗證但未被漫遊保護採用的封包來源位址。在endpoint-dependent mapping的NAT之後，peer看到的port與STUN回報的port不同，因此這些位址是抵達該上行鏈路的唯一途徑。每個peer最多保留四個，並在Edge本地peer存活超時後過期。
+
 | Key | 預設值 | 用途 |
 |-----|-------:|------|
 | DisableEndpointSelection | false | 關閉最低延遲選擇 |

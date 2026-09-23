@@ -163,6 +163,8 @@ These settings apply only to Super-discovered peers; static peer policy is uncha
 
 Once a peer is alive, the Edge keeps measuring every path to it: each (local uplink, remote candidate) pair gets one encrypted probe per round, and the peer moves to the fastest pair when it is clearly better for several rounds in a row. Each side only ranks its own outbound paths; the two directions may use different uplinks. Probes also keep the NAT mappings of alternate uplinks alive, so keep the probe interval below your NAT's UDP timeout (about 25 seconds is safe). Peers with a single path cost nothing. Probe results never feed route latency.
 
+Besides published candidates, the Edge also probes peer-reflexive addresses: sources of authenticated packets from the peer that the roaming guard did not adopt. Behind a NAT with endpoint-dependent mapping, the port a peer sees differs from the STUN-reported port, so these addresses are the only way to reach that uplink. At most four are kept per peer, and they expire after the Edge-local peer alive timeout.
+
 | Key | Default | Purpose |
 |-----|--------:|---------|
 | DisableEndpointSelection | false | Turn lowest-latency selection off |
