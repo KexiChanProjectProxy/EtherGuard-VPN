@@ -13,6 +13,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 	"github.com/KusakabeSi/EtherGuard-VPN/path"
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
@@ -26,7 +27,13 @@ type packet_send_params struct {
 }
 
 func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet []byte, offset int) {
-	if peer == nil || peer.GetEndpointDstStr() == "" {
+	device.SendPacketVia(peer, nil, usage, ttl, packet, offset)
+}
+
+// SendPacketVia sends an encrypted control or data packet to peer through an
+// explicit endpoint. A nil endpoint uses the peer's current endpoint.
+func (device *Device) SendPacketVia(peer *Peer, endpoint conn.Endpoint, usage path.Usage, ttl uint8, packet []byte, offset int) {
+	if peer == nil || (endpoint == nil && peer.GetEndpointDstStr() == "") {
 		return
 	}
 	if usage == path.NormalPacket && len(packet)-path.EgHeaderLen <= 12 {
@@ -64,6 +71,7 @@ func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet
 	elem.Type = usage
 	elem.TTL = ttl
 	elem.packet = elem.buffer[offset : offset+len(packet)]
+	elem.endpoint = endpoint
 	device.enqueuePacket(&packet_send_params{
 		peer: peer,
 		elem: elem,
@@ -214,7 +222,14 @@ func (device *Device) sprint_received(msg_type path.Usage, body []byte) string {
 }
 
 func (device *Device) GeneratePingPacket(src_nodeID mtypes.Vertex, request_reply int) ([]byte, path.Usage, uint8, error) {
+	return device.GeneratePingPacketWithRequestID(src_nodeID, request_reply, 0)
+}
+
+// GeneratePingPacketWithRequestID builds a ping. A non-zero requestID marks an
+// endpoint probe: the responder echoes it and keeps it out of latency state.
+func (device *Device) GeneratePingPacketWithRequestID(src_nodeID mtypes.Vertex, request_reply int, requestID uint32) ([]byte, path.Usage, uint8, error) {
 	body, err := mtypes.GetByte(&mtypes.PingMsg{
+		RequestID:    requestID,
 		Src_nodeID:   src_nodeID,
 		Time:         device.graph.GetCurrentTime(),
 		RequestReply: request_reply,
@@ -242,6 +257,9 @@ func (device *Device) SendPing(peer *Peer, times int, replies int, interval floa
 }
 
 func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
+	if content.RequestID != 0 {
+		return device.process_probe_ping(peer, content)
+	}
 	receiverTime := device.graph.GetCurrentTime()
 	legacyTimediff := receiverTime.Sub(content.Time).Seconds()
 	if legacyTimediff < 0 {
@@ -284,7 +302,41 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	return nil
 }
 
+// process_probe_ping answers an endpoint probe straight back to the prober,
+// echoing its RequestID. Probes may arrive over slower alternate paths, so
+// they never feed SingleWayLatency or the routing graph, are never spread to
+// the mesh, and never trigger a ping-back.
+func (device *Device) process_probe_ping(peer *Peer, content mtypes.PingMsg) error {
+	pongMessage := mtypes.PongMsg{
+		RequestID:      content.RequestID,
+		Src_nodeID:     content.Src_nodeID,
+		Dst_nodeID:     device.ID,
+		Timediff:       peer.SingleWayLatency.GetVal(),
+		TimeToAlive:    device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
+		AdditionalCost: device.EdgeConfig.DynamicRoute.AdditionalCost,
+		PingTime:       content.Time,
+	}
+	body, err := mtypes.GetByte(&pongMessage)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, path.EgHeaderLen+len(body))
+	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
+	header.SetSrc(device.ID)
+	header.SetDst(content.Src_nodeID)
+	copy(buf[path.EgHeaderLen:], body)
+	device.SendPacket(peer, path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
+	return nil
+}
+
 func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
+	if content.RequestID != 0 {
+		// Endpoint probe reply: only the prober that sent it consumes it.
+		if content.Src_nodeID == device.ID && peer.ID == content.Dst_nodeID {
+			peer.prober.onPong(content.RequestID, time.Now())
+		}
+		return nil
+	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		if !isValidLatencySample(content.Timediff) {
 			return nil

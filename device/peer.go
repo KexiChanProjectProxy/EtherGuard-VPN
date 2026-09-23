@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,58 @@ type endpoint_trylist struct {
 	trymap_p2p         map[string]*endpoint_tryitem
 	superAttempt       map[string]struct{}
 	superCycleComplete bool
+	// generation changes whenever the candidate set may have changed, so the
+	// endpoint prober knows to rebuild its pairs.
+	generation uint64
+}
+
+// trylistCandidate is one remote candidate as a literal ip:port.
+type trylistCandidate struct {
+	address string
+	cost    int
+}
+
+// candidates returns every remote candidate as a literal ip:port ordered by
+// cost then address. Addresses come from the already-resolved IP, so the probe
+// path never does DNS.
+func (et *endpoint_trylist) candidates() ([]trylistCandidate, uint64) {
+	et.RLock()
+	defer et.RUnlock()
+	seen := make(map[string]struct{})
+	var out []trylistCandidate
+	add := func(item *endpoint_tryitem) {
+		literal := item.URL
+		if item.ip != nil {
+			_, port, err := net.SplitHostPort(item.URL)
+			if err != nil {
+				return
+			}
+			literal = net.JoinHostPort(item.ip.String(), port)
+		}
+		addrPort, err := netip.ParseAddrPort(literal)
+		if err != nil {
+			return
+		}
+		literal = netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String()
+		if _, ok := seen[literal]; ok {
+			return
+		}
+		seen[literal] = struct{}{}
+		out = append(out, trylistCandidate{address: literal, cost: item.cost})
+	}
+	for _, item := range et.trymap_super {
+		add(item)
+	}
+	for _, item := range et.trymap_p2p {
+		add(item)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].cost != out[j].cost {
+			return out[i].cost < out[j].cost
+		}
+		return out[i].address < out[j].address
+	})
+	return out, et.generation
 }
 
 func NewEndpoint_trylist(peer *Peer, timeout time.Duration, enabledAf conn.EnabledAf) *endpoint_trylist {
@@ -120,6 +173,7 @@ func (et *endpoint_trylist) UpdateSuper(urls mtypes.API_connurl, UseLocalIP bool
 		}
 	}
 	et.trymap_super = newmap_super
+	et.generation++
 }
 
 func superCandidateCost(candidate mtypes.APIConnURLCandidate) int {
@@ -183,6 +237,7 @@ func (et *endpoint_trylist) UpdateP2P(url string) {
 			firstTry: time.Time{},
 			ip:       endpointIP,
 		}
+		et.generation++
 	}
 }
 
@@ -191,6 +246,7 @@ func (et *endpoint_trylist) Delete(url string) {
 	defer et.Unlock()
 	delete(et.trymap_super, url)
 	delete(et.trymap_p2p, url)
+	et.generation++
 }
 
 func (et *endpoint_trylist) removeBlacklisted() {
@@ -208,6 +264,7 @@ func (et *endpoint_trylist) removeBlacklisted() {
 	}
 	et.superAttempt = make(map[string]struct{})
 	et.superCycleComplete = false
+	et.generation++
 }
 
 // ConsumeSuperCycleComplete returns true once after every Super candidate in
@@ -380,6 +437,12 @@ type Peer struct {
 	LastPacketReceivedAdd1Sec atomic.Value // *time.Time
 	lastEndpointChange atomic.Int64
 
+	// prober measures every (local uplink, remote candidate) pair of a live
+	// peer; endpointPinned is set while the endpoint is the prober's choice,
+	// so inbound packets do not overwrite it.
+	prober         endpointProber
+	endpointPinned atomic.Bool
+
 	SingleWayLatency filterwindow
 	OutboundLatency  filterwindow
 
@@ -539,6 +602,12 @@ func (peer *Peer) IsPeerAlive() bool {
 }
 
 func (peer *Peer) SendBuffer(buffer []byte) error {
+	return peer.SendBufferTo(buffer, nil)
+}
+
+// SendBufferTo sends buffer to endpoint, or to the peer's current endpoint
+// when endpoint is nil.
+func (peer *Peer) SendBufferTo(buffer []byte, endpoint conn.Endpoint) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
 
@@ -546,9 +615,11 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 		return nil
 	}
 
-	peer.RLock()
-	endpoint := peer.endpoint
-	peer.RUnlock()
+	if endpoint == nil {
+		peer.RLock()
+		endpoint = peer.endpoint
+		peer.RUnlock()
+	}
 
 	if endpoint == nil {
 		return errors.New("no known endpoint for peer")
@@ -714,6 +785,7 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	if err != nil {
 		return err
 	}
+	peer.endpointPinned.Store(false)
 	peer.Lock()
 	peer.StaticConn = static
 	peer.ConnURL = connurl
@@ -754,6 +826,11 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 				if ts, ok := loaded.(*time.Time); ok && ts != nil {
 					timeout := mtypes.S2TD(peer.device.EdgeConfig.DynamicRoute.PeerAliveTimeout)
 					if !ts.Add(timeout).Before(time.Now()) {
+						if peer.endpointPinned.Load() {
+							// The prober chose this path; inbound packets from the
+							// remote's own choice must not replace it while alive.
+							return false, false
+						}
 						oldIP := peer.endpoint.DstIP()
 						newIP := endpoint.DstIP()
 						if oldIP != nil && newIP != nil && !oldIP.Equal(newIP) {
@@ -767,6 +844,7 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 			(peer.endpoint == nil || !peer.endpoint.DstIP().Equal(endpoint.DstIP()))
 		peer.device.SaveToConfig(peer, endpoint)
 		peer.endpoint = endpoint
+		peer.endpointPinned.Store(false)
 		return true, localAddressChanged
 	}()
 	peer.device.endpointBlacklistMu.RUnlock()

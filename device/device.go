@@ -422,6 +422,7 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 		go device.RoutineTryReceivedEndpoint()
 		go device.RoutineDetectOfflineAndTryNextEndpoint()
 		go device.RoutineSendPing(device.Chan_SendPingStart)
+		go device.RoutineProbeEndpoints()
 		go device.RoutineSpreadAllMyNeighbor()
 		go device.RoutineResetEndpoint()
 		go device.RoutineClearL2FIB()

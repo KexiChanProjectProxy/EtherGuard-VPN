@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 	"github.com/KusakabeSi/EtherGuard-VPN/path"
 	"github.com/KusakabeSi/EtherGuard-VPN/tap"
@@ -55,6 +56,10 @@ type QueueOutboundElement struct {
 	nonce   uint64                // nonce for encryption
 	keypair *Keypair              // keypair for encryption
 	peer    *Peer                 // related peer
+	// endpoint, when set, sends this element to an explicit endpoint instead
+	// of peer.endpoint (off-path endpoint probes). Such sends leave the
+	// WireGuard keepalive and handshake timers untouched.
+	endpoint conn.Endpoint
 }
 
 func (device *Device) NewOutboundElement() *QueueOutboundElement {
@@ -62,6 +67,7 @@ func (device *Device) NewOutboundElement() *QueueOutboundElement {
 	elem.buffer = device.GetMessageBuffer()
 	elem.Mutex = sync.Mutex{}
 	elem.nonce = 0
+	elem.endpoint = nil
 	// keypair and peer were cleared (if necessary) by clearPointers.
 	return elem
 }
@@ -75,6 +81,7 @@ func (elem *QueueOutboundElement) clearPointers() {
 	elem.packet = nil
 	elem.keypair = nil
 	elem.peer = nil
+	elem.endpoint = nil
 }
 
 /* Queues a keepalive if no packets are queued for peer
@@ -450,15 +457,8 @@ func (peer *Peer) RoutineSequentialSender() {
 			continue
 		}
 
-		peer.timersAnyAuthenticatedPacketTraversal()
-		peer.timersAnyAuthenticatedPacketSent()
-
 		// send message and return buffer to pool
-
-		err := peer.SendBuffer(elem.packet)
-		if len(elem.packet) != MessageKeepaliveSize {
-			peer.timersDataSent()
-		}
+		err := peer.transmitOutbound(elem)
 		device.PutMessageBuffer(elem.buffer)
 		device.PutOutboundElement(elem)
 		if err != nil {
@@ -468,4 +468,21 @@ func (peer *Peer) RoutineSequentialSender() {
 
 		peer.keepKeyFreshSending()
 	}
+}
+
+// transmitOutbound sends an encrypted element. Elements aimed at an explicit
+// endpoint are off-path probes: a probe to a dead candidate must not cancel the
+// keepalive or arm a handshake that protects the live path, so they skip the
+// WireGuard timers.
+func (peer *Peer) transmitOutbound(elem *QueueOutboundElement) error {
+	if elem.endpoint != nil {
+		return peer.SendBufferTo(elem.packet, elem.endpoint)
+	}
+	peer.timersAnyAuthenticatedPacketTraversal()
+	peer.timersAnyAuthenticatedPacketSent()
+	err := peer.SendBuffer(elem.packet)
+	if len(elem.packet) != MessageKeepaliveSize {
+		peer.timersDataSent()
+	}
+	return err
 }
