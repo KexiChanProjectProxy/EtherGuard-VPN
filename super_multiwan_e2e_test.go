@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +34,9 @@ func (e e2ePinnedEndpoint) SrcIP() net.IP { return e.pinned }
 type e2eMultiWANBind struct {
 	*e2eBind
 	publicBySource map[string]net.IP
+	// peerPortBySource, when set for an uplink, is the NAT port its traffic to
+	// peers uses; STUN still sees the bind port (endpoint-dependent mapping).
+	peerPortBySource map[string]uint16
 }
 
 var _ conn.EndpointSourcePinner = (*e2eMultiWANBind)(nil)
@@ -45,17 +50,26 @@ func newE2EMultiWANBind(fabric *e2eFabric, port uint16, defaultPublic net.IP, pu
 
 func (b *e2eMultiWANBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 	fns, actual, err := b.e2eBind.Open(port)
-	for _, public := range b.publicBySource {
-		b.fabric.add(b.address(public), b.e2eBind)
+	for source := range b.publicBySource {
+		b.fabric.add(b.peerAddress(source), b.e2eBind)
 	}
 	return fns, actual, err
 }
 
 func (b *e2eMultiWANBind) Close() error {
-	for _, public := range b.publicBySource {
-		b.fabric.remove(b.address(public), b.e2eBind)
+	for source := range b.publicBySource {
+		b.fabric.remove(b.peerAddress(source), b.e2eBind)
 	}
 	return b.e2eBind.Close()
+}
+
+// peerAddress is the public ip:port peers see for traffic from source.
+func (b *e2eMultiWANBind) peerAddress(source string) string {
+	public := b.publicBySource[source]
+	if port, ok := b.peerPortBySource[source]; ok {
+		return net.JoinHostPort(public.String(), strconv.Itoa(int(port)))
+	}
+	return b.address(public)
 }
 
 func (b *e2eMultiWANBind) ParseEndpointFrom(dst string, src netip.Addr, ifindex int) (conn.Endpoint, error) {
@@ -68,17 +82,17 @@ func (b *e2eMultiWANBind) ParseEndpointFrom(dst string, src netip.Addr, ifindex 
 	return e2ePinnedEndpoint{e2eEndpoint: e2eEndpoint{destination: dst}, pinned: src.AsSlice()}, nil
 }
 
-func (b *e2eMultiWANBind) public(endpoint conn.Endpoint) net.IP {
+func (b *e2eMultiWANBind) public(endpoint conn.Endpoint) (net.IP, string) {
 	if pinned, ok := endpoint.(e2ePinnedEndpoint); ok {
 		if public, found := b.publicBySource[pinned.pinned.String()]; found {
-			return public
+			return public, b.peerAddress(pinned.pinned.String())
 		}
 	}
-	return b.mappedIP
+	return b.mappedIP, b.address(b.mappedIP)
 }
 
 func (b *e2eMultiWANBind) Send(packet []byte, endpoint conn.Endpoint) error {
-	public := b.public(endpoint)
+	public, peerAddress := b.public(endpoint)
 	if endpoint.DstToString() != e2eSTUNAddress {
 		if b.dropOutbound.Load() {
 			return nil
@@ -86,7 +100,7 @@ func (b *e2eMultiWANBind) Send(packet []byte, endpoint conn.Endpoint) error {
 		if b.dropInitiation.Load() && len(packet) >= 1 && packet[0] == uint8(path.MessageInitiationType) {
 			return nil
 		}
-		return b.fabric.deliver(packet, endpoint.DstToString(), b.address(public))
+		return b.fabric.deliver(packet, endpoint.DstToString(), peerAddress)
 	}
 	if len(packet) < 20 {
 		return errors.New("short STUN request")
@@ -191,7 +205,17 @@ type e2eMultiWANTopology struct {
 // newE2EMultiWANTopology runs a Super, a single-homed edge A (101) and a
 // multi-WAN edge B (102) whose uplinks sit behind NATs 203.0.113.11 and .12.
 // Before A's first probe, delayFor installs per-destination fabric latency.
-func newE2EMultiWANTopology(t *testing.T, delayFor func(destination string) time.Duration, configureA ...func(*e2eMultiWANEdgeConfig)) *e2eMultiWANTopology {
+type e2eMultiWANOptions struct {
+	configureA       func(*e2eMultiWANEdgeConfig)
+	peerPortBySource map[string]uint16
+	strictFabric     func(destination string) bool
+}
+
+func newE2EMultiWANTopology(t *testing.T, delayFor func(destination string) time.Duration, options ...e2eMultiWANOptions) *e2eMultiWANTopology {
+	var opts e2eMultiWANOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
 	t.Helper()
 	edgeListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -215,6 +239,7 @@ func newE2EMultiWANTopology(t *testing.T, delayFor func(destination string) time
 	base.UsePSKForInterEdge = false
 	topology := &e2eMultiWANTopology{fabric: newE2EFabric(), keyA: "edge-a-control-key", keyB: "edge-b-control-key", base: baseURL}
 	topology.fabric.delay = delayFor
+	topology.fabric.strict = opts.strictFabric
 	base.Peers = []mtypes.SuperConfigV2Peer{
 		{NodeID: 101, NodeName: "edge-a", ControlPSKey: topology.keyA},
 		{NodeID: 102, NodeName: "edge-b", ControlPSKey: topology.keyB},
@@ -247,9 +272,10 @@ func newE2EMultiWANTopology(t *testing.T, delayFor func(destination string) time
 		"192.0.2.2":    net.ParseIP("203.0.113.11"),
 		"198.51.100.2": net.ParseIP("203.0.113.12"),
 	})
+	topology.bindB.peerPortBySource = opts.peerPortBySource
 	configA := e2eMultiWANEdgeConfig{id: 101, name: "edge-a", key: topology.keyA, bind: bindA, port: 101, uplinks: []device.UplinkForTest{}}
-	for _, configure := range configureA {
-		configure(&configA)
+	if opts.configureA != nil {
+		opts.configureA(&configA)
 	}
 	topology.edgeA, _ = newE2EMultiWANEdge(t, configA, baseURL, privateA)
 	topology.edgeB, _ = newE2EMultiWANEdge(t, e2eMultiWANEdgeConfig{id: 102, name: "edge-b", key: topology.keyB, bind: topology.bindB, port: 102, uplinks: []device.UplinkForTest{
@@ -353,7 +379,7 @@ func TestHTTPOnlySuperEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
 func TestHTTPOnlySuperEdgeKeepsEndpointWhenSelectionDisabled(t *testing.T) {
 	// Given the same topology with endpoint selection disabled on A
 	var fast atomic.Value
-	topology := newE2EMultiWANTopology(t, shapedLatency(&fast), func(cfg *e2eMultiWANEdgeConfig) { cfg.disableSelection = true })
+	topology := newE2EMultiWANTopology(t, shapedLatency(&fast), e2eMultiWANOptions{configureA: func(cfg *e2eMultiWANEdgeConfig) { cfg.disableSelection = true }})
 	topology.bindB.dropInitiation.Store(true)
 	initial, target := awaitLiveOnUplink(t, topology.edgeA, topology.pubB)
 
@@ -417,6 +443,39 @@ func TestP2PEdgeConvergesToLowestLatencyEndpoint(t *testing.T) {
 		t.Fatalf("A left the fastest endpoint: %s", got)
 	}
 	if !peerB.IsPeerAlive() {
+		t.Fatal("B is no longer alive after the switch")
+	}
+}
+
+func TestHTTPOnlySuperEdgeReachesUplinkBehindEndpointDependentNAT(t *testing.T) {
+	// Given B's second uplink sits behind a NAT whose peer-facing port (50000)
+	// differs from the port STUN sees, so its published STUN candidate
+	// 203.0.113.12:102 is unreachable
+	var fast atomic.Value
+	delay := shapedLatency(&fast)
+	topology := newE2EMultiWANTopology(t, func(destination string) time.Duration {
+		_, port, _ := net.SplitHostPort(destination)
+		if fast.Load().(string) != "" && port == "50000" && destination != fast.Load().(string) {
+			return 30 * time.Millisecond
+		}
+		return delay(destination)
+	}, e2eMultiWANOptions{
+		peerPortBySource: map[string]uint16{"198.51.100.2": 50000},
+		strictFabric:     func(destination string) bool { return strings.HasPrefix(destination, "203.0.113.12:") },
+	})
+	topology.bindB.dropInitiation.Store(true)
+	awaitE2E(t, 10*time.Second, func() bool {
+		peer := topology.edgeA.LookupPeer(topology.pubB)
+		return peer != nil && peer.IsPeerAlive()
+	})
+	t.Logf("A reaches B at %s before shaping", topology.edgeA.GetConnurl(102))
+
+	// When only the wan2 NAT mapping is fast
+	fast.Store("203.0.113.12:50000")
+
+	// Then A learns that mapping from B's probes and moves to it
+	awaitE2E(t, 15*time.Second, func() bool { return topology.edgeA.GetConnurl(102) == "203.0.113.12:50000" })
+	if !topology.edgeA.LookupPeer(topology.pubB).IsPeerAlive() {
 		t.Fatal("B is no longer alive after the switch")
 	}
 }

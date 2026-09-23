@@ -124,6 +124,10 @@ type e2eFabric struct {
 	// delay, when set, returns an extra one-way delay for datagrams sent to
 	// destination, emulating paths with different latency.
 	delay func(destination string) time.Duration
+	// strict, when it returns true for a destination, disables the port-only
+	// fallback so unmapped addresses drop, emulating a NAT with
+	// endpoint-dependent mapping.
+	strict func(destination string) bool
 }
 
 func newE2EFabric() *e2eFabric {
@@ -147,7 +151,7 @@ func (f *e2eFabric) remove(address string, bind *e2eBind) {
 func (f *e2eFabric) deliver(packet []byte, destination, source string) error {
 	f.mu.RLock()
 	bind := f.binds[destination]
-	if bind == nil {
+	if bind == nil && (f.strict == nil || !f.strict(destination)) {
 		_, destinationPort, err := net.SplitHostPort(destination)
 		if err == nil {
 			for address, candidate := range f.binds {
