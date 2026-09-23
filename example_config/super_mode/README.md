@@ -141,6 +141,8 @@ The Super distributes STUN servers to all Edges via the `STUNServers` field in t
 
 **Same-socket limitation:** STUN candidates are measured from the WireGuard bind. If a STUN server sees a different source port than the WireGuard socket, the candidate is invalid because the NAT mapping is port-specific. Edges do not create a second UDP socket for STUN.
 
+**Multi-WAN edges:** on Linux, an Edge with several uplinks (for example several default routes) probes STUN once through every uplink, still from the same WireGuard socket. Each probe pins the uplink's source address and outgoing interface, so both per-interface default routes and `ip rule from <src>` policy routing are honoured. The Edge reports one `stun` candidate per distinct public `ip:port`, plus the mapping seen through the kernel's default route. At most one address per interface and family is probed, up to 8 uplinks, and only interfaces that are up and running count. With `--bindmode std` or on non-Linux platforms only the default-route mapping is discovered.
+
 Both `stun:host:port` and `stun://host:port` URI forms are accepted. Hosts may be IP literals (e.g. `stun:192.168.1.10:3478`) or syntactically valid DNS hostnames (e.g. `stun://local-stun.example:3478`). Validation performs no DNS I/O; it only checks the URI shape. DNS resolution happens at runtime inside `SuperSTUNManager`, under the configured per-server timeout, before the IP-only bind parser. Generic endpoint parsing (`conn/conn.go`) remains IP-literal-only; DNS hostnames are only resolved for STUN, not for peer endpoints. `STUNRefreshIntervalSeconds` actively schedules periodic discovery: each refresh preserves local candidates, replaces stale STUN-only candidates, and deduplicates the result. STUN discovery is not a keepalive.
 
 ### Direct connectivity and observed fallbacks
@@ -157,9 +159,21 @@ An omitted Edge `DirectConnectivity` block uses these dynamic Super-peer default
 
 These settings apply only to Super-discovered peers; static peer policy is unchanged. They do not make STUN a keepalive.
 
+#### Lowest-latency endpoint selection
+
+Once a peer is alive, the Edge keeps measuring every path to it: each (local uplink, remote candidate) pair gets one encrypted probe per round, and the peer moves to the fastest pair when it is clearly better for several rounds in a row. Each side only ranks its own outbound paths; the two directions may use different uplinks. Probes also keep the NAT mappings of alternate uplinks alive, so keep the probe interval below your NAT's UDP timeout (about 25 seconds is safe). Peers with a single path cost nothing. Probe results never feed route latency.
+
+| Key | Default | Purpose |
+|-----|--------:|---------|
+| DisableEndpointSelection | false | Turn lowest-latency selection off |
+| EndpointProbeIntervalSeconds | ping interval | Seconds between probe rounds |
+| EndpointSwitchMarginMS | 5 | Minimum RTT gain in milliseconds before switching |
+| EndpointSwitchMarginPercent | 15 | Minimum RTT gain as a percentage of the current RTT; the larger margin applies |
+| EndpointSwitchRounds | 3 | Consecutive rounds the faster path must win before switching |
+
 An Edge may report at most 256 observed target endpoints per report. The Super publishes anonymous aggregate fallbacks only: at most 16 hints per target, including at most 14 IPv4 and 14 IPv6 hints. Reporter identities and timestamps are never included. Votes expire using the Super-side `PeerAliveTimeoutSeconds`.
 
-Candidate classes always remain ordered local < STUN < observed. Reporter counts rank observed candidates only; they never let an observed candidate outrank local or STUN candidates.
+Candidate classes always remain ordered local < STUN < observed when an Edge tries to reach a peer that is not alive. Reporter counts rank observed candidates only; they never let an observed candidate outrank local or STUN candidates. Once the peer is alive, lowest-latency selection may move it to any candidate that measures faster.
 
 ## Super-owned listen port policy
 

@@ -141,6 +141,8 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 **同socket限制：** STUN候選位址是從WireGuard bind socket量測的。如果STUN伺服器看到的source port與WireGuard socket不同，該候選位址無效，因為NAT mapping是基於port的。Edge不會為STUN建立第二個UDP socket。
 
+**多WAN Edge：** 在Linux上，擁有多個上行鏈路（例如多條default route）的Edge會經由每一個上行鏈路各發送一次STUN探測，仍然使用同一個WireGuard socket。每個探測都會固定該鏈路的來源位址與出口介面，因此同時支援各介面的default route以及`ip rule from <src>`策略路由。Edge會為每個不同的公網`ip:port`回報一個`stun`候選位址，並附上經由核心預設路由看到的mapping。每個介面每種位址族只探測一個位址，最多8個上行鏈路，且只計入已啟用並有載波的介面。使用`--bindmode std`或非Linux平台時，只會探索預設路由的mapping。
+
 接受`stun:host:port`和`stun://host:port`兩種URI格式。主機可以是IP literal（例如`stun://192.168.1.10:3478`）或語法上合法的DNS主機名（例如`stun://local-stun.example:3478`）。驗證不執行DNS I/O，僅檢查URI格式。DNS解析在`SuperSTUNManager`內部於運行時進行，受設定的per-server超時限制，在IP-only bind parser之前完成。通用endpoint解析（`conn/conn.go`）僅接受IP literal；DNS主機名僅用於STUN，不適用於peer endpoint。`STUNRefreshIntervalSeconds`會主動排程週期性探索：每次刷新保留local候選位址、移除過期的STUN-only候選位址，並去除重複結果。STUN探索不是keepalive。
 
 ### 直接連線與觀察到的回退位址
@@ -157,9 +159,21 @@ Super透過參數串流中的`STUNServers`欄位將STUN伺服器分配給所有E
 
 這些設定只套用到Super下載的peer；static peer策略不變，也不會讓STUN成為keepalive。
 
+#### 最低延遲endpoint選擇
+
+peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地上行鏈路, 遠端候選位址）組合每輪發送一個加密探測，當某條路徑連續數輪明顯更快時，peer就會切換到該路徑。雙方各自只評估自己的出站路徑，兩個方向可以使用不同的上行鏈路。探測同時維持備用上行鏈路的NAT mapping，因此探測間隔應低於NAT的UDP超時（約25秒以內較安全）。只有單一路徑的peer不會產生額外開銷。探測結果不會影響路由延遲。
+
+| Key | 預設值 | 用途 |
+|-----|-------:|------|
+| DisableEndpointSelection | false | 關閉最低延遲選擇 |
+| EndpointProbeIntervalSeconds | ping間隔 | 探測輪次之間的秒數 |
+| EndpointSwitchMarginMS | 5 | 切換前RTT至少需改善的毫秒數 |
+| EndpointSwitchMarginPercent | 15 | 切換前RTT至少需改善的百分比（相對目前RTT），取兩者中較大的門檻 |
+| EndpointSwitchRounds | 3 | 較快路徑需連續勝出的輪數 |
+
 每個Edge在每次report最多可回報256個觀察目標endpoint。Super只發布匿名聚合的回退位址：每個目標最多16個hint，其中IPv4與IPv6各最多14個。snapshot絕不包含reporter身分或時間戳記。投票依Super端的`PeerAliveTimeoutSeconds`到期。
 
-候選位址類別的順序固定為local < STUN < observed。reporter count只在observed候選位址內排序；它不會使observed候選位址超過local或STUN。
+嘗試連線到尚未存活的peer時，候選位址類別的順序固定為local < STUN < observed。reporter count只在observed候選位址內排序；它不會使observed候選位址超過local或STUN。peer存活後，最低延遲選擇可能會把它移到任何量測更快的候選位址。
 
 ## Super獨佔的listen port策略
 

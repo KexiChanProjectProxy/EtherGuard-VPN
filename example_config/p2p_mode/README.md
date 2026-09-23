@@ -49,4 +49,17 @@ Deploy these configuration files to the corresponding nodes, and then execute
 
 you can turn off unnecessary logs to increase performance after it works.
 
+## Lowest-latency endpoint selection
+
+When a peer is alive and has more than one path (several known endpoints, or several local uplinks on Linux), the edge sends one encrypted probe per path each round and moves the peer to the fastest path once it wins by a clear margin for several rounds in a row. Probes keep alternate NAT mappings alive and never feed route latency. Tune it under `DynamicRoute`:
+
+```yaml
+DynamicRoute:
+  DisableEndpointSelection: false   # turn selection off
+  EndpointProbeInterval: 0          # seconds between rounds; 0 = SendPingInterval
+  EndpointSwitchMarginMS: 0         # 0 = 5 ms
+  EndpointSwitchMarginPercent: 0    # 0 = 15 %; the larger margin applies
+  EndpointSwitchRounds: 0           # 0 = 3 consecutive rounds
+```
+
 [WIP]

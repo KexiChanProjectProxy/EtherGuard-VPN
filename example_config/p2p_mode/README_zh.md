@@ -128,6 +128,19 @@ b1message
 因為`L2HeaderMode`是`kbdbg`，所以b1會被轉換成 12byte 的layer 2 header，b是廣播地址`FF:FF:FF:FF:FF:FF`，1是普通地址`AA:BB:CC:DD:EE:01`，message是後面的payload，然後再丟入VPN  
 此時應該要能夠在另一個視窗上看見字串b1message。前12byte被轉換回來了
 
+## 最低延遲endpoint選擇
+
+當peer存活且有多條路徑（多個已知endpoint，或在Linux上有多個本地上行鏈路）時，edge每輪對每條路徑發送一個加密探測，當某條路徑連續數輪以明顯差距勝出時，就把peer切換過去。探測會維持備用NAT mapping，且不會影響路由延遲。可在`DynamicRoute`下調整：
+
+```yaml
+DynamicRoute:
+  DisableEndpointSelection: false   # 關閉選擇
+  EndpointProbeInterval: 0          # 探測輪次間隔秒數；0 = SendPingInterval
+  EndpointSwitchMarginMS: 0         # 0 = 5 ms
+  EndpointSwitchMarginPercent: 0    # 0 = 15 %；取兩者中較大的門檻
+  EndpointSwitchRounds: 0           # 0 = 連續3輪
+```
+
 ## Note
 P2P模式下，PSK是禁用的。因為n個節點有n(n-1)/2的連線，每個連線都要使用不同PSK  
 又不像static mode提前設好，peer數固定不再變動  
