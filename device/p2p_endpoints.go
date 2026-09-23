@@ -180,6 +180,9 @@ func (device *Device) stunSources() []stunSource {
 	if device == nil {
 		return nil
 	}
+	if override := device.uplinkOverride.Load(); override != nil {
+		return append([]stunSource(nil), (*override)...)
+	}
 	var tapName string
 	var listenV4, listenV6 netip.Addr
 	if device.EdgeConfig != nil {
@@ -195,6 +198,23 @@ func (device *Device) stunSources() []stunSource {
 		sources = sources[:maxSTUNSources]
 	}
 	return sources
+}
+
+// UplinkForTest describes one local uplink for SetUplinksForTest.
+type UplinkForTest struct {
+	Addr    netip.Addr
+	Ifindex int
+	Name    string
+}
+
+// SetUplinksForTest replaces interface enumeration for per-uplink STUN and
+// endpoint probing with a fixed list. An empty list means no uplinks.
+func (device *Device) SetUplinksForTest(uplinks []UplinkForTest) {
+	sources := make([]stunSource, 0, len(uplinks))
+	for _, uplink := range uplinks {
+		sources = append(sources, stunSource{ip: uplink.Addr, ifindex: uplink.Ifindex, ifname: uplink.Name})
+	}
+	device.uplinkOverride.Store(&sources)
 }
 
 func (device *Device) p2pLocalEndpointURLs() []string {

@@ -153,6 +153,8 @@ type Device struct {
 	closed        chan int
 	log           *Logger
 	superSTUN     *SuperSTUNManager
+	// uplinkOverride replaces interface enumeration for tests.
+	uplinkOverride atomic.Pointer[[]stunSource]
 	superHTTP     *SuperHTTPRuntime
 	controlCancel context.CancelFunc
 }

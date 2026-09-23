@@ -385,7 +385,7 @@ func TestProbeRoundSkipsIneligiblePeers(t *testing.T) {
 	cases := map[string]func(*Peer){
 		"static":           func(peer *Peer) { peer.StaticConn = true },
 		"roaming disabled": func(peer *Peer) { peer.disableRoaming = true },
-		"held":             func(peer *Peer) { peer.lastEndpointChange.Store(time.Now().UnixNano()) },
+		"special node":     func(peer *Peer) { peer.ID = mtypes.NodeID_SuperNode },
 		"dead": func(peer *Peer) {
 			old := time.Now().Add(-time.Hour)
 			peer.LastPacketReceivedAdd1Sec.Store(&old)

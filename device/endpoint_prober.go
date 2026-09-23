@@ -455,9 +455,8 @@ func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []s
 		peer.prober.reset()
 		return
 	}
-	if peerEndpointRetryHeld(peer) {
-		return
-	}
+	// The retry loop's handshake hold is not honoured here: the peer is
+	// already alive, and the sample and streak rounds damp switching.
 	peer.RLock()
 	currentEndpoint := peer.endpoint
 	peer.RUnlock()
@@ -529,6 +528,7 @@ func (peer *Peer) applyProbedEndpoint(endpoint conn.Endpoint, fromKey string, ta
 	}
 	device.SaveToConfig(peer, endpoint)
 	peer.endpoint = endpoint
+	peer.ConnURL = target.remote
 	peer.Unlock()
 	peer.endpointPinned.Store(true)
 	peer.lastEndpointChange.Store(time.Now().UnixNano())
