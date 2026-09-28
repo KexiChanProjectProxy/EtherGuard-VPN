@@ -552,6 +552,10 @@ func (peer *Peer) RoutineSequentialReceiver() {
 				device.log.Verbosef("No route to peer ID %v", dst_nodeID)
 			}
 		}
+		// Forwarding must stay synchronous: SendPacket and the fan-out helpers
+		// copy elem.packet before returning, and elem.buffer goes back to the
+		// pool at skip below. Running them in a goroutine lets the next UDP
+		// read overwrite the packet while it is still being sent.
 		if should_transfer {
 			l2ttl := elem.TTL
 			if l2ttl == 0 {
@@ -559,12 +563,12 @@ func (peer *Peer) RoutineSequentialReceiver() {
 			} else {
 				l2ttl = l2ttl - 1
 				if dst_nodeID == mtypes.NodeID_Broadcast { //Regular transfer algorithm
-					go device.TransitBoardcastPacket(src_nodeID, peer.ID, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
+					device.TransitBoardcastPacket(src_nodeID, peer.ID, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
 				} else if dst_nodeID == mtypes.NodeID_Spread { // Control Message will try send to every know node regardless the connectivity
 					skip_list := make(map[mtypes.Vertex]bool)
 					skip_list[src_nodeID] = true //Don't send to conimg peer and source peer
 					skip_list[peer.ID] = true
-					go device.SpreadPacket(skip_list, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
+					device.SpreadPacket(skip_list, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
 
 				} else {
 					next_id := device.graph.Next(device.ID, dst_nodeID)
@@ -572,10 +576,16 @@ func (peer *Peer) RoutineSequentialReceiver() {
 						device.peers.RLock()
 						peer_out = device.peers.IDMap[next_id]
 						device.peers.RUnlock()
-						if device.LogLevel.LogTransit {
-							fmt.Printf("Transit: Transfer From:%v Me:%v To:%v S:%v D:%v TTL:%v\n", peer.ID, device.ID, peer_out.ID, src_nodeID.ToString(), dst_nodeID.ToString(), l2ttl)
+						if peer_out == nil {
+							if device.LogLevel.LogTransit {
+								fmt.Printf("Transit: Next hop %v to %v is not a known peer S:%v From:%v\n", next_id.ToString(), dst_nodeID.ToString(), src_nodeID.ToString(), peer.ID)
+							}
+						} else {
+							if device.LogLevel.LogTransit {
+								fmt.Printf("Transit: Transfer From:%v Me:%v To:%v S:%v D:%v TTL:%v\n", peer.ID, device.ID, peer_out.ID, src_nodeID.ToString(), dst_nodeID.ToString(), l2ttl)
+							}
+							device.SendPacket(peer_out, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
 						}
-						go device.SendPacket(peer_out, elem.Type, l2ttl, elem.packet, MessageTransportOffsetContent)
 					} else {
 						if device.LogLevel.LogTransit {
 							fmt.Printf("Transit: No route to %v,usage:%v ttl:%v, content %v PL:%v S:%v D:%v From:%v IP:%v\n", dst_nodeID.ToString(), elem.Type.ToString(), elem.TTL, base64.StdEncoding.EncodeToString([]byte(elem.packet)), len(elem.packet), src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID.ToString(), peer.endpoint.DstToString())
