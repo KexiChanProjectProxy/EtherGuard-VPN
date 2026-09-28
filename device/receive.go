@@ -604,7 +604,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 				}
 				err = device.process_received(packet_type, peer, elem.packet[path.EgHeaderLen:])
 				if err != nil {
-					device.log.Errorf(err.Error())
+					device.log.Errorf("Process %v failed S:%v D:%v TTL:%v From:%v IP:%v Len:%v: %v", packet_type.ToString(), src_nodeID.ToString(), dst_nodeID.ToString(), elem.TTL, peer.ID.ToString(), peer.GetEndpointDstStr(), len(elem.packet)-path.EgHeaderLen, err)
 				}
 			}
 		}
