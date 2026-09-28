@@ -297,6 +297,9 @@ func (device *Device) RoutineReadFromTUN() {
 			}
 		} else {
 			device.BoardcastPacket(make(map[mtypes.Vertex]bool, 0), elem.Type, elem.TTL, elem.packet, offset)
+			// BoardcastPacket copies the packet for every peer before returning.
+			device.PutMessageBuffer(elem.buffer)
+			device.PutOutboundElement(elem)
 		}
 
 	}
