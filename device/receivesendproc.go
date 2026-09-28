@@ -27,12 +27,21 @@ type packet_send_params struct {
 	elem *QueueOutboundElement
 }
 
+// SendPacket sends packet to peer through its current endpoint. See
+// SendPacketVia for the buffer ownership contract.
 func (device *Device) SendPacket(peer *Peer, usage path.Usage, ttl uint8, packet []byte, offset int) {
 	device.SendPacketVia(peer, nil, usage, ttl, packet, offset)
 }
 
 // SendPacketVia sends an encrypted control or data packet to peer through an
 // explicit endpoint. A nil endpoint uses the peer's current endpoint.
+//
+// SendPacketVia copies packet into a pooled outbound buffer before it returns,
+// so the caller may reuse or release packet's backing memory immediately
+// afterwards. The receive path relies on this: it forwards elem.packet and
+// then returns elem.buffer to the pool. Callers must therefore not wrap it (or
+// the fan-out helpers built on it) in a goroutine while still owning a pooled
+// buffer.
 func (device *Device) SendPacketVia(peer *Peer, endpoint conn.Endpoint, usage path.Usage, ttl uint8, packet []byte, offset int) {
 	if peer == nil || (endpoint == nil && peer.GetEndpointDstStr() == "") {
 		return
@@ -98,23 +107,35 @@ func (device *Device) RoutineSendPacket() {
 	}
 }
 
+// BoardcastPacket sends packet to every directly connected peer except those
+// in skip_list. Like SendPacket, it copies packet before returning.
 func (device *Device) BoardcastPacket(skip_list map[mtypes.Vertex]bool, usage path.Usage, ttl uint8, packet []byte, offset int) { // Send packet to all connected peers
 	send_list := device.graph.GetBoardcastList(device.ID)
 	for node_id := range skip_list {
 		send_list[node_id] = false
 	}
 	device.peers.RLock()
+	targets := make([]*Peer, 0, len(send_list))
 	for node_id, should_send := range send_list {
-		if should_send {
-			peer_out := device.peers.IDMap[node_id]
-			go device.SendPacket(peer_out, usage, ttl, packet, offset)
+		if !should_send {
+			continue
+		}
+		if peer_out := device.peers.IDMap[node_id]; peer_out != nil {
+			targets = append(targets, peer_out)
 		}
 	}
 	device.peers.RUnlock()
+	for _, peer_out := range targets {
+		device.SendPacket(peer_out, usage, ttl, packet, offset)
+	}
 }
 
+// SpreadPacket sends packet to every known peer except those in skip_list,
+// regardless of connectivity. Like SendPacket, it copies packet before
+// returning.
 func (device *Device) SpreadPacket(skip_list map[mtypes.Vertex]bool, usage path.Usage, ttl uint8, packet []byte, offset int) { // Send packet to all peers no matter it is alive
 	device.peers.RLock()
+	targets := make([]*Peer, 0, len(device.peers.IDMap))
 	for peer_id, peer_out := range device.peers.IDMap {
 		if _, ok := skip_list[peer_id]; ok {
 			if device.LogLevel.LogTransit && peer_out.endpoint != nil {
@@ -122,11 +143,17 @@ func (device *Device) SpreadPacket(skip_list map[mtypes.Vertex]bool, usage path.
 			}
 			continue
 		}
-		go device.SendPacket(peer_out, usage, ttl, packet, offset)
+		targets = append(targets, peer_out)
 	}
 	device.peers.RUnlock()
+	for _, peer_out := range targets {
+		device.SendPacket(peer_out, usage, ttl, packet, offset)
+	}
 }
 
+// TransitBoardcastPacket relays a broadcast received from in_id along the
+// broadcast tree rooted at src_nodeID. Like SendPacket, it copies packet
+// before returning.
 func (device *Device) TransitBoardcastPacket(src_nodeID mtypes.Vertex, in_id mtypes.Vertex, usage path.Usage, ttl uint8, packet []byte, offset int) {
 	node_boardcast_list, errs := device.graph.GetBoardcastThroughList(device.ID, in_id, src_nodeID)
 	if device.LogLevel.LogControl {
@@ -135,14 +162,19 @@ func (device *Device) TransitBoardcastPacket(src_nodeID mtypes.Vertex, in_id mty
 		}
 	}
 	device.peers.RLock()
+	targets := make([]*Peer, 0, len(node_boardcast_list))
 	for peer_id := range node_boardcast_list {
-		peer_out := device.peers.IDMap[peer_id]
+		if peer_out := device.peers.IDMap[peer_id]; peer_out != nil {
+			targets = append(targets, peer_out)
+		}
+	}
+	device.peers.RUnlock()
+	for _, peer_out := range targets {
 		if device.LogLevel.LogTransit {
 			fmt.Printf("Transit: Transfer From:%v Me:%v To:%v S:%v D:%v TTL:%v\n", in_id, device.ID, peer_out.ID, src_nodeID.ToString(), peer_out.ID.ToString(), ttl)
 		}
-		go device.SendPacket(peer_out, usage, ttl, packet, offset)
+		device.SendPacket(peer_out, usage, ttl, packet, offset)
 	}
-	device.peers.RUnlock()
 }
 
 func (device *Device) CheckNoDup(packet []byte) bool {
