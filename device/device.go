@@ -155,6 +155,9 @@ type Device struct {
 	superSTUN     *SuperSTUNManager
 	// uplinkOverride replaces interface enumeration for tests.
 	uplinkOverride atomic.Pointer[[]stunSource]
+	// routeCheck replaces the kernel route check for tests; nil selects the
+	// platform checker for the live bind.
+	routeCheck    routeChecker
 	superHTTP     *SuperHTTPRuntime
 	controlCancel context.CancelFunc
 }

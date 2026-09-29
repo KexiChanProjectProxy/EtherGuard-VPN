@@ -135,10 +135,11 @@ func (pair *probePair) String() string {
 }
 
 // buildProbePairs combines remote candidates with local sources. The current
-// remote comes first; pinned sources must match the remote's family. It
-// returns nil when there is at most one pair, so single-homed peers with one
-// candidate cost nothing.
-func buildProbePairs(current string, candidates []trylistCandidate, sources []stunSource, pinning bool, allow func(netip.AddrPort) bool) []*probePair {
+// remote comes first; pinned sources must match the remote's family. When
+// routable is set, legs without a kernel route (nil local: the default route)
+// are left out. It returns nil when there is at most one pair, so single-homed
+// peers with one candidate cost nothing.
+func buildProbePairs(current string, candidates []trylistCandidate, sources []stunSource, pinning bool, allow func(netip.AddrPort) bool, routable func(local *stunSource, remote netip.Addr) bool) []*probePair {
 	remotes := make([]netip.AddrPort, 0, endpointProbeMaxRemote)
 	seen := make(map[string]struct{})
 	addRemote := func(address string) {
@@ -165,7 +166,7 @@ func buildProbePairs(current string, candidates []trylistCandidate, sources []st
 	}
 	var pairs []*probePair
 	for _, remote := range remotes {
-		if len(pairs) < endpointProbeMaxPairs {
+		if len(pairs) < endpointProbeMaxPairs && (routable == nil || routable(nil, remote.Addr())) {
 			pairs = append(pairs, &probePair{key: probePairKey(nil, remote.String()), remote: remote.String(), rtt: math.Inf(1)})
 		}
 		if !pinning {
@@ -177,6 +178,9 @@ func buildProbePairs(current string, candidates []trylistCandidate, sources []st
 			}
 			source := sources[i]
 			if source.ip.Is4() != remote.Addr().Is4() {
+				continue
+			}
+			if routable != nil && !routable(&source, remote.Addr()) {
 				continue
 			}
 			pairs = append(pairs, &probePair{key: probePairKey(&source, remote.String()), remote: remote.String(), local: &source, rtt: math.Inf(1)})
@@ -564,12 +568,13 @@ func (device *Device) probeEndpointsRound(settings endpointSelectionSettings, no
 	if pinning {
 		sources = device.stunSources()
 	}
+	routes := newRouteMemo(device.routeCheckerFor(bind), device.log)
 	for _, peer := range device.retryPeersSnapshot() {
-		device.probePeerEndpoints(peer, bind, sources, pinning, settings, now)
+		device.probePeerEndpoints(peer, bind, sources, pinning, routes, settings, now)
 	}
 }
 
-func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []stunSource, pinning bool, settings endpointSelectionSettings, now time.Time) {
+func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []stunSource, pinning bool, routes *routeMemo, settings endpointSelectionSettings, now time.Time) {
 	if !device.endpointProbeEligible(peer) {
 		peer.prober.reset()
 		return
@@ -607,7 +612,7 @@ func (device *Device) probePeerEndpoints(peer *Peer, bind conn.Bind, sources []s
 		defer device.endpointBlacklistMu.RUnlock()
 		return !device.endpointAddressBlacklisted(addrPort.Addr())
 	}
-	peer.prober.rebuild(buildProbePairs(current, candidates, sources, pinning, allow))
+	peer.prober.rebuild(buildProbePairs(current, candidates, sources, pinning, allow, routes.routable))
 	pairs := peer.prober.snapshot()
 	if len(pairs) == 0 {
 		return

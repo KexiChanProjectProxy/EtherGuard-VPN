@@ -61,7 +61,7 @@ func pairKeys(pairs []*probePair) string {
 }
 
 func TestBuildProbePairsSingleHomedSingleCandidateBuildsNothing(t *testing.T) {
-	pairs := buildProbePairs("198.51.100.7:3001", []trylistCandidate{{address: "198.51.100.7:3001"}}, nil, false, nil)
+	pairs := buildProbePairs("198.51.100.7:3001", []trylistCandidate{{address: "198.51.100.7:3001"}}, nil, false, nil, nil)
 	if pairs != nil {
 		t.Fatalf("pairs = %s, want none", pairKeys(pairs))
 	}
@@ -77,7 +77,7 @@ func TestBuildProbePairsOrdersCurrentFirstMatchesFamiliesAndCaps(t *testing.T) {
 	}
 
 	// When
-	pairs := buildProbePairs("203.0.113.21:3001", candidates, sources, true, nil)
+	pairs := buildProbePairs("203.0.113.21:3001", candidates, sources, true, nil, nil)
 
 	// Then the current remote leads and pinned sources only pair with their family
 	want := strings.Join([]string{
@@ -96,7 +96,7 @@ func TestBuildProbePairsOrdersCurrentFirstMatchesFamiliesAndCaps(t *testing.T) {
 func TestBuildProbePairsDropsDisallowedRemotes(t *testing.T) {
 	candidates := []trylistCandidate{{address: "203.0.113.20:3001"}, {address: "203.0.113.66:3001"}, {address: "203.0.113.21:3001"}}
 	blocked := func(addrPort netip.AddrPort) bool { return addrPort.Addr() != netip.MustParseAddr("203.0.113.66") }
-	pairs := buildProbePairs("", candidates, nil, false, blocked)
+	pairs := buildProbePairs("", candidates, nil, false, blocked, nil)
 	if got := pairKeys(pairs); got != "default|203.0.113.20:3001,default|203.0.113.21:3001" {
 		t.Fatalf("pairs = %s", got)
 	}
@@ -288,7 +288,7 @@ func TestProbeRoundEmitsOneProbePerPairWithExplicitEndpoints(t *testing.T) {
 	sources := []stunSource{wan1Source, wan2Source}
 
 	// When
-	device.probePeerEndpoints(peer, bind, sources, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, sources, true, nil, testSelection, time.Now())
 
 	// Then 2 remotes x (default + 2 uplinks) probes go out, each to its own endpoint
 	probes := drainProbes(device)
@@ -319,7 +319,7 @@ func TestProbeRoundSendsNothingForSingleHomedSingleCandidatePeer(t *testing.T) {
 	device, peer := newProberTestDevice(t, bind)
 	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
 	setTrylist(peer, "203.0.113.20:3001")
-	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 	if probes := drainProbes(device); len(probes) != 0 {
 		t.Fatalf("probes = %d, want 0", len(probes))
 	}
@@ -342,7 +342,7 @@ func TestProbeRoundsSwitchToLowestLatencyPairAndPinIt(t *testing.T) {
 	// When rounds run until the prober decides
 	switched := false
 	for round := 0; round < 10 && !switched; round++ {
-		device.probePeerEndpoints(peer, bind, sources, true, testSelection, time.Now())
+		device.probePeerEndpoints(peer, bind, sources, true, nil, testSelection, time.Now())
 		answerProbes(peer, drainProbes(device), rtt)
 		peer.RLock()
 		switched = peer.endpoint.DstToString() == "203.0.113.21:3001"
@@ -378,7 +378,7 @@ func TestProbeRoundsKeepCurrentPathWhenNothingIsClearlyFaster(t *testing.T) {
 		return 50 * time.Millisecond
 	}
 	for round := 0; round < 10; round++ {
-		device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+		device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 		answerProbes(peer, drainProbes(device), rtt)
 	}
 	if got := peer.endpoint.DstToString(); got != "203.0.113.20:3001" {
@@ -404,7 +404,7 @@ func TestProbeRoundSkipsIneligiblePeers(t *testing.T) {
 			peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
 			setTrylist(peer, "203.0.113.20:3001", "203.0.113.21:3001")
 			mutate(peer)
-			device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+			device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 			if probes := drainProbes(device); len(probes) != 0 {
 				t.Fatalf("probes = %d, want 0", len(probes))
 			}
@@ -422,7 +422,7 @@ func TestProbeRoundDiscardsPairWhosePinWasDropped(t *testing.T) {
 	peer.endpoint, _ = bind.ParseEndpoint("203.0.113.20:3001")
 	setTrylist(peer, "203.0.113.20:3001", "203.0.113.21:3001")
 	sources := []stunSource{wan1Source}
-	device.probePeerEndpoints(peer, bind, sources, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, sources, true, nil, testSelection, time.Now())
 	probes := drainProbes(device)
 	answerProbes(peer, probes, func(conn.Endpoint) time.Duration { return 10 * time.Millisecond })
 
@@ -432,7 +432,7 @@ func TestProbeRoundDiscardsPairWhosePinWasDropped(t *testing.T) {
 			probe.endpoint.ClearSrc()
 		}
 	}
-	device.probePeerEndpoints(peer, bind, sources, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, sources, true, nil, testSelection, time.Now())
 	drainProbes(device)
 
 	// Then the pinned pairs lost their measurements, default pairs kept theirs
@@ -686,7 +686,7 @@ func TestProbeRoundProbesReflexiveAddressAheadOfPublishedCandidates(t *testing.T
 	peer.reflexive.note("203.0.113.12:50000", time.Now())
 
 	// When
-	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 
 	// Then the reflexive address is probed
 	for _, probe := range drainProbes(device) {
@@ -707,7 +707,7 @@ func TestProbeRoundsBackOffForPeersThatNeverAnswer(t *testing.T) {
 	// When many rounds run
 	var probingRounds int
 	for round := 0; round < 30; round++ {
-		device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+		device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 		if len(drainProbes(device)) > 0 {
 			probingRounds++
 		}
@@ -723,7 +723,7 @@ func TestProbeRoundsBackOffForPeersThatNeverAnswer(t *testing.T) {
 	peer.prober.mu.Lock()
 	peer.prober.answered = true
 	peer.prober.mu.Unlock()
-	device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 	if len(drainProbes(device)) == 0 {
 		t.Fatal("probing did not resume after a reply")
 	}
@@ -898,7 +898,7 @@ func TestBroadcastForLivePeerBecomesProbeOnlyCandidate(t *testing.T) {
 	}
 
 	// And the next probe round measures it
-	device.probePeerEndpoints(peer, device.net.bind, nil, true, testSelection, time.Now())
+	device.probePeerEndpoints(peer, device.net.bind, nil, true, nil, testSelection, time.Now())
 	for _, probe := range drainProbes(device) {
 		if probe.endpoint.DstToString() == "203.0.113.12:50000" {
 			return
@@ -929,7 +929,7 @@ func TestProbeOrderRanksOwnObservationsBeforeAdvertisedBeforePublished(t *testin
 	}
 
 	// When
-	device.probePeerEndpoints(peer, device.net.bind, nil, true, testSelection, now)
+	device.probePeerEndpoints(peer, device.net.bind, nil, true, nil, testSelection, now)
 
 	// Then current, reflexive and the newest advertised addresses fill the cap;
 	// published candidates are left out
@@ -1089,7 +1089,7 @@ func TestProbeRoundsEventuallyFollowAConsistentlySlightlyFasterPath(t *testing.T
 
 	// When rounds keep running
 	for round := 0; round < 3*testSelection.persistRounds; round++ {
-		device.probePeerEndpoints(peer, bind, nil, true, testSelection, time.Now())
+		device.probePeerEndpoints(peer, bind, nil, true, nil, testSelection, time.Now())
 		answerProbes(peer, drainProbes(device), rtt)
 		if peer.endpoint.DstToString() == "203.0.113.21:3001" {
 			return
