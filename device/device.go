@@ -95,6 +95,8 @@ type Device struct {
 	event_tryendpoint chan struct{}
 	chan_send_packet  chan *packet_send_params
 	sendQueueDrops    atomic.Uint64
+	// sentPings turns echoed ping stamps into monotonic round trips.
+	sentPings sentPingRegistry
 
 	endpointBlacklistMu      sync.RWMutex
 	endpointBlacklist        atomic.Pointer[endpointBlacklist]

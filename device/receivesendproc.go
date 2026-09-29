@@ -261,10 +261,15 @@ func (device *Device) GeneratePingPacket(src_nodeID mtypes.Vertex, request_reply
 // GeneratePingPacketWithRequestID builds a ping. A non-zero requestID marks an
 // endpoint probe: the responder echoes it and keeps it out of latency state.
 func (device *Device) GeneratePingPacketWithRequestID(src_nodeID mtypes.Vertex, request_reply int, requestID uint32) ([]byte, path.Usage, uint8, error) {
+	mono := time.Now()
+	wall := device.graph.WallTime(mono)
+	if requestID == 0 && src_nodeID == device.ID {
+		device.sentPings.record(wall, mono, mtypes.S2TD(device.EdgeConfig.DynamicRoute.PeerAliveTimeout))
+	}
 	body, err := mtypes.GetByte(&mtypes.PingMsg{
 		RequestID:    requestID,
 		Src_nodeID:   src_nodeID,
-		Time:         device.graph.GetCurrentTime(),
+		Time:         wall,
 		RequestReply: request_reply,
 	})
 	if err != nil {
@@ -394,20 +399,28 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 		}
 	} else if content.Src_nodeID == device.ID {
 		latency := content.Timediff
+		clock := "legacy"
 		if content.PingTime.IsZero() {
 			if !isValidLatencySample(latency) {
 				return nil
 			}
+		} else if sentAt, ok := device.sentPings.lookup(content.PingTime); ok {
+			// Round trip on the local monotonic clock: immune to NTP
+			// offset changes between ping and pong.
+			latency = time.Since(sentAt).Seconds() / 2
+			clock = "monotonic"
 		} else {
+			// Ping predates this process or was evicted.
 			elapsed := device.graph.GetCurrentTime().Sub(content.PingTime)
 			if elapsed < 0 {
 				return nil
 			}
 			latency = elapsed.Seconds() / 2
+			clock = "wall"
 		}
 		device.graph.UpdateLatency(device.ID, content.Dst_nodeID, latency, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
 		peer.OutboundLatency.Push(latency)
-		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f", device.ID, content.Dst_nodeID, latency*1000)
+		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f clock=%s", device.ID, content.Dst_nodeID, latency*1000, clock)
 	}
 	return nil
 }
