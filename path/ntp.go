@@ -12,6 +12,10 @@ import (
 
 var forever = time.Hour * 99999
 
+// ntpOffsetStepWarn is the offset change between two syncs that is reported
+// even without LogNTP: such a step shifts every cross-host timestamp.
+const ntpOffsetStepWarn = 100 * time.Millisecond
+
 func (g *IG) InitNTP() {
 	g.ntp_init_t = time.Now()
 	if g.ntp_info.UseNTP {
@@ -103,7 +107,10 @@ func (g *IG) SyncTimeMultiple(count int) {
 		if g.loglevel.LogNTP {
 			fmt.Println("NTP: Arvage offset: " + avgtime.String())
 		}
-		g.ntp_offset = avgtime
+		previous := time.Duration(g.ntp_offset.Swap(int64(avgtime)))
+		if step := avgtime - previous; previous != 0 && (step > ntpOffsetStepWarn || step < -ntpOffsetStepWarn) {
+			fmt.Printf("NTP: offset stepped by %v (was %v, now %v)\n", step, previous, avgtime)
+		}
 	} else {
 		if g.loglevel.LogNTP {
 			fmt.Println("NTP: All server failed, skip sync")

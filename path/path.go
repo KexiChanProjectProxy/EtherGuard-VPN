@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -14,8 +15,20 @@ import (
 	yaml "gopkg.in/yaml.v2"
 )
 
+// NTPOffset is the correction EtherGuard's own NTP sync applies to the local
+// clock.
+func (g *IG) NTPOffset() time.Duration {
+	return time.Duration(g.ntp_offset.Load())
+}
+
+// WallTime converts a local reading to the NTP-corrected wall clock. The
+// result has no monotonic reading, so it is only comparable across hosts.
+func (g *IG) WallTime(now time.Time) time.Time {
+	return now.Add(g.NTPOffset()).Round(0)
+}
+
 func (g *IG) GetCurrentTime() time.Time {
-	return time.Now().Add(g.ntp_offset).Round(0)
+	return g.WallTime(time.Now())
 }
 
 type Latency struct {
@@ -53,7 +66,7 @@ type IG struct {
 	ntp_wg      sync.WaitGroup
 	ntp_info    mtypes.NTPInfo
 	ntp_init_t  time.Time
-	ntp_offset  time.Duration
+	ntp_offset  atomic.Int64          // nanoseconds; written by the sync routine
 	ntp_servers orderedmap.OrderedMap // serverurl:lentancy
 }
 
