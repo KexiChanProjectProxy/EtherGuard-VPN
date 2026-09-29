@@ -298,13 +298,12 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	if content.RequestID != 0 {
 		return device.process_probe_ping(peer, content)
 	}
-	receiverTime := device.graph.GetCurrentTime()
-	legacyTimediff := receiverTime.Sub(content.Time).Seconds()
-	if legacyTimediff < 0 {
-		device.log.Errorf("negative raw one-way latency source=%v destination=%v sent_at=%s receiver_at=%s raw_delta_ms=%.3f; check clock skew, using zero for legacy pong timing", content.Src_nodeID, device.ID, content.Time.Format(time.RFC3339Nano), receiverTime.Format(time.RFC3339Nano), legacyTimediff*1000)
-		legacyTimediff = 0
-	}
-	newTimediff := peer.SingleWayLatency.Push(legacyTimediff)
+	now := time.Now()
+	receiverTime := device.graph.WallTime(now)
+	raw := receiverTime.Sub(content.Time).Seconds()
+	oneWay := device.estimateOneWay(peer, content, raw, receiverTime, now)
+	newTimediff := peer.SingleWayLatency.Push(oneWay)
+	rawTimediff := peer.RawOneWay.Push(raw)
 	additionalCost := device.EdgeConfig.DynamicRoute.AdditionalCost
 	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P && (device.EdgeConfig.SuperNodeV2Enabled || device.superHTTP != nil) {
 		additionalCost = device.effectiveRelayCostMS()
@@ -317,6 +316,8 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 		TimeToAlive:    device.EdgeConfig.DynamicRoute.PeerAliveTimeout,
 		AdditionalCost: additionalCost,
 		PingTime:       content.Time,
+		RawTimediff:    rawTimediff,
+		HasRawTimediff: true,
 	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P && time.Now().After(device.graph.NhTableExpire) {
 		device.graph.UpdateLatencyMulti([]mtypes.PongMsg{pongMessage}, true, false)
@@ -338,6 +339,45 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	}
 	go device.SendPing(peer, content.RequestReply, 0, 3)
 	return nil
+}
+
+// estimateOneWay turns the raw wall-clock delta of a ping from peer into the
+// one-way latency this node reports. Timestamps from two hosts differ by their
+// clock offset, so raw alone can be negative; when the peer has reported the
+// reverse delta the offsets cancel. The result is never negative, so peers
+// that predate RawTimediff keep accepting it.
+func (device *Device) estimateOneWay(peer *Peer, content mtypes.PingMsg, raw float64, receiverTime, now time.Time) float64 {
+	reverse := peer.reverseRaw.Load()
+	oneWay, skew, corrected := correctOneWay(raw, reverse, now, device.reverseSampleMaxAge())
+	reverseAge := -1.0
+	if reverse != nil {
+		reverseAge = now.Sub(reverse.at).Seconds()
+	}
+	device.log.Verbosef("one-way latency source=%v destination=%v raw_ms=%.3f corrected=%t one_way_ms=%.3f skew_ms=%.3f reverse_age_s=%.1f ntp_offset_ms=%.3f", content.Src_nodeID, device.ID, raw*1000, corrected, oneWay*1000, skew*1000, reverseAge, float64(device.graph.NTPOffset())/float64(time.Millisecond))
+	switch {
+	case corrected && math.Abs(skew) > clockSkewWarnThreshold && peer.clockWarn.allow(now, clockWarnInterval):
+		device.log.Errorf("clock skew between node %v and node %v is about %.1f ms (positive: this node ahead); check time sync on both hosts. Latency uses the offset-cancelled estimate; next report in %v", device.ID, content.Src_nodeID, skew*1000, clockWarnInterval)
+	case !corrected && raw < 0 && peer.clockWarn.allow(now, clockWarnInterval):
+		device.log.Errorf("negative raw one-way latency source=%v destination=%v sent_at=%s receiver_at=%s raw_delta_ms=%.3f; clock skew and no reverse sample from the peer yet, using zero; next report in %v", content.Src_nodeID, device.ID, content.Time.Format(time.RFC3339Nano), receiverTime.Format(time.RFC3339Nano), raw*1000, clockWarnInterval)
+	}
+	if oneWay < 0 {
+		// Possible for one round right after either clock steps.
+		device.log.Verbosef("corrected one-way latency still negative source=%v destination=%v one_way_ms=%.3f; using zero", content.Src_nodeID, device.ID, oneWay*1000)
+		oneWay = 0
+	}
+	return oneWay
+}
+
+// noteReverseSample stores the raw delta a peer measured for one of this
+// node's pings. P2P pongs are spread and may arrive through a relay, so the
+// sample belongs to the pong's author, not to the delivering peer.
+func (device *Device) noteReverseSample(content mtypes.PongMsg) {
+	if content.Src_nodeID != device.ID || !content.HasRawTimediff || math.IsNaN(content.RawTimediff) || math.IsInf(content.RawTimediff, 0) {
+		return
+	}
+	if author := device.lookupPeerByID(content.Dst_nodeID); author != nil {
+		author.reverseRaw.Store(&oneWaySample{raw: content.RawTimediff, at: time.Now()})
+	}
 }
 
 // process_probe_ping answers an endpoint probe straight back to the prober,
@@ -375,6 +415,7 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 		}
 		return nil
 	}
+	device.noteReverseSample(content)
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		if !isValidLatencySample(content.Timediff) {
 			return nil

@@ -1,8 +1,12 @@
 package device
 
 import (
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
 )
 
 // sentPingRegistryCap bounds how many recent routing pings are remembered.
@@ -54,4 +58,69 @@ func (r *sentPingRegistry) len() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.entries)
+}
+
+const (
+	// clockSkewWarnThreshold is the estimated skew, in seconds, between this
+	// node's and a peer's corrected clocks that is reported as an error.
+	clockSkewWarnThreshold = 0.100
+	// clockWarnInterval limits clock errors to one per peer per interval.
+	clockWarnInterval = 10 * time.Minute
+)
+
+// oneWaySample is a peer's filtered raw one-way delta for this node's pings,
+// measured on the peer's clock minus this node's clock.
+type oneWaySample struct {
+	raw float64
+	at  time.Time
+}
+
+// correctOneWay estimates the inbound one-way latency from raw, the delta of
+// the peer's ping measured as this node's clock minus the peer's. With a fresh
+// reverse sample the two deltas' clock offsets cancel: the estimate is half
+// the round trip and skew is how far this node's clock runs ahead of the
+// peer's. Without one it returns raw clamped at zero and corrected is false.
+func correctOneWay(raw float64, reverse *oneWaySample, now time.Time, maxAge time.Duration) (oneWay, skew float64, corrected bool) {
+	if reverse != nil && !math.IsNaN(reverse.raw) && !math.IsInf(reverse.raw, 0) && (maxAge <= 0 || now.Sub(reverse.at) <= maxAge) {
+		return (raw + reverse.raw) / 2, (raw - reverse.raw) / 2, true
+	}
+	return math.Max(raw, 0), 0, false
+}
+
+// reverseSampleMaxAge is how long a peer's reverse sample stays usable: three
+// ping rounds, bounded by the peer alive timeout.
+func (device *Device) reverseSampleMaxAge() time.Duration {
+	route := device.EdgeConfig.DynamicRoute
+	interval := mtypes.S2TD(route.SendPingInterval) * 3
+	alive := mtypes.S2TD(route.PeerAliveTimeout)
+	switch {
+	case interval <= 0:
+		return alive
+	case alive > 0 && alive < interval:
+		return alive
+	}
+	return interval
+}
+
+// logThrottle admits one event per interval. The zero value is ready to use.
+type logThrottle struct {
+	last atomic.Int64
+}
+
+func (t *logThrottle) allow(now time.Time, every time.Duration) bool {
+	for {
+		last := t.last.Load()
+		if last != 0 && now.Sub(time.Unix(0, last)) < every {
+			return false
+		}
+		if t.last.CompareAndSwap(last, now.UnixNano()) {
+			return true
+		}
+	}
+}
+
+func (device *Device) lookupPeerByID(id mtypes.Vertex) *Peer {
+	device.peers.RLock()
+	defer device.peers.RUnlock()
+	return device.peers.IDMap[id]
 }

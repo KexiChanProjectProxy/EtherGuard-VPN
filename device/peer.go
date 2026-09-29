@@ -355,7 +355,11 @@ type filterwindow struct {
 }
 
 func (f *filterwindow) Push(e float64) float64 {
-	f.Resize(f.device.dampingFilterRadius*2 + 1)
+	var radius uint64
+	if f.device != nil {
+		radius = f.device.dampingFilterRadius
+	}
+	f.Resize(radius*2 + 1)
 	f.Lock()
 	defer f.Unlock()
 	if f.size < 3 || e >= mtypes.Infinity {
@@ -451,8 +455,19 @@ type Peer struct {
 	// while it was alive. They are probe-only: the retry loop never uses them.
 	advertised reflexiveEndpoints
 
+	// SingleWayLatency is the inbound one-way latency this node reports for
+	// the peer: offset-cancelled when the peer reports its reverse sample,
+	// else the raw delta clamped at zero.
 	SingleWayLatency filterwindow
 	OutboundLatency  filterwindow
+	// RawOneWay filters the unclamped inbound wall-clock delta (peer's clock
+	// to this node's) that pongs carry as RawTimediff.
+	RawOneWay filterwindow
+	// reverseRaw is the newest RawTimediff the peer reported for this node's
+	// pings, i.e. the outbound delta measured on the peer's clock.
+	reverseRaw atomic.Pointer[oneWaySample]
+	// clockWarn rate-limits clock-skew errors about this peer.
+	clockWarn logThrottle
 
 	stopping sync.WaitGroup // routines pending stop
 
@@ -548,6 +563,7 @@ func (device *Device) NewPeer(pk NoisePublicKey, id mtypes.Vertex, isSuper bool,
 	peer.advertised.limit = maxAdvertisedEndpoints
 	peer.SingleWayLatency.device = device
 	peer.SingleWayLatency.Push(mtypes.Infinity)
+	peer.RawOneWay.device = device
 	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		peer.OutboundLatency.device = device
 		peer.OutboundLatency.Push(mtypes.Infinity)

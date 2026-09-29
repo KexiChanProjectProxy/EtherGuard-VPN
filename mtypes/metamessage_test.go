@@ -1,6 +1,8 @@
 package mtypes
 
 import (
+	"bytes"
+	"encoding/gob"
 	"reflect"
 	"testing"
 	"time"
@@ -11,7 +13,7 @@ func TestLegacyDatagrams_roundTrip_whenSerializedWithGob(t *testing.T) {
 	when := time.Unix(1_700_000_000, 123).UTC()
 	register := RegisterMsg{Node_id: 1, Version: "test", PeerStateHash: "peer", NhStateHash: "next-hop", SuperParamStateHash: "parameters", HttpPostCount: 7}
 	ping := PingMsg{RequestID: 3, Src_nodeID: 1, Time: when, RequestReply: 1}
-	pong := PongMsg{RequestID: 3, Src_nodeID: 1, Dst_nodeID: 2, Timediff: 1.5, TimeToAlive: 2.5, AdditionalCost: 3.5, PingTime: when}
+	pong := PongMsg{RequestID: 3, Src_nodeID: 1, Dst_nodeID: 2, Timediff: 1.5, TimeToAlive: 2.5, AdditionalCost: 3.5, PingTime: when, RawTimediff: -0.25, HasRawTimediff: true}
 
 	// When
 	registerBytes, _ := GetByte(register)
@@ -62,5 +64,59 @@ func TestPongMsgDecodesLegacyGobWithZeroPingTime(t *testing.T) {
 	}
 	if got.Timediff != legacy.Timediff {
 		t.Fatalf("legacy PongMsg timediff = %f, want %f", got.Timediff, legacy.Timediff)
+	}
+}
+
+// pongMsgBeforeRawTimediff is the PongMsg layout deployed before RawTimediff.
+type pongMsgBeforeRawTimediff struct {
+	RequestID      uint32
+	Src_nodeID     Vertex
+	Dst_nodeID     Vertex
+	Timediff       float64
+	TimeToAlive    float64
+	AdditionalCost float64
+	PingTime       time.Time
+}
+
+func TestPongMsgWithRawTimediffDecodesOnPreviousLayout(t *testing.T) {
+	// Given a pong from an upgraded node
+	when := time.Unix(1_700_000_000, 123).UTC()
+	pong := PongMsg{Src_nodeID: 1, Dst_nodeID: 2, Timediff: 0.02, TimeToAlive: 70, PingTime: when, RawTimediff: -0.015, HasRawTimediff: true}
+	raw, err := GetByte(pong)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// When a node without the new fields decodes it
+	var old pongMsgBeforeRawTimediff
+	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&old); err != nil {
+		t.Fatalf("previous layout decode: %v", err)
+	}
+
+	// Then the fields it knows are intact
+	if old.Timediff != 0.02 || !old.PingTime.Equal(when) || old.Dst_nodeID != 2 {
+		t.Fatalf("decoded = %+v", old)
+	}
+}
+
+func TestPongMsgFromPreviousLayoutHasNoRawTimediff(t *testing.T) {
+	raw, err := GetByte(pongMsgBeforeRawTimediff{Src_nodeID: 1, Dst_nodeID: 2, Timediff: 0.02})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParsePongMsg(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HasRawTimediff || got.RawTimediff != 0 {
+		t.Fatalf("legacy pong decoded with raw timediff: %+v", got)
+	}
+}
+
+func TestPongMsgKeepsZeroRawTimediff(t *testing.T) {
+	raw, _ := GetByte(PongMsg{Src_nodeID: 1, Dst_nodeID: 2, RawTimediff: 0, HasRawTimediff: true})
+	got, err := ParsePongMsg(raw)
+	if err != nil || !got.HasRawTimediff || got.RawTimediff != 0 {
+		t.Fatalf("got %+v err %v", got, err)
 	}
 }

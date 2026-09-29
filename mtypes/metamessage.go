@@ -127,10 +127,19 @@ type PongMsg struct {
 	TimeToAlive    float64
 	AdditionalCost float64
 	PingTime       time.Time
+	// RawTimediff is the answered ping's receiver-minus-sender wall-clock
+	// delta in seconds, unclamped, so it may be negative under clock skew.
+	// HasRawTimediff is false when the sender predates the field.
+	RawTimediff    float64
+	HasRawTimediff bool
 }
 
 func (c *PongMsg) ToString() string {
-	return "PongMsg SID:" + c.Src_nodeID.ToString() + " DID:" + c.Dst_nodeID.ToString() + " Timediff:" + S2TD(c.Timediff).String() + " TTL:" + S2TD(c.TimeToAlive).String() + " RequestID:" + strconv.Itoa(int(c.RequestID))
+	s := "PongMsg SID:" + c.Src_nodeID.ToString() + " DID:" + c.Dst_nodeID.ToString() + " Timediff:" + S2TD(c.Timediff).String() + " TTL:" + S2TD(c.TimeToAlive).String() + " RequestID:" + strconv.Itoa(int(c.RequestID))
+	if c.HasRawTimediff {
+		s += " Raw:" + S2TD(c.RawTimediff).String()
+	}
+	return s
 }
 
 func ParsePongMsg(bin []byte) (StructPlace PongMsg, err error) {
