@@ -460,17 +460,39 @@ func (peer *Peer) RoutineSequentialSender() {
 			continue
 		}
 
-		// send message and return buffer to pool
+		// send message and return buffer to pool; returning the element
+		// clears its endpoint, so keep it for the failure log
+		endpoint := elem.endpoint
 		err := peer.transmitOutbound(elem)
 		device.PutMessageBuffer(elem.buffer)
 		device.PutOutboundElement(elem)
 		if err != nil {
-			device.log.Errorf("%v - Failed to send data packet: %v", peer, err)
+			dst, src, probe := peer.sendTarget(endpoint)
+			device.log.Errorf("%v - Failed to send data packet: peer=%v dst=%s src=%s probe=%t error=%v", peer, peer.ID.ToString(), dst, src, probe, err)
 			continue
 		}
 
 		peer.keepKeyFreshSending()
 	}
+}
+
+// sendTarget describes where an outbound element was sent: the explicit
+// off-path probe endpoint, else the peer's current endpoint.
+func (peer *Peer) sendTarget(endpoint conn.Endpoint) (dst, src string, probe bool) {
+	probe = endpoint != nil
+	if endpoint == nil {
+		peer.RLock()
+		endpoint = peer.endpoint
+		peer.RUnlock()
+	}
+	if endpoint == nil {
+		return "none", "none", probe
+	}
+	src = endpoint.SrcToString()
+	if src == "" {
+		src = "default"
+	}
+	return endpoint.DstToString(), src, probe
 }
 
 // transmitOutbound sends an encrypted element. Elements aimed at an explicit
