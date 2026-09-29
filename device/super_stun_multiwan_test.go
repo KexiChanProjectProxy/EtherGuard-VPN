@@ -504,3 +504,51 @@ func TestSTUNLoopKeepsRefreshingWhileSnapshotsArrive(t *testing.T) {
 		t.Fatalf("STUN requests during 400ms of snapshot churn = %d, want >= 3", sent)
 	}
 }
+
+func TestSuperSTUNSkipsSourceWithoutRoute(t *testing.T) {
+	// Given wan2 is a tunnel interface with no route to the STUN server
+	bind := newPinningSTUNFake(40210)
+	bind.mapSource("", "203.0.113.100:3478", "203.0.113.11")
+	bind.mapSource(wan1Source.ip.String(), "203.0.113.100:3478", "203.0.113.11")
+	bind.mapSource(wan2Source.ip.String(), "203.0.113.100:3478", "203.0.113.12")
+	manager, device, ctx := newMultiWANManager(t, bind, wan1Source, wan2Source)
+	check := newFakeRouteChecker()
+	check.deny(&wan2Source, "203.0.113.100")
+	device.routeCheck = check
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun:203.0.113.100:3478"}, 200*time.Millisecond)
+
+	// Then nothing is sent from wan2 and only wan1's mapping is learned
+	if got := candidateAddresses(candidates); got != "203.0.113.11:40210" {
+		t.Fatalf("candidates = %s", got)
+	}
+	for _, record := range bind.sendRecords() {
+		if record.source == wan2Source.ip.String() {
+			t.Fatalf("STUN request sent from wan2 to %s", record.dst)
+		}
+	}
+}
+
+func TestSuperSTUNSkipsUnpinnedIPv6ServerWithoutRoute(t *testing.T) {
+	// Given a host without an IPv6 default route and an IPv6 STUN server
+	bind := newPinningSTUNFake(40211)
+	bind.mapSource("", "203.0.113.100:3478", "203.0.113.11")
+	manager, device, ctx := newMultiWANManager(t, bind)
+	check := newFakeRouteChecker()
+	check.deny(nil, "2001:db8::100")
+	device.routeCheck = check
+
+	// When
+	candidates := manager.Discover(ctx, []string{"stun:203.0.113.100:3478", "stun:[2001:db8::100]:3478"}, 200*time.Millisecond)
+
+	// Then the IPv6 server is never contacted
+	if got := candidateAddresses(candidates); got != "203.0.113.11:40211" {
+		t.Fatalf("candidates = %s", got)
+	}
+	for _, record := range bind.sendRecords() {
+		if strings.Contains(record.dst, "2001:db8::100") {
+			t.Fatalf("STUN request sent to %s", record.dst)
+		}
+	}
+}

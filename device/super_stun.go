@@ -89,13 +89,17 @@ func (manager *SuperSTUNManager) Discover(ctx context.Context, servers []string,
 			slots = append(slots, &source)
 		}
 	}
+	var routes *routeMemo
+	if manager.device != nil {
+		routes = newRouteMemo(manager.device.routeCheckerFor(manager.currentBind()), manager.device.log)
+	}
 	results := make([][]mtypes.ControlV2Candidate, len(slots))
 	var wg sync.WaitGroup
 	for i := range slots {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			results[i] = manager.discoverFrom(ctx, literals, timeout, slots[i])
+			results[i] = manager.discoverFrom(ctx, literals, timeout, slots[i], routes)
 		}(i)
 	}
 	wg.Wait()
@@ -132,10 +136,11 @@ func (manager *SuperSTUNManager) resolveAll(ctx context.Context, servers []strin
 }
 
 // discoverFrom probes every server literal from one slot: the unpinned default
-// route when source is nil, otherwise the pinned uplink. Mapped IPs are
-// deduplicated and the port-consistency check is scoped to this slot, since
-// different uplinks sit behind different NATs.
-func (manager *SuperSTUNManager) discoverFrom(ctx context.Context, literals []string, timeout time.Duration, source *stunSource) []mtypes.ControlV2Candidate {
+// route when source is nil, otherwise the pinned uplink. Servers the slot has
+// no kernel route to are skipped. Mapped IPs are deduplicated and the
+// port-consistency check is scoped to this slot, since different uplinks sit
+// behind different NATs.
+func (manager *SuperSTUNManager) discoverFrom(ctx context.Context, literals []string, timeout time.Duration, source *stunSource, routes *routeMemo) []mtypes.ControlV2Candidate {
 	var candidates []mtypes.ControlV2Candidate
 	seenIPs := make(map[string]struct{})
 	var mappedPort int
@@ -146,6 +151,9 @@ func (manager *SuperSTUNManager) discoverFrom(ctx context.Context, literals []st
 	}
 	for _, address := range literals {
 		if source != nil && !sameFamily(address, source.ip) {
+			continue
+		}
+		if server, err := netip.ParseAddrPort(address); err == nil && !routes.routable(source, server.Addr()) {
 			continue
 		}
 		mapped, err := manager.request(ctx, address, timeout, source)
