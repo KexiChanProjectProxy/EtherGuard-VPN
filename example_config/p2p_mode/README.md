@@ -63,6 +63,8 @@ DynamicRoute:
   EndpointSwitchPersistRounds: 0    # 0 = 10 consecutive rounds faster in every sample, no margin
 ```
 
+On Linux, the edge first asks the kernel (the same lookup `ip route get` performs) whether each leg has a real route, and leaves out legs that have none: IPv6 legs on a host without an IPv6 route, and IPv4 legs out of an interface that only reaches the peer because the kernel treats an unrouted destination as on-link, such as a WireGuard tunnel whose AllowedIPs do not cover the peer. Per-uplink STUN discovery uses the same check. Skipped legs are logged at verbose level as `Route check skipped leg`; if the lookup itself fails, the leg is kept.
+
 Edges also share what they observe. Besides the endpoint an edge uses for each live peer, it advertises that peer's peer-reflexive addresses: sources of the peer's authenticated packets that it did not adopt, for example a multi-WAN peer's other uplinks. When an edge's own session to that peer is down, advertised addresses become retry candidates. While the session is up they are probe-only candidates for lowest-latency selection (at most six per peer, kept for at least two broadcast rounds), so a faster path learned from another edge is measured without disturbing the working one.
 
 ## Endpoint blacklist

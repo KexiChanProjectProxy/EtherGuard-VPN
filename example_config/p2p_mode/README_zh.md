@@ -142,6 +142,8 @@ DynamicRoute:
   EndpointSwitchPersistRounds: 0    # 0 = 每個樣本都更快連續10輪，不受門檻限制
 ```
 
+在Linux上，edge會先向核心查詢每條路徑是否有真正的路由（與`ip route get`相同的查詢），並略過沒有路由的路徑：主機沒有IPv6路由時的IPv6路徑，以及只因核心把沒有路由的目的地當作on-link才能送出的IPv4上行介面，例如AllowedIPs不包含該peer的WireGuard隧道。每個上行鏈路的STUN探測也使用同樣的檢查。被略過的路徑會以`Route check skipped leg`記錄在verbose層級；若查詢本身失敗，則保留該路徑。
+
 各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge與該peer的連線中斷時，廣播來的位址會成為重試候選；連線正常時，它們只作為最低延遲選擇的探測候選（每個peer最多六個，至少保留兩個廣播週期），讓從其他edge得知的更快路徑能被量測，而不干擾目前正在使用的連線。
 
 ## Endpoint黑名單

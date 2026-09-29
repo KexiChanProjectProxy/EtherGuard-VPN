@@ -165,6 +165,8 @@ Once a peer is alive, the Edge keeps measuring every path to it: each (local upl
 
 Besides published candidates, the Edge also probes peer-reflexive addresses: sources of authenticated packets from the peer that the roaming guard did not adopt. Behind a NAT with endpoint-dependent mapping, the port a peer sees differs from the STUN-reported port, so these addresses are the only way to reach that uplink. At most four are kept per peer, and they expire after the Edge-local peer alive timeout.
 
+On Linux, the Edge first asks the kernel (the same lookup `ip route get` performs) whether each leg has a real route, and leaves out legs that have none: IPv6 legs on a host without an IPv6 route, and IPv4 legs out of an interface that only reaches the peer because the kernel treats an unrouted destination as on-link, such as a WireGuard tunnel whose AllowedIPs do not cover the peer. Per-uplink STUN discovery uses the same check. Skipped legs are logged at verbose level as `Route check skipped leg`; if the lookup itself fails, the leg is kept.
+
 | Key | Default | Purpose |
 |-----|--------:|---------|
 | DisableEndpointSelection | false | Turn lowest-latency selection off |

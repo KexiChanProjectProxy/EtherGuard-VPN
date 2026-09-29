@@ -165,6 +165,8 @@ peer存活後，Edge會持續量測通往它的每一條路徑：每個（本地
 
 除了發布的候選位址，Edge也會探測peer-reflexive位址：來自該peer、經過驗證但未被漫遊保護採用的封包來源位址。在endpoint-dependent mapping的NAT之後，peer看到的port與STUN回報的port不同，因此這些位址是抵達該上行鏈路的唯一途徑。每個peer最多保留四個，並在Edge本地peer存活超時後過期。
 
+在Linux上，Edge會先向核心查詢每條路徑是否有真正的路由（與`ip route get`相同的查詢），並略過沒有路由的路徑：主機沒有IPv6路由時的IPv6路徑，以及只因核心把沒有路由的目的地當作on-link才能送出的IPv4上行介面，例如AllowedIPs不包含該peer的WireGuard隧道。每個上行鏈路的STUN探測也使用同樣的檢查。被略過的路徑會以`Route check skipped leg`記錄在verbose層級；若查詢本身失敗，則保留該路徑。
+
 | Key | 預設值 | 用途 |
 |-----|-------:|------|
 | DisableEndpointSelection | false | 關閉最低延遲選擇 |
