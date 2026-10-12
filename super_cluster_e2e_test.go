@@ -177,7 +177,7 @@ func TestMultiSuperE2ESuperDeathFailover(t *testing.T) {
 
 	stopE2EEdgeRuntime(t, edge101, 3*time.Second)
 	stopE2EEdgeRuntime(t, edge102, 3*time.Second)
-	bBefore, bDeletesBefore := topology.supers[1].runtime.State().ExportLive()
+	bBefore, bDeletesBefore := waitE2EStateQuiet(t, topology.supers[1].runtime.State(), 200*time.Millisecond, 3*time.Second)
 	oldA := topology.supers[0]
 	oldA.proxy.Close()
 	restarted := newE2ESuperFrom(t, oldA.dir, oldA.id, oldA.clock)
@@ -373,6 +373,28 @@ func waitE2ESnapshotPeerMatching(t *testing.T, client *device.ControlHTTPClient,
 	}
 	t.Fatalf("snapshot peer %d did not converge: last error=%v last snapshot=%+v", nodeID, lastErr, lastSnapshot)
 	return mtypes.ControlV2Peer{}
+}
+
+// waitE2EStateQuiet returns state's live export once it has stayed unchanged
+// for quiet. A stopped edge's last report can still be inside the Super's HTTP
+// handler, and applying it bumps the peer version.
+func waitE2EStateQuiet(t *testing.T, state *ControlState, quiet, timeout time.Duration) ([]clusterPeerRecord, []clusterDelete) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	live, deletes := state.ExportLive()
+	stableSince := time.Now()
+	for time.Since(stableSince) < quiet {
+		if time.Now().After(deadline) {
+			t.Fatalf("control state kept changing for %v", timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+		nextLive, nextDeletes := state.ExportLive()
+		if !reflect.DeepEqual(live, nextLive) || !reflect.DeepEqual(deletes, nextDeletes) {
+			live, deletes = nextLive, nextDeletes
+			stableSince = time.Now()
+		}
+	}
+	return live, deletes
 }
 
 func stopE2EEdgeRuntime(t *testing.T, edge *e2eClusterEdge, timeout time.Duration) {
@@ -724,12 +746,20 @@ func runClusterCompressionCounterMode(t *testing.T, compression string, workload
 		t.Fatalf("decoded %s state differs (receivedAt is not exported): left=%+v/%+v right=%+v/%+v", compression, leftLive, leftTombstones, rightLive, rightTombstones)
 	}
 
-	left := clusterLinkStatsDelta(t, LinkStats(topology, 0, 1), baselineLeft)
-	right := clusterLinkStatsDelta(t, LinkStats(topology, 1, 0), baselineRight)
+	wantMessages := uint64(len(workload) * (1 + len(workload[0].reports)))
+	// The encoder counts a message only after it is on the wire, so the
+	// sender's TX counter can trail the receiver's apply briefly.
+	var left, right clusterLinkStats
+	for deadline := time.Now().Add(time.Second); ; time.Sleep(5 * time.Millisecond) {
+		left = clusterLinkStatsDelta(t, LinkStats(topology, 0, 1), baselineLeft)
+		right = clusterLinkStatsDelta(t, LinkStats(topology, 1, 0), baselineRight)
+		if (left.TX.Messages >= wantMessages && left.TX.Messages == right.RX.Messages) || time.Now().After(deadline) {
+			break
+		}
+	}
 	if left.TX.Messages != right.RX.Messages {
 		t.Fatalf("%s link message counts are asymmetric: A TX=%d B RX=%d", compression, left.TX.Messages, right.RX.Messages)
 	}
-	wantMessages := uint64(len(workload) * (1 + len(workload[0].reports)))
 	if left.TX.Messages != wantMessages {
 		t.Fatalf("%s workload messages = %d, want %d", compression, left.TX.Messages, wantMessages)
 	}

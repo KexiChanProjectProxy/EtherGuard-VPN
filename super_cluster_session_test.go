@@ -40,12 +40,9 @@ func TestClusterSessionPipeRoundTrip(t *testing.T) {
 		}
 	}
 
-	if got := a.Stats().TX.Messages; got != 1001 {
-		t.Fatalf("A TX messages = %d, want 1001 (hello + 1000 payloads)", got)
-	}
-	if got := b.Stats().TX.Messages; got != 1001 {
-		t.Fatalf("B TX messages = %d, want 1001 (hello + 1000 payloads)", got)
-	}
+	// hello + 1000 payloads
+	waitClusterSessionTX(t, a, 1001, time.Second)
+	waitClusterSessionTX(t, b, 1001, time.Second)
 	closeClusterSessionPair(t, a, b, runA, runB)
 	assertClusterSessionGoroutines(t, baseline)
 }

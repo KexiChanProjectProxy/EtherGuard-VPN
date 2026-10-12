@@ -181,6 +181,27 @@ func waitClusterSessionRX(t *testing.T, session *clusterSession, want uint64, ti
 	}
 }
 
+// waitClusterSessionTX waits until session has counted want sent messages and
+// then requires the count to be exactly want. The encoder counts a message
+// only after it is on the wire, so the peer can receive it first.
+func waitClusterSessionTX(t *testing.T, session *clusterSession, want uint64, timeout time.Duration) {
+	t.Helper()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for session.Stats().TX.Messages < want {
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("session TX messages = %d, want %d", session.Stats().TX.Messages, want)
+		}
+	}
+	if got := session.Stats().TX.Messages; got != want {
+		t.Fatalf("session TX messages = %d, want %d", got, want)
+	}
+}
+
 func waitClusterSessionRun(t *testing.T, result <-chan error, timeout time.Duration) error {
 	t.Helper()
 	timer := time.NewTimer(timeout)
