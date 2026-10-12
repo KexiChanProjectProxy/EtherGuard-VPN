@@ -56,6 +56,20 @@ P2P Mode | 此模式是受到[tinc](https://github.com/gsliepen/tinc)的啟發�
 
 ## Build
 
+### 混淆金鑰
+
+所有 WireGuard 封包都會用一把編譯進執行檔的 32 位元組金鑰做混淆。
+算法沿用 swgp-go 的 zero-overhead 模式：前 16 位元組以 AES 加密，資料封包不增加任何長度，握手封包則隨機填充並以 XChaCha20-Poly1305 加密。
+沒有金鑰時 `make` 會直接報錯，沒帶金鑰編譯的 edge 也會拒絕啟動。
+
+```bash
+openssl rand -base64 32 > obfs.key   # 或: export OBFS_KEY=...
+make
+```
+
+所有節點必須使用同一把金鑰編譯。金鑰不同或舊版沒有混淆的節點之間無法互通，請一次升級所有節點。
+CI 從 repository secret `OBFS_KEY` 讀取金鑰。拿到執行檔的人都能取出金鑰，所以這只是混淆，不是認證。
+
 ### No-vpp version
 
 編譯沒有VPP libmemif的版本。可以在一般linux電腦上使用

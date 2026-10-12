@@ -3,6 +3,9 @@ name: Go
 on:
   - workflow_dispatch
 
+env:
+  OBFS_KEY: ${{ secrets.OBFS_KEY }}
+
 jobs:
   x86_64:
       runs-on: ubuntu-20.04
@@ -69,6 +72,7 @@ jobs:
             --volume "${PWD}/artifacts:/artifacts"
           env: |
             artifact_dir: ${{ matrix.arch }}
+            OBFS_KEY: ${{ secrets.OBFS_KEY }}
           shell: /bin/sh
           install: |
             apt-get -y update

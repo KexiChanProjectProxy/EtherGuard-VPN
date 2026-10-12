@@ -55,6 +55,20 @@ P2P Mode | Inspired by [tinc](https://github.com/gsliepen/tinc), There are no Su
 
 ## Build
 
+### Obfuscation key
+
+Every WireGuard datagram is obfuscated with a 32-byte key that is compiled into the binary.
+The obfuscation follows swgp-go's zero-overhead mode: the first 16 bytes are AES-encrypted, data packets get no extra bytes, and handshake packets are randomly padded and sealed with XChaCha20-Poly1305.
+`make` refuses to build without a key, and an edge binary built without one refuses to start.
+
+```bash
+openssl rand -base64 32 > obfs.key   # or: export OBFS_KEY=...
+make
+```
+
+All nodes must be built with the same key. Binaries built with different keys, or without obfuscation, cannot talk to each other, so upgrade every node at once.
+CI reads the key from the `OBFS_KEY` repository secret. Anyone holding a binary can extract the key, so treat it as obfuscation, not as authentication.
+
 ### No-vpp version
 
 Build Etherguard.  

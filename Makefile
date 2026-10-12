@@ -4,6 +4,13 @@ BINDIR ?= $(PREFIX)/bin
 FULLTAG ?= $(shell git describe)
 export GO111MODULE := on
 
+# 32-byte key, base64, that obfuscates every WireGuard datagram. All nodes
+# must be built with the same key. Generate one with:
+#   openssl rand -base64 32 > obfs.key
+OBFS_KEY ?= $(shell cat obfs.key 2>/dev/null)
+OBFS_LDFLAGS = -X github.com/KusakabeSi/EtherGuard-VPN/device.ObfuscationKeyBase64=$(OBFS_KEY)
+REQUIRE_OBFS_KEY = $(if $(strip $(OBFS_KEY)),,$(error OBFS_KEY is empty: put the base64 of 32 random bytes in ./obfs.key or export OBFS_KEY))
+
 all: generate-version-and-build
 
 MAKEFLAGS += --no-print-directory
@@ -17,17 +24,19 @@ generate-version-and-build:
 	echo "$$ver" > version.go || true
 	@$(MAKE) etherguard-go
 
-etherguard-go: $(wildcard *.go) $(wildcard */*.go)
+etherguard-go: $(wildcard *.go) $(wildcard */*.go) $(wildcard obfs.key)
+	$(REQUIRE_OBFS_KEY)
 	go mod download && \
 	go mod tidy && \
 	go mod vendor && \
-	go build -v -ldflags '-X main.Version=$(FULLTAG)' -o "$@"
+	go build -v -ldflags '-X main.Version=$(FULLTAG) $(OBFS_LDFLAGS)' -o "$@"
 
-etherguard-go-static: $(wildcard *.go) $(wildcard */*.go)
+etherguard-go-static: $(wildcard *.go) $(wildcard */*.go) $(wildcard obfs.key)
+	$(REQUIRE_OBFS_KEY)
 	go mod download && \
 	go mod tidy && \
 	go mod vendor && \
-	CGO_ENABLED=0 go build -a -trimpath -ldflags '-X main.Version=$(FULLTAG) -s -w -extldflags "-static"'  -v -o "$@"
+	CGO_ENABLED=0 go build -a -trimpath -ldflags '-X main.Version=$(FULLTAG) $(OBFS_LDFLAGS) -s -w -extldflags "-static"'  -v -o "$@"
 
 vpp:
 	@export GIT_CEILING_DIRECTORIES="$(realpath $(CURDIR)/..)" && \
@@ -39,12 +48,13 @@ vpp:
 	@$(MAKE) etherguard-go-vpp
 
 etherguard-go-vpp: export CGO_CFLAGS ?= -I/usr/include/memif
-etherguard-go-vpp: $(wildcard *.go) $(wildcard */*.go)
+etherguard-go-vpp: $(wildcard *.go) $(wildcard */*.go) $(wildcard obfs.key)
+	$(REQUIRE_OBFS_KEY)
 	go mod download && \
 	go mod tidy && \
 	go mod vendor && \
 	patch -p0 -i govpp_remove_crcstring_check.patch && \
-	go build -v -tags vpp -ldflags '-X main.Version=$(FULLTAG)' -o "$@"
+	go build -v -tags vpp -ldflags '-X main.Version=$(FULLTAG) $(OBFS_LDFLAGS)' -o "$@"
 
 static:
 	@export GIT_CEILING_DIRECTORIES="$(realpath $(CURDIR)/..)" && \
