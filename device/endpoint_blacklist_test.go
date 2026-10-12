@@ -88,8 +88,12 @@ func TestRoutineReceiveIncomingDropsBlacklistedRemoteAndQueuesAllowedRemote(t *t
 	device.queue.handshake = newHandshakeQueue()
 	device.net.stopping.Add(1)
 	device.applyEndpointBlacklist(mtypes.ControlV2Parameters{EndpointBlacklist: []string{"10.0.0.0/8", "198.51.100.0/24"}})
-	packet := make([]byte, MessageInitiationSize)
-	packet[0] = byte(path.MessageInitiationType)
+	plain := make([]byte, MessageInitiationSize)
+	plain[0] = byte(path.MessageInitiationType)
+	packet, err := newTestObfuscator(t).Encrypt(nil, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
 	packets := []struct {
 		endpoint conn.Endpoint
 		packet   []byte

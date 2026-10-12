@@ -169,6 +169,9 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 		printExampleEdgeConf()
 		return nil
 	}
+	if err := device.ObfuscationKeyError(); err != nil {
+		return fmt.Errorf("binary has no usable obfuscation key, rebuild with OBFS_KEY set: %w", err)
+	}
 	var econfig mtypes.EdgeConfig
 	var econfigV2 mtypes.EdgeConfigV2
 	var initialBindCandidates []uint16

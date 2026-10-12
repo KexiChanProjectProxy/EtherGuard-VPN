@@ -626,12 +626,15 @@ func (peer *Peer) IsPeerAlive() bool {
 	return true
 }
 
+// SendBuffer sends buffer to the peer's current endpoint. The buffer is
+// obfuscated in place, so callers must not reuse its contents afterwards.
 func (peer *Peer) SendBuffer(buffer []byte) error {
 	return peer.SendBufferTo(buffer, nil)
 }
 
 // SendBufferTo sends buffer to endpoint, or to the peer's current endpoint
-// when endpoint is nil.
+// when endpoint is nil. The buffer is obfuscated in place, so callers must not
+// reuse its contents afterwards.
 func (peer *Peer) SendBufferTo(buffer []byte, endpoint conn.Endpoint) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
@@ -655,11 +658,32 @@ func (peer *Peer) SendBufferTo(buffer []byte, endpoint conn.Endpoint) error {
 		return errEndpointBlacklisted
 	}
 
-	err := peer.device.net.bind.Send(buffer, endpoint)
+	sent, err := peer.device.sendObfuscated(buffer, endpoint)
 	if err == nil {
-		atomic.AddUint64(&peer.stats.txBytes, uint64(len(buffer)))
+		atomic.AddUint64(&peer.stats.txBytes, uint64(sent))
 	}
 	return err
+}
+
+// sendObfuscated obfuscates a WireGuard datagram and writes it to the bind.
+// Non-handshake packets are obfuscated in place; handshake packets are padded
+// into a pooled buffer. It returns the number of bytes put on the wire.
+func (device *Device) sendObfuscated(buffer []byte, endpoint conn.Endpoint) (int, error) {
+	obfuscator, err := buildObfuscator()
+	if err != nil {
+		return 0, err
+	}
+	if len(buffer) == 0 || !isObfuscatedHandshakeType(buffer[0]) {
+		obfuscator.EncryptDataInPlace(buffer)
+		return len(buffer), device.net.bind.Send(buffer, endpoint)
+	}
+	out := device.GetMessageBuffer()
+	defer device.PutMessageBuffer(out)
+	wire, err := obfuscator.Encrypt(out[:0], buffer)
+	if err != nil {
+		return 0, err
+	}
+	return len(wire), device.net.bind.Send(wire, endpoint)
 }
 
 func (peer *Peer) String() string {

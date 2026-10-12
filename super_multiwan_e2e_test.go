@@ -97,7 +97,7 @@ func (b *e2eMultiWANBind) Send(packet []byte, endpoint conn.Endpoint) error {
 		if b.dropOutbound.Load() {
 			return nil
 		}
-		if b.dropInitiation.Load() && len(packet) >= 1 && packet[0] == uint8(path.MessageInitiationType) {
+		if b.dropInitiation.Load() && isWireInitiation(packet) {
 			return nil
 		}
 		return b.fabric.deliver(packet, endpoint.DstToString(), peerAddress)

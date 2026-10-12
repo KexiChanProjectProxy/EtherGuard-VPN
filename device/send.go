@@ -201,7 +201,10 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	var buff [MessageCookieReplySize]byte
 	writer := bytes.NewBuffer(buff[:0])
 	binary.Write(writer, binary.LittleEndian, reply)
-	device.net.bind.Send(writer.Bytes(), initiatingElem.endpoint)
+	if _, err := device.sendObfuscated(writer.Bytes(), initiatingElem.endpoint); err != nil {
+		device.log.Errorf("Failed to send cookie reply to %v: %v", initiatingElem.endpoint.DstToString(), err)
+		return err
+	}
 	return nil
 }
 

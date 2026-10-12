@@ -76,6 +76,13 @@ func (peer *Peer) keepKeyFreshReceiving() {
  * Every time the bind is updated a new routine is started for
  * IPv4 and IPv6 (separately)
  */
+func endpointString(endpoint conn.Endpoint) string {
+	if endpoint == nil {
+		return "unknown"
+	}
+	return endpoint.DstToString()
+}
+
 func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 	recvName := recv.PrettyName()
 	defer func() {
@@ -89,10 +96,15 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 
 	// receive datagrams until conn is closed
 
+	obfuscator, err := buildObfuscator()
+	if err != nil {
+		device.log.Errorf("Routine: receive incoming %s - cannot start: %v", recvName, err)
+		return
+	}
+
 	buffer := device.GetMessageBuffer()
 
 	var (
-		err         error
 		size        int
 		endpoint    conn.Endpoint
 		deathSpiral int
@@ -137,6 +149,14 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 
 		packet := buffer[:size]
 		if device.superSTUN != nil && device.superSTUN.HandlePacket(packet) {
+			continue
+		}
+		packet, err = obfuscator.DecryptInPlace(packet)
+		if err != nil {
+			device.log.Verbosef("Dropping undecryptable %s datagram from %v: %v", recvName, endpointString(endpoint), err)
+			continue
+		}
+		if len(packet) < MinMessageSize {
 			continue
 		}
 		msgType := path.Usage(packet[0])

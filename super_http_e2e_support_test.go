@@ -188,15 +188,19 @@ func (f *e2eFabric) deliver(packet []byte, destination, source string) error {
 }
 
 func (b *e2eBind) observe(packet []byte) {
-	if len(packet) > 0 && packet[0] == uint8(path.MessageResponseType) {
+	msgType, ok := wireMessageType(packet)
+	if !ok {
+		return
+	}
+	if msgType == uint8(path.MessageResponseType) {
 		select {
 		case b.responses <- struct{}{}:
 		default:
 		}
 	}
-	if len(packet) > 0 && path.Usage(packet[0]) >= path.MessageTransportType {
+	if path.Usage(msgType) >= path.MessageTransportType {
 		select {
-		case b.transports <- path.Usage(packet[0]):
+		case b.transports <- path.Usage(msgType):
 		default:
 		}
 	}
@@ -261,7 +265,7 @@ func (b *e2eBind) Send(packet []byte, endpoint conn.Endpoint) error {
 		if b.dropOutbound.Load() {
 			return nil
 		}
-		if b.dropInitiation.Load() && len(packet) >= 1 && packet[0] == uint8(path.MessageInitiationType) {
+		if b.dropInitiation.Load() && isWireInitiation(packet) {
 			return nil
 		}
 		return b.fabric.deliver(packet, endpoint.DstToString(), b.address(b.observedIP))
