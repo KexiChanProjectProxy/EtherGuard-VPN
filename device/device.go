@@ -123,8 +123,8 @@ type Device struct {
 	DupData  fixed_time_cache.Cache
 	// dupMu makes CheckNoDup's load-then-set atomic. It also serializes the
 	// cache's expiry bookkeeping, which is not safe for concurrent writers.
-	dupMu sync.Mutex
-	Version  string
+	dupMu   sync.Mutex
+	Version string
 
 	HttpPostCount uint64
 	JWTSecret     mtypes.JWTSecret

@@ -478,7 +478,7 @@ func TestProcessProbePingEchoesRequestIDWithoutTouchingLatency(t *testing.T) {
 		before := peer.SingleWayLatency.GetVal()
 
 		// When
-		err := device.process_ping(peer, mtypes.PingMsg{RequestID: 77, Src_nodeID: peer.ID, Time: device.graph.GetCurrentTime(), RequestReply: 3})
+		err := device.process_ping(peer, mtypes.PingMsg{RequestID: 77, Src_nodeID: peer.ID, Time: device.graph.GetCurrentTime(), RequestReply: 3}, nil)
 		if err != nil {
 			t.Fatalf("process_ping: %v", err)
 		}
@@ -504,6 +504,40 @@ func TestProcessProbePingEchoesRequestIDWithoutTouchingLatency(t *testing.T) {
 		}
 		device.PutMessageBuffer(params.elem.buffer)
 		device.PutOutboundElement(params.elem)
+	}
+}
+
+func TestProcessProbePingAnswersOnArrivalEndpoint(t *testing.T) {
+	// Given a stored endpoint that differs from the probe's arrival address
+	bind := newPinningSTUNFake(3001)
+	device, peer := newProberTestDevice(t, bind)
+	stored, _ := bind.ParseEndpoint("203.0.113.11:3001")
+	arrival, _ := bind.ParseEndpoint("198.51.100.12:50000")
+	peer.endpoint = stored
+	peer.endpointPinned.Store(true)
+	before := peer.SingleWayLatency.GetVal()
+
+	// When
+	err := device.process_ping(peer, mtypes.PingMsg{RequestID: 77, Src_nodeID: peer.ID, Time: device.graph.GetCurrentTime()}, arrival)
+	if err != nil {
+		t.Fatalf("process_ping: %v", err)
+	}
+
+	// Then the pong is aimed at the arrival address and nothing else moves
+	if len(device.chan_send_packet) != 1 {
+		t.Fatalf("queued %d packets, want 1 pong", len(device.chan_send_packet))
+	}
+	params := <-device.chan_send_packet
+	if params.elem.Type != path.PongPacket || params.elem.endpoint != arrival {
+		t.Fatalf("queued %v to %v, want a pong to the arrival address", params.elem.Type, params.elem.endpoint)
+	}
+	device.PutMessageBuffer(params.elem.buffer)
+	device.PutOutboundElement(params.elem)
+	if peer.endpoint != stored || !peer.endpointPinned.Load() {
+		t.Fatal("probe moved the stored endpoint or the pin")
+	}
+	if after := peer.SingleWayLatency.GetVal(); after != before {
+		t.Fatalf("SingleWayLatency changed %v -> %v", before, after)
 	}
 }
 

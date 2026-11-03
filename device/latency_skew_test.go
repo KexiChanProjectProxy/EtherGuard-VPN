@@ -67,7 +67,7 @@ func drainPongs(t *testing.T, device *Device) []mtypes.PongMsg {
 func pingFrom(t *testing.T, device *Device, peer *Peer, rawDelta time.Duration) mtypes.PongMsg {
 	t.Helper()
 	content := mtypes.PingMsg{Src_nodeID: peer.ID, Time: device.graph.GetCurrentTime().Add(-rawDelta)}
-	if err := device.process_ping(peer, content); err != nil {
+	if err := device.process_ping(peer, content, nil); err != nil {
 		t.Fatalf("process_ping: %v", err)
 	}
 	pongs := drainPongs(t, device)

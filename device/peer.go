@@ -858,17 +858,23 @@ func (peer *Peer) SetEndpointFromConnURL(connurl string, af conn.EnabledAf, af_p
 	return nil
 }
 
-func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
+// SetEndpointFromPacket applies the roaming policy to the source of an
+// authenticated packet. It reports whether that source is a path the session
+// may answer on with a handshake response: the stored endpoint now is, or
+// already was, that source, or roaming is off by policy. It reports false when
+// the source is blacklisted, or when it was refused and recorded as reflexive
+// to protect a live session.
+func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) bool {
 	peer.device.endpointBlacklistMu.RLock()
 	if peer.device.endpointBlacklisted(endpoint.DstIP()) {
 		peer.device.endpointBlacklistMu.RUnlock()
-		return
+		return false
 	}
-	endpointUpdated, localAddressChanged := func() (bool, bool) {
+	accepted, endpointUpdated, localAddressChanged := func() (bool, bool, bool) {
 		peer.Lock()
 		defer peer.Unlock()
 		if peer.disableRoaming {
-			return false, false
+			return true, false, false
 		}
 		if peer.endpoint != nil {
 			if loaded := peer.LastPacketReceivedAdd1Sec.Load(); loaded != nil {
@@ -879,13 +885,15 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 							// The prober chose this path; inbound packets from the
 							// remote's own choice must not replace it while alive.
 							peer.reflexive.note(endpoint.DstToString(), time.Now())
-							return false, false
+							// A packet from the pinned path itself is not a
+							// refusal: rekeying on that path must still work.
+							return endpoint.DstToString() == peer.endpoint.DstToString(), false, false
 						}
 						oldIP := peer.endpoint.DstIP()
 						newIP := endpoint.DstIP()
 						if oldIP != nil && newIP != nil && !oldIP.Equal(newIP) {
 							peer.reflexive.note(endpoint.DstToString(), time.Now())
-							return false, false
+							return false, false, false
 						}
 					}
 				}
@@ -896,11 +904,11 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		peer.device.SaveToConfig(peer, endpoint)
 		peer.endpoint = endpoint
 		peer.endpointPinned.Store(false)
-		return true, localAddressChanged
+		return true, true, localAddressChanged
 	}()
 	peer.device.endpointBlacklistMu.RUnlock()
 	if !endpointUpdated || !localAddressChanged {
-		return
+		return accepted
 	}
 
 	localIP := append(net.IP(nil), endpoint.SrcIP()...)
@@ -909,7 +917,7 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		probe, err := net.DialTimeout("udp", destination, 2*time.Second)
 		if err != nil {
 			peer.device.log.Errorf("local address probe for peer %v endpoint %v failed: %v", peer.ID, destination, err)
-			return
+			return accepted
 		}
 		probeLocalAddr := probe.LocalAddr()
 		localAddr, ok := probeLocalAddr.(*net.UDPAddr)
@@ -919,7 +927,7 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		}
 		if !ok {
 			peer.device.log.Errorf("local address probe for peer %v endpoint %v returned address type %T", peer.ID, destination, probeLocalAddr)
-			return
+			return accepted
 		}
 		localIP = append(localIP, localAddr.IP...)
 	}
@@ -931,6 +939,7 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 		peer.device.peers.LocalV6 = localIP
 	}
 	peer.device.peers.Unlock()
+	return accepted
 }
 
 func (peer *Peer) GetEndpointSrcStr() string {

@@ -385,13 +385,10 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 
-			// update endpoint
-			peer.SetEndpointFromPacket(elem.endpoint)
-
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)))
 
-			peer.SendHandshakeResponse()
+			peer.answerHandshakeInitiation(elem.endpoint)
 
 		case path.MessageResponseType:
 
@@ -627,7 +624,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 						fmt.Printf("Control: Recv %v S:%v D:%v TTL:%v From:%v IP:%v\n", device.sprint_received(packet_type, elem.packet[path.EgHeaderLen:]), src_nodeID.ToString(), dst_nodeID.ToString(), elem.TTL, peer.ID.ToString(), peer.GetEndpointDstStr())
 					}
 				}
-				err = device.process_received(packet_type, peer, elem.packet[path.EgHeaderLen:])
+				err = device.process_received(packet_type, peer, elem.packet[path.EgHeaderLen:], elem.endpoint)
 				if err != nil {
 					device.log.Errorf("Process %v failed S:%v D:%v TTL:%v From:%v IP:%v Len:%v: %v", packet_type.ToString(), src_nodeID.ToString(), dst_nodeID.ToString(), elem.TTL, peer.ID.ToString(), peer.GetEndpointDstStr(), len(elem.packet)-path.EgHeaderLen, err)
 				}

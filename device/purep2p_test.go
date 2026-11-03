@@ -154,7 +154,7 @@ func TestPureP2PProcessPingRepliesDirectly(t *testing.T) {
 	pinger := addTestPeer(device, 2, true)
 	addTestPeer(device, 3, true)
 
-	if err := device.process_ping(pinger, mtypes.PingMsg{Src_nodeID: 2, Time: time.Now()}); err != nil {
+	if err := device.process_ping(pinger, mtypes.PingMsg{Src_nodeID: 2, Time: time.Now()}, nil); err != nil {
 		t.Fatalf("process_ping: %v", err)
 	}
 

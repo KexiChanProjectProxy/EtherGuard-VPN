@@ -19,7 +19,7 @@ func TestProcessPingSuperModeEmitsPongToPinger(t *testing.T) {
 	}
 
 	// When
-	if err := device.process_ping(peer, content); err != nil {
+	if err := device.process_ping(peer, content, nil); err != nil {
 		t.Fatalf("process_ping: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func TestProcessPingSuperModeClampsNegativeLegacyLatencyAndEchoesTimestamp(t *te
 	}
 
 	// When
-	if err := device.process_ping(peer, content); err != nil {
+	if err := device.process_ping(peer, content, nil); err != nil {
 		t.Fatalf("process_ping: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestProcessPingSuperModeCarriesEffectiveRelayCost(t *testing.T) {
 	}
 
 	// When
-	if err := device.process_ping(peer, content); err != nil {
+	if err := device.process_ping(peer, content, nil); err != nil {
 		t.Fatalf("process_ping: %v", err)
 	}
 

@@ -100,6 +100,47 @@ func (peer *Peer) SendKeepalive() {
 	peer.SendStagedPackets()
 }
 
+// sendKeepaliveTo sends one empty transport packet to endpoint under the
+// current keypair, leaving the stored endpoint and the WireGuard timers alone.
+// Without a usable keypair it sends nothing: SendStagedPackets would answer
+// that with a handshake on the stored endpoint.
+func (peer *Peer) sendKeepaliveTo(endpoint conn.Endpoint) {
+	keypair := peer.keypairs.Current()
+	if keypair == nil || atomic.LoadUint64(&keypair.sendNonce) >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		return
+	}
+	if !peer.isRunning.Get() {
+		return
+	}
+	elem := peer.device.NewOutboundElement()
+	elem.endpoint = endpoint
+	select {
+	case peer.queue.staged <- elem:
+		peer.SendStagedPackets()
+	default:
+		peer.device.PutMessageBuffer(elem.buffer)
+		peer.device.PutOutboundElement(elem)
+	}
+}
+
+// answerHandshakeInitiation replies to an authenticated initiation on the
+// 5-tuple it arrived on, so the path the peer is punching gets a reverse
+// packet. When roaming was refused to protect a live session, the reply is a
+// transport packet under the current keypair: no response is created, so
+// BeginSymmetricSession does not run and the session stays where it is.
+//
+// ConsumeMessageInitiation has already overwritten the handshake state. A
+// refusal leaves the keypairs untouched, but an initiation of our own that is
+// in flight loses its state and is retried by the handshake timers.
+func (peer *Peer) answerHandshakeInitiation(arrival conn.Endpoint) {
+	if peer.SetEndpointFromPacket(arrival) {
+		peer.SendHandshakeResponseTo(arrival)
+		return
+	}
+	peer.device.log.Verbosef("%v - Handshake from %s refused to keep the live session", peer, arrival.DstToString())
+	peer.sendKeepaliveTo(arrival)
+}
+
 func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if !isRetry {
 		atomic.StoreUint32(&peer.timers.handshakeAttempts, 0)
@@ -146,7 +187,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	return err
 }
 
+// SendHandshakeResponse answers a consumed initiation on the stored endpoint.
 func (peer *Peer) SendHandshakeResponse() error {
+	return peer.SendHandshakeResponseTo(nil)
+}
+
+// SendHandshakeResponseTo answers a consumed initiation on endpoint. A nil
+// endpoint uses the stored endpoint.
+func (peer *Peer) SendHandshakeResponseTo(endpoint conn.Endpoint) error {
 	peer.handshake.mutex.Lock()
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
@@ -175,7 +223,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendBuffer(packet)
+	err = peer.SendBufferTo(packet, endpoint)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}

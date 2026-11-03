@@ -225,14 +225,16 @@ func (device *Device) CheckNoDup(packet []byte) bool {
 	return !ok
 }
 
-func (device *Device) process_received(msgType path.Usage, peer *Peer, body []byte) error {
+// process_received dispatches a decrypted control packet. arrival is the
+// source of that packet; only endpoint probes are answered on it.
+func (device *Device) process_received(msgType path.Usage, peer *Peer, body []byte, arrival conn.Endpoint) error {
 	switch msgType {
 	case path.PingPacket:
 		content, err := mtypes.ParsePingMsg(body)
 		if err != nil {
 			return err
 		}
-		return device.process_ping(peer, content)
+		return device.process_ping(peer, content, arrival)
 	case path.PongPacket:
 		content, err := mtypes.ParsePongMsg(body)
 		if err != nil {
@@ -333,9 +335,9 @@ func (device *Device) SendPing(peer *Peer, times int, replies int, interval floa
 	}
 }
 
-func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
+func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg, arrival conn.Endpoint) error {
 	if content.RequestID != 0 {
-		return device.process_probe_ping(peer, content)
+		return device.process_probe_ping(peer, content, arrival)
 	}
 	now := time.Now()
 	receiverTime := device.graph.WallTime(now)
@@ -421,11 +423,13 @@ func (device *Device) noteReverseSample(content mtypes.PongMsg) {
 	}
 }
 
-// process_probe_ping answers an endpoint probe straight back to the prober,
-// echoing its RequestID. Probes may arrive over slower alternate paths, so
+// process_probe_ping answers an endpoint probe straight back to the prober on
+// the path it arrived on, echoing its RequestID, so the candidate path gets a
+// reverse packet and the measured RTT covers that path both ways. A nil arrival
+// uses the stored endpoint. Probes may arrive over slower alternate paths, so
 // they never feed SingleWayLatency or the routing graph, are never spread to
 // the mesh, and never trigger a ping-back.
-func (device *Device) process_probe_ping(peer *Peer, content mtypes.PingMsg) error {
+func (device *Device) process_probe_ping(peer *Peer, content mtypes.PingMsg, arrival conn.Endpoint) error {
 	pongMessage := mtypes.PongMsg{
 		RequestID:      content.RequestID,
 		Src_nodeID:     content.Src_nodeID,
@@ -444,7 +448,7 @@ func (device *Device) process_probe_ping(peer *Peer, content mtypes.PingMsg) err
 	header.SetSrc(device.ID)
 	header.SetDst(content.Src_nodeID)
 	copy(buf[path.EgHeaderLen:], body)
-	device.SendPacket(peer, path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
+	device.SendPacketVia(peer, arrival, path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 	return nil
 }
 
