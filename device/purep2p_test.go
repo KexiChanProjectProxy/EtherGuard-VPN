@@ -271,5 +271,8 @@ func TestPureP2PBoardcastPeerMsgAddsPeerWithoutGraph(t *testing.T) {
 	if len(device.event_tryendpoint) == 0 {
 		t.Fatal("no endpoint retry signalled for the new peer")
 	}
+	if got := device.LookupPeer(newKey).GetEndpointDstStr(); got != "203.0.113.3:51820" {
+		t.Fatalf("new peer endpoint = %q, want the advertised address", got)
+	}
 	assertGraphEmpty(t, device)
 }

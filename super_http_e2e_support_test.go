@@ -139,6 +139,9 @@ type e2eFabric struct {
 	// fallback so unmapped addresses drop, emulating a NAT with
 	// endpoint-dependent mapping.
 	strict func(destination string) bool
+	// admit, when set, sees every datagram and can drop it, emulating a
+	// stateful firewall.
+	admit func(source, destination string) bool
 }
 
 func newE2EFabric() *e2eFabric {
@@ -160,6 +163,9 @@ func (f *e2eFabric) remove(address string, bind *e2eBind) {
 }
 
 func (f *e2eFabric) deliver(packet []byte, destination, source string) error {
+	if f.admit != nil && !f.admit(source, destination) {
+		return nil
+	}
 	f.mu.RLock()
 	bind := f.binds[destination]
 	if bind == nil && (f.strict == nil || !f.strict(destination)) {

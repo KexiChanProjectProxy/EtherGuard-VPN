@@ -100,16 +100,22 @@ func (peer *Peer) SendKeepalive() {
 	peer.SendStagedPackets()
 }
 
+// usableKeypair returns the current keypair if it can still encrypt, else nil.
+// With nil, SendStagedPackets starts a handshake instead of sending.
+func (peer *Peer) usableKeypair() *Keypair {
+	keypair := peer.keypairs.Current()
+	if keypair == nil || atomic.LoadUint64(&keypair.sendNonce) >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		return nil
+	}
+	return keypair
+}
+
 // sendKeepaliveTo sends one empty transport packet to endpoint under the
 // current keypair, leaving the stored endpoint and the WireGuard timers alone.
 // Without a usable keypair it sends nothing: SendStagedPackets would answer
 // that with a handshake on the stored endpoint.
 func (peer *Peer) sendKeepaliveTo(endpoint conn.Endpoint) {
-	keypair := peer.keypairs.Current()
-	if keypair == nil || atomic.LoadUint64(&keypair.sendNonce) >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
-		return
-	}
-	if !peer.isRunning.Get() {
+	if peer.usableKeypair() == nil || !peer.isRunning.Get() {
 		return
 	}
 	elem := peer.device.NewOutboundElement()
@@ -392,8 +398,8 @@ top:
 		return
 	}
 
-	keypair := peer.keypairs.Current()
-	if keypair == nil || atomic.LoadUint64(&keypair.sendNonce) >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+	keypair := peer.usableKeypair()
+	if keypair == nil {
 		peer.SendHandshakeInitiation(false)
 		return
 	}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -156,4 +158,119 @@ func TestPureP2PChainHasNoRelay(t *testing.T) {
 	a.tap.inject(ethernetFrame(c.mac, a.mac, "a-to-c-unicast"))
 	awaitFrame(t, b, "a-to-c-unicast", 5*time.Second)
 	assertNoFrame(t, c, "a-to-c-unicast", 500*time.Millisecond)
+}
+
+// e2eFirewall is the stateful filter of an endpoint-independent NAT: a guarded
+// address accepts a source only after sending to that source itself.
+type e2eFirewall struct {
+	mu      sync.Mutex
+	guarded map[string]bool
+	opened  map[[2]string]bool
+	dropped int
+}
+
+func (f *e2eFirewall) admit(source, destination string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opened[[2]string{source, destination}] = true
+	if !f.guarded[destination] || f.opened[[2]string{destination, source}] {
+		return true
+	}
+	f.dropped++
+	return false
+}
+
+func (f *e2eFirewall) droppedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.dropped
+}
+
+// hostEndpointBlacklist covers this machine's real addresses. Edges advertise
+// them, but the fabric cannot reach them, and a first advert for one would
+// hold the handshake grace on a dead address.
+func hostEndpointBlacklist(t *testing.T) []string {
+	t.Helper()
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatalf("interface addresses: %v", err)
+	}
+	var blacklist []string
+	for _, address := range addresses {
+		ipNet, ok := address.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		bits := 128
+		if ipNet.IP.To4() != nil {
+			bits = 32
+		}
+		blacklist = append(blacklist, fmt.Sprintf("%s/%d", ipNet.IP, bits))
+	}
+	return blacklist
+}
+
+// TestPureP2PFirewalledEdgesPunchThroughAdvertisedAddresses runs A - B - C with
+// A and C behind stateful firewalls. Neither can reach the other until both
+// have sent, so they must act on the address B advertises. PureP2P never
+// relays, so a frame arriving at C proves the direct path.
+func TestPureP2PFirewalledEdgesPunchThroughAdvertisedAddresses(t *testing.T) {
+	fabric := newE2EFabric()
+	fabric.strict = func(string) bool { return true }
+	nodes := map[string]*pureP2PNode{
+		"A": {id: 111, ip: "198.51.100.111", mac: net.HardwareAddr{0x02, 0, 0, 0, 1, 0x01}},
+		"B": {id: 112, ip: "198.51.100.112", mac: net.HardwareAddr{0x02, 0, 0, 0, 1, 0x02}},
+		"C": {id: 113, ip: "198.51.100.113", mac: net.HardwareAddr{0x02, 0, 0, 0, 1, 0x03}},
+	}
+	firewall := &e2eFirewall{
+		guarded: map[string]bool{"198.51.100.111:111": true, "198.51.100.113:113": true},
+		opened:  make(map[[2]string]bool),
+	}
+	fabric.admit = firewall.admit
+	blacklist := hostEndpointBlacklist(t)
+	for name, node := range nodes {
+		node.private, node.public = device.RandomKeyPair()
+		node.tap = newE2ETap()
+		bind := newE2EBind(fabric, net.ParseIP(node.ip), net.ParseIP(node.ip), uint16(node.id), true)
+		node.edge, _ = newE2EMultiWANEdge(t, e2eMultiWANEdgeConfig{
+			id:               node.id,
+			name:             "punch-" + name,
+			bind:             bind,
+			port:             uint16(node.id),
+			uplinks:          []device.UplinkForTest{},
+			p2p:              true,
+			pureP2P:          true,
+			sendPeerInterval: 0.3,
+			blacklist:        blacklist,
+			tap:              node.tap,
+		}, "", node.private)
+	}
+	a, b, c := nodes["A"], nodes["B"], nodes["C"]
+
+	// Given A and C each hold a session with the public B and nothing else
+	connectPureP2P(t, b, a)
+	connectPureP2P(t, b, c)
+	peerBAtA := connectPureP2P(t, a, b)
+	peerBAtC := connectPureP2P(t, c, b)
+	if err := peerBAtA.SendHandshakeInitiation(false); err != nil {
+		t.Fatalf("A handshake: %v", err)
+	}
+	if err := peerBAtC.SendHandshakeInitiation(false); err != nil {
+		t.Fatalf("C handshake: %v", err)
+	}
+
+	// When the flood through B teaches each of them the other's address, a
+	// direct session comes up inside the first handshake grace
+	awaitE2E(t, 15*time.Second, func() bool {
+		peerCAtA, peerAAtC := a.edge.LookupPeer(c.public), c.edge.LookupPeer(a.public)
+		return peerCAtA != nil && peerAAtC != nil && peerCAtA.IsPeerAlive() && peerAAtC.IsPeerAlive()
+	})
+	if firewall.droppedCount() == 0 {
+		t.Fatal("the firewall dropped nothing, so the test did not exercise a punch")
+	}
+
+	// Then data crosses the direct path
+	broadcast := net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	a.tap.inject(ethernetFrame(broadcast, a.mac, "punched-a-to-c"))
+	awaitFrame(t, c, "punched-a-to-c", 5*time.Second)
 }

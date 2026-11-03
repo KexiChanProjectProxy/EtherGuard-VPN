@@ -241,6 +241,24 @@ func (et *endpoint_trylist) UpdateP2P(url string) {
 	}
 }
 
+// MarkTriedP2P records that url was tried outside GetNextTry, so its expiry
+// runs as if the retry loop had picked it. It reports whether url is in the
+// P2P list: UpdateP2P leaves out blacklisted and unresolvable addresses.
+func (et *endpoint_trylist) MarkTriedP2P(url string) bool {
+	et.Lock()
+	defer et.Unlock()
+	item, ok := et.trymap_p2p[url]
+	if !ok {
+		return false
+	}
+	now := time.Now()
+	item.lastTry = now
+	if item.firstTry.IsZero() {
+		item.firstTry = now
+	}
+	return true
+}
+
 func (et *endpoint_trylist) Delete(url string) {
 	et.Lock()
 	defer et.Unlock()
@@ -454,6 +472,8 @@ type Peer struct {
 	// advertised records addresses other P2P edges advertised for this peer
 	// while it was alive. They are probe-only: the retry loop never uses them.
 	advertised reflexiveEndpoints
+	// advertisedPings limits the pings sent to advertised addresses.
+	advertisedPings advertisedPingLimiter
 
 	// SingleWayLatency is the inbound one-way latency this node reports for
 	// the peer: offset-cancelled when the peer reports its reverse sample,

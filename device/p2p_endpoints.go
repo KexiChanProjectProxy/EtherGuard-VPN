@@ -1,10 +1,14 @@
 package device
 
 import (
+	"fmt"
+	"math/rand"
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
+	"sync"
+	"time"
 
 	"github.com/KusakabeSi/EtherGuard-VPN/conn"
 	"github.com/KusakabeSi/EtherGuard-VPN/mtypes"
@@ -255,4 +259,111 @@ func (device *Device) spreadLocalEndpoints(requestID uint32) {
 		}
 		device.log.Verbosef("P2P self endpoint advertised: endpoint=%s", endpoint)
 	}
+}
+
+const (
+	// defaultAdvertisedPingInterval limits pings to one advertised address
+	// when SendPingInterval is unset.
+	defaultAdvertisedPingInterval = 16 * time.Second
+	// maxAdvertisedPingEntries bounds the limiter against a peer flooding
+	// distinct addresses.
+	maxAdvertisedPingEntries = 64
+)
+
+// advertisedPingLimiter remembers when each advertised address was last pinged.
+type advertisedPingLimiter struct {
+	mu   sync.Mutex
+	sent map[string]time.Time
+}
+
+// allow reports whether url may be pinged now and, if so, records the ping.
+func (limiter *advertisedPingLimiter) allow(url string, now time.Time, interval time.Duration) bool {
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if last, ok := limiter.sent[url]; ok && now.Sub(last) < interval {
+		return false
+	}
+	for address, last := range limiter.sent {
+		if now.Sub(last) >= interval {
+			delete(limiter.sent, address)
+		}
+	}
+	if len(limiter.sent) >= maxAdvertisedPingEntries {
+		return false
+	}
+	if limiter.sent == nil {
+		limiter.sent = make(map[string]time.Time)
+	}
+	limiter.sent[url] = now
+	return true
+}
+
+// pingAdvertisedEndpoint sends one packet to an address advertised for a live
+// peer. It opens this node's NAT toward that address; the peer does the same
+// when it learns this node's address, which makes the simultaneous open. The
+// session stays on the stored endpoint.
+//
+// The ping is an endpoint probe, so an alternate path never feeds latency state
+// and the pong comes back on the address it was sent to. Its RequestID belongs
+// to no pending probe, so the prober ignores that pong.
+func (device *Device) pingAdvertisedEndpoint(peer *Peer, url string) {
+	_, resolved, err := conn.LookupIP(url, device.enabledAf, device.EdgeConfig.AfPrefer)
+	if err != nil || resolved == peer.GetEndpointDstStr() {
+		return
+	}
+	// Without a session the staged ping would start a handshake on the stored
+	// endpoint.
+	if peer.usableKeypair() == nil {
+		return
+	}
+	device.endpointBlacklistMu.RLock()
+	blacklisted := device.endpointURLBlacklisted(resolved)
+	device.endpointBlacklistMu.RUnlock()
+	if blacklisted {
+		return
+	}
+	interval := mtypes.S2TD(device.EdgeConfig.DynamicRoute.SendPingInterval)
+	if interval <= 0 {
+		interval = defaultAdvertisedPingInterval
+	}
+	if !peer.advertisedPings.allow(url, time.Now(), interval) {
+		return
+	}
+	device.net.RLock()
+	bind := device.net.bind
+	device.net.RUnlock()
+	if bind == nil {
+		return
+	}
+	endpoint, err := bind.ParseEndpoint(resolved)
+	if err != nil {
+		return
+	}
+	packet, usage, ttl, err := device.GeneratePingPacketWithRequestID(device.ID, 0, rand.Uint32()|1)
+	if err != nil {
+		return
+	}
+	device.SendPacketVia(peer, endpoint, usage, ttl, packet, MessageTransportOffsetContent)
+}
+
+// switchToAdvertisedEndpoint moves a dead peer to an address it just learned
+// and starts the punch burst at once, instead of waiting for the retry loop to
+// reach that address. During the handshake grace the address only joins the
+// try-list.
+func (device *Device) switchToAdvertisedEndpoint(peer *Peer, url string) {
+	peer.endpoint_trylist.UpdateP2P(url)
+	defer device.signalEndpointRetry()
+	if peerEndpointRetryHeld(peer) || !peer.endpoint_trylist.MarkTriedP2P(url) {
+		return
+	}
+	if err := peer.SetEndpointFromConnURL(url, device.enabledAf, device.EdgeConfig.AfPrefer, false); err != nil {
+		return
+	}
+	// SetEndpointFromConnURL skips this when the endpoint already matches, and
+	// the grace is what limits the burst to one per window.
+	peer.lastEndpointChange.Store(time.Now().UnixNano())
+	if device.LogLevel.LogControl {
+		fmt.Printf("Control: Advertised endpoint %v for peer %v, sending hole-punching ping\n", url, peer.ID.ToString())
+	}
+	go device.SendPing(peer, int(device.EdgeConfig.DynamicRoute.ConnNextTry+1), 1, 1)
 }
