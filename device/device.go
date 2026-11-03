@@ -203,6 +203,12 @@ func (device *Device) isUp() bool {
 	return device.deviceState() == deviceStateUp
 }
 
+// pureP2P reports whether this edge is a plain L2 overlay of direct
+// neighbours: no relaying and no routing graph.
+func (device *Device) pureP2P() bool {
+	return device.EdgeConfig != nil && device.EdgeConfig.DynamicRoute.P2P.IsPure()
+}
+
 // Must hold device.peers.Lock()
 func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
 	// stop routing and processing of packets

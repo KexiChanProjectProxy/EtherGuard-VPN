@@ -104,6 +104,7 @@ Pong封包是一種`ControlMsg`，使用**flood廣播**盡量讓每個節點都�
 <a name="P2P"></a>P2P      | Description
 ------------------------|:-----
 UseP2P                  | 是否啟用P2P模式
+PureP2P                 | 純L2 overlay，不中繼、不算路由，見[PureP2P 模式](#purep2p-模式)
 SendPeerInterval        | 廣播BoardcastPeer的間格
 [GraphRecalculateSetting](../super_mode/README_zh.md#GraphRecalculateSetting) | 一些和[Floyd-Warshall演算法](https://zh.wikipedia.org/zh-tw/Floyd-Warshall算法)相關的參數
 
@@ -127,6 +128,34 @@ b1message
 ```
 因為`L2HeaderMode`是`kbdbg`，所以b1會被轉換成 12byte 的layer 2 header，b是廣播地址`FF:FF:FF:FF:FF:FF`，1是普通地址`AA:BB:CC:DD:EE:01`，message是後面的payload，然後再丟入VPN  
 此時應該要能夠在另一個視窗上看見字串b1message。前12byte被轉換回來了
+
+## PureP2P 模式
+
+PureP2P讓EtherGuard成為純粹的L2 overlay：每個edge只和自己能直連的peer處在同一個乙太網段。edge之間仍會交換peer資訊，並持續嘗試連線到每一個學到的peer，但不會中繼任何資料，也不計算路由。路由與選路完全交給tap上層，例如路由協定或SDN控制器。
+
+```yaml
+DynamicRoute:
+  P2P:
+    UseP2P: true
+    PureP2P: true
+    SendPeerInterval: 20
+```
+
+封包 | PureP2P行為
+-----|:-----
+單播資料 | 只在目的地是存活的直連peer時發送，否則丟棄
+廣播資料 | 發給每個存活的直連peer，接收端不再轉發
+Ping | 不變：以TTL 0發給每個peer，用於存活偵測與打洞
+Pong | 直接回給發送Ping的peer，不再flood
+QueryPeer / BoardcastPeer | 不變：flood並做Dup檢查，peer資訊仍能跨多跳傳播
+
+peer發現、endpoint重試與打洞、最低延遲endpoint選擇、`EndpointBlacklist`、`SaveNewPeers`、`PersistentKeepalive`都和一般P2P模式相同。
+
+`GraphRecalculateSetting`與`NextHopTable`會被忽略。NTP會被關閉，因為不再使用單向延遲。只設定`PureP2P`而沒有`UseP2P`，或同時設定SuperNodeV2區塊時，edge會拒絕啟動。
+
+同一個網路裡請全部節點都開啟或都不開啟。一般P2P節點仍會flood Pong，並期待其他節點替它中繼。
+
+上層可從UAPI的peer狀態判斷哪些鄰居存活：`endpoint`、`last_handshake_time_sec`與`rx_bytes`。
 
 ## 最低延遲endpoint選擇
 

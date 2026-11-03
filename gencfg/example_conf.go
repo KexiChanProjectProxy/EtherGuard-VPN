@@ -64,6 +64,7 @@ func GetExampleEdgeConf(templatePath string, getDemo bool) (mtypes.EdgeConfig, e
 			SaveNewPeers:         true,
 			P2P: mtypes.P2PInfo{
 				UseP2P:           false,
+				PureP2P:          false,
 				SendPeerInterval: 20,
 				GraphRecalculateSetting: mtypes.GraphRecalculateSetting{
 					StaticMode:                false,

@@ -4,3 +4,4 @@ etherguard-go-static
 vendor
 .ipynb_checkpoints
 obfs.key
+.worktrees/

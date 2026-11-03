@@ -151,3 +151,69 @@ func TestValidateDynamicRouteEndpointBlacklist(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateDynamicRoutePureP2P(t *testing.T) {
+	config := func(useP2P, pure, super bool, graph mtypes.GraphRecalculateSetting) *mtypes.EdgeConfig {
+		return &mtypes.EdgeConfig{
+			SuperNodeV2Enabled: super,
+			DynamicRoute: mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{
+				UseP2P:                  useP2P,
+				PureP2P:                 pure,
+				GraphRecalculateSetting: graph,
+			}},
+		}
+	}
+	ignoredGraph := mtypes.GraphRecalculateSetting{StaticMode: true, ManualLatency: mtypes.DistTable{1: {2: 3}}}
+	cases := []struct {
+		name   string
+		config *mtypes.EdgeConfig
+		ok     bool
+	}{
+		{"pure p2p", config(true, true, false, mtypes.GraphRecalculateSetting{}), true},
+		{"graph settings ignored", config(true, true, false, ignoredGraph), true},
+		{"without UseP2P", config(false, true, false, mtypes.GraphRecalculateSetting{}), false},
+		{"with super", config(true, true, true, mtypes.GraphRecalculateSetting{}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDynamicRoute(tc.config)
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateDynamicRoute() error = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
+func TestApplyPureP2PConfigClearsUnusedSettings(t *testing.T) {
+	newConfig := func(pure bool) *mtypes.EdgeConfig {
+		return &mtypes.EdgeConfig{
+			LogLevel:     mtypes.LoggerInfo{LogNTP: true},
+			NextHopTable: mtypes.NextHopTable{1: {2: 2}},
+			DynamicRoute: mtypes.DynamicRouteInfo{
+				NTPConfig: mtypes.NTPInfo{UseNTP: true, Servers: []string{"pool.ntp.org"}},
+				P2P: mtypes.P2PInfo{
+					UseP2P:                  true,
+					PureP2P:                 pure,
+					GraphRecalculateSetting: mtypes.GraphRecalculateSetting{StaticMode: true},
+				},
+			},
+		}
+	}
+
+	pure := newConfig(true)
+	notes := applyPureP2PConfig(pure)
+	if pure.DynamicRoute.NTPConfig.UseNTP || pure.LogLevel.LogNTP || len(pure.NextHopTable) != 0 {
+		t.Fatalf("PureP2P config not cleared: %+v", pure)
+	}
+	if len(notes) != 3 {
+		t.Fatalf("notes = %q, want NTP, NextHopTable and graph notes", notes)
+	}
+
+	regular := newConfig(false)
+	if notes := applyPureP2PConfig(regular); notes != nil {
+		t.Fatalf("regular P2P notes = %q, want none", notes)
+	}
+	if !regular.DynamicRoute.NTPConfig.UseNTP || !regular.LogLevel.LogNTP || len(regular.NextHopTable) != 1 {
+		t.Fatalf("regular P2P config changed: %+v", regular)
+	}
+}

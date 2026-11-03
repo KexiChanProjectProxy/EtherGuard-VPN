@@ -71,6 +71,14 @@ func hydrateV2EdgeConfig(econfig *mtypes.EdgeConfig, econfigV2 *mtypes.EdgeConfi
 // device consumes directly.
 func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
 	route := econfig.DynamicRoute
+	if route.P2P.PureP2P {
+		if !route.P2P.UseP2P {
+			return errors.New("DynamicRoute.P2P.PureP2P requires DynamicRoute.P2P.UseP2P: true")
+		}
+		if econfig.SuperNodeV2Enabled {
+			return errors.New("DynamicRoute.P2P.PureP2P is not supported with SuperNodeV2")
+		}
+	}
 	if err := mtypes.ValidateEndpointSelection(route.EndpointProbeInterval, route.EndpointSwitchMarginMS, route.EndpointSwitchMarginPercent, route.EndpointSwitchRounds, route.EndpointSwitchPersistRounds); err != nil {
 		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
 	}
@@ -83,6 +91,29 @@ func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
 		}
 	}
 	return nil
+}
+
+// applyPureP2PConfig clears the settings PureP2P mode does not use: the
+// routing graph is never fed, so NTP and a preset NextHopTable only cost
+// resources. It returns one note per setting it overrode.
+func applyPureP2PConfig(econfig *mtypes.EdgeConfig) (notes []string) {
+	if !econfig.DynamicRoute.P2P.IsPure() {
+		return nil
+	}
+	if econfig.DynamicRoute.NTPConfig.UseNTP {
+		notes = append(notes, "PureP2P: NTPConfig.UseNTP ignored, NTP sync disabled")
+	}
+	econfig.DynamicRoute.NTPConfig.UseNTP = false
+	econfig.LogLevel.LogNTP = false
+	if len(econfig.NextHopTable) > 0 {
+		notes = append(notes, "PureP2P: NextHopTable ignored")
+	}
+	econfig.NextHopTable = mtypes.NextHopTable{}
+	graphSetting := econfig.DynamicRoute.P2P.GraphRecalculateSetting
+	if graphSetting.StaticMode || len(graphSetting.ManualLatency) > 0 {
+		notes = append(notes, "PureP2P: GraphRecalculateSetting ignored")
+	}
+	return notes
 }
 
 func edgeSuperNodeV2Enabled(config mtypes.EdgeConfigV2) bool {
@@ -265,6 +296,9 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 	}
 	if err := validateDynamicRoute(&econfig); err != nil {
 		return err
+	}
+	for _, note := range applyPureP2PConfig(&econfig) {
+		logger.Verbosef("%s", note)
 	}
 
 	////////////////////////////////////////////////////

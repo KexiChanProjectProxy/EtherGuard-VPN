@@ -49,6 +49,34 @@ Deploy these configuration files to the corresponding nodes, and then execute
 
 you can turn off unnecessary logs to increase performance after it works.
 
+## PureP2P mode
+
+PureP2P makes EtherGuard a plain L2 overlay: every edge sits on one Ethernet segment with the peers it reaches directly, and nothing else. Edges still exchange peer information and keep trying to connect to every peer they learn about, but they never relay data and never compute routes. Routing and path selection are left to whatever runs on top of the tap, such as a routing daemon or an SDN controller.
+
+```yaml
+DynamicRoute:
+  P2P:
+    UseP2P: true
+    PureP2P: true
+    SendPeerInterval: 20
+```
+
+Packet | PureP2P behaviour
+-------|:-----
+Unicast data | Sent only when the destination is a live direct peer, otherwise dropped
+Broadcast data | Sent to every live direct peer and never re-forwarded by receivers
+Ping | Unchanged: sent to every peer with TTL 0 for liveness and hole punching
+Pong | Sent straight back to the pinger instead of being flooded
+QueryPeer / BroadcastPeer | Unchanged: flooded with the duplicate check, so peer information still crosses several hops
+
+Peer discovery, endpoint retry and hole punching, lowest-latency endpoint selection, `EndpointBlacklist`, `SaveNewPeers` and `PersistentKeepalive` work as in normal P2P mode.
+
+`GraphRecalculateSetting` and `NextHopTable` are ignored. NTP is turned off, because no one-way latency is used. The edge refuses to start when `PureP2P` is set without `UseP2P`, or together with a SuperNodeV2 block.
+
+Run PureP2P on every node of a network or on none. A normal P2P node still floods pongs and expects other nodes to relay for it.
+
+The upper layer can tell which neighbours are live from the UAPI peer state: `endpoint`, `last_handshake_time_sec` and `rx_bytes`.
+
 ## Lowest-latency endpoint selection
 
 When a peer is alive and has more than one path (several known endpoints, or several local uplinks on Linux), the edge sends one encrypted probe per path each round and moves the peer to a faster path once it wins by a clear margin for several rounds in a row, or once it is faster in every round, however slightly, for a longer run. Probes keep alternate NAT mappings alive and never feed route latency. Tune it under `DynamicRoute`:

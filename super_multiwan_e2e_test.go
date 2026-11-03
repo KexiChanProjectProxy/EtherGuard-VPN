@@ -131,6 +131,12 @@ type e2eMultiWANEdgeConfig struct {
 	disableSelection bool
 	// blacklist sets DynamicRoute.EndpointBlacklist (P2P mode only).
 	blacklist []string
+	// pureP2P sets DynamicRoute.P2P.PureP2P (P2P mode only).
+	pureP2P bool
+	// sendPeerInterval overrides DynamicRoute.P2P.SendPeerInterval; 0 keeps 5s.
+	sendPeerInterval float64
+	// tap replaces the default tap, so a test can inject and read frames.
+	tap *e2eTap
 }
 
 // newE2EMultiWANEdge starts a real edge device with fast direct-connectivity
@@ -140,6 +146,14 @@ func newE2EMultiWANEdge(t *testing.T, cfg e2eMultiWANEdgeConfig, baseURL string,
 	graph, err := path.NewGraph(3, false, mtypes.GraphRecalculateSetting{}, mtypes.NTPInfo{}, mtypes.LoggerInfo{})
 	if err != nil {
 		t.Fatalf("graph: %v", err)
+	}
+	sendPeerInterval := cfg.sendPeerInterval
+	if sendPeerInterval == 0 {
+		sendPeerInterval = 5
+	}
+	edgeTap := cfg.tap
+	if edgeTap == nil {
+		edgeTap = newE2ETap()
 	}
 	legacy := &mtypes.EdgeConfig{
 		NodeID:     cfg.id,
@@ -153,13 +167,13 @@ func newE2EMultiWANEdge(t *testing.T, cfg e2eMultiWANEdgeConfig, baseURL string,
 			SendPingInterval:         0.2,
 			EndpointProbeInterval:    0.2,
 			DupCheckTimeout:          5,
-			P2P:                      mtypes.P2PInfo{UseP2P: cfg.p2p, SendPeerInterval: 5},
+			P2P:                      mtypes.P2PInfo{UseP2P: cfg.p2p, PureP2P: cfg.pureP2P, SendPeerInterval: sendPeerInterval},
 			DisableEndpointSelection: cfg.disableSelection,
 			EndpointBlacklist:        cfg.blacklist,
 		},
 		SuperNodeV2Enabled: !cfg.p2p,
 	}
-	edge := device.NewDevice(newE2ETap(), cfg.id, cfg.bind, device.NewLogger(device.LogLevelSilent, "multiwan-e2e"), graph, "", legacy, "e2e")
+	edge := device.NewDevice(edgeTap, cfg.id, cfg.bind, device.NewLogger(device.LogLevelSilent, "multiwan-e2e"), graph, "", legacy, "e2e")
 	edge.SetUplinksForTest(cfg.uplinks)
 	if err := edge.SetPrivateKey(privateKey); err != nil {
 		edge.Close()

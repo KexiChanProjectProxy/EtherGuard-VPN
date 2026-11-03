@@ -50,6 +50,7 @@ func (c *e2eClock) Advance(delta time.Duration) {
 
 type e2eTap struct {
 	events chan tap.Event
+	reads  chan []byte
 	writes chan []byte
 	closed chan struct{}
 	once   sync.Once
@@ -58,6 +59,7 @@ type e2eTap struct {
 func newE2ETap() *e2eTap {
 	t := &e2eTap{
 		events: make(chan tap.Event, 1),
+		reads:  make(chan []byte, 8),
 		writes: make(chan []byte, 8),
 		closed: make(chan struct{}),
 	}
@@ -65,9 +67,18 @@ func newE2ETap() *e2eTap {
 	return t
 }
 
-func (t *e2eTap) Read([]byte, int) (int, error) {
-	<-t.closed
-	return 0, io.EOF
+func (t *e2eTap) Read(buffer []byte, offset int) (int, error) {
+	select {
+	case frame := <-t.reads:
+		return copy(buffer[offset:], frame), nil
+	case <-t.closed:
+		return 0, io.EOF
+	}
+}
+
+// inject hands frame to the edge as if the host wrote it to the tap.
+func (t *e2eTap) inject(frame []byte) {
+	t.reads <- append([]byte(nil), frame...)
 }
 
 func (t *e2eTap) Write(packet []byte, offset int) (int, error) {

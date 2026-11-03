@@ -548,7 +548,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 		// Set should_transfer
 		switch dst_nodeID {
 		case mtypes.NodeID_Broadcast:
-			should_transfer = true
+			should_transfer = !device.pureP2P() // PureP2P never relays data
 		case mtypes.NodeID_Spread:
 			packet := elem.packet[path.EgHeaderLen:] //packet body
 			if device.CheckNoDup(packet) {
@@ -566,7 +566,12 @@ func (peer *Peer) RoutineSequentialReceiver() {
 		case mtypes.NodeID_Invalid:
 			should_transfer = false
 		default:
-			if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
+			if device.pureP2P() {
+				should_transfer = false
+				if device.LogLevel.LogTransit {
+					fmt.Printf("Transit: PureP2P no relay S:%v D:%v From:%v\n", src_nodeID.ToString(), dst_nodeID.ToString(), peer.ID)
+				}
+			} else if device.graph.Next(device.ID, dst_nodeID) != mtypes.NodeID_Invalid {
 				should_transfer = true
 			} else {
 				device.log.Verbosef("No route to peer ID %v", dst_nodeID)

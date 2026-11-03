@@ -153,9 +153,20 @@ type NTPInfo struct {
 }
 
 type P2PInfo struct {
-	UseP2P                  bool                    `yaml:"UseP2P"`
+	UseP2P bool `yaml:"UseP2P"`
+	// PureP2P turns the P2P mesh into a plain L2 overlay of direct
+	// neighbours: no relaying, no routing graph, no NTP. Unicast goes only
+	// to a live direct peer and broadcast only to live direct peers; routing
+	// is left to whatever runs on top of the tap. Requires UseP2P.
+	// GraphRecalculateSetting and NextHopTable are ignored.
+	PureP2P                 bool                    `yaml:"PureP2P"`
 	SendPeerInterval        float64                 `yaml:"SendPeerInterval"`
 	GraphRecalculateSetting GraphRecalculateSetting `yaml:"GraphRecalculateSetting"`
+}
+
+// IsPure reports whether the edge runs P2P mode without any routing.
+func (p P2PInfo) IsPure() bool {
+	return p.UseP2P && p.PureP2P
 }
 
 type GraphRecalculateSetting struct {

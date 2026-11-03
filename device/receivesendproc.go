@@ -109,7 +109,41 @@ func (device *Device) RoutineSendPacket() {
 
 // BoardcastPacket sends packet to every directly connected peer except those
 // in skip_list. Like SendPacket, it copies packet before returning.
+// directAlivePeer returns the peer for dst only when it is a live direct
+// neighbour. PureP2P sends unicast nowhere else.
+func (device *Device) directAlivePeer(dst mtypes.Vertex) *Peer {
+	if dst >= mtypes.NodeID_Special {
+		return nil
+	}
+	peer := device.lookupPeerByID(dst)
+	if peer == nil || !peer.IsPeerAlive() {
+		return nil
+	}
+	return peer
+}
+
+// alivePeersSnapshot lists the live direct neighbours not in skip. Liveness
+// is checked after the peer lock is released.
+func (device *Device) alivePeersSnapshot(skip map[mtypes.Vertex]bool) []*Peer {
+	var alive []*Peer
+	for _, peer := range device.retryPeersSnapshot() {
+		if peer.ID >= mtypes.NodeID_Special || skip[peer.ID] {
+			continue
+		}
+		if peer.IsPeerAlive() {
+			alive = append(alive, peer)
+		}
+	}
+	return alive
+}
+
 func (device *Device) BoardcastPacket(skip_list map[mtypes.Vertex]bool, usage path.Usage, ttl uint8, packet []byte, offset int) { // Send packet to all connected peers
+	if device.pureP2P() {
+		for _, peer_out := range device.alivePeersSnapshot(skip_list) {
+			device.SendPacket(peer_out, usage, ttl, packet, offset)
+		}
+		return
+	}
 	send_list := device.graph.GetBoardcastList(device.ID)
 	for node_id := range skip_list {
 		send_list[node_id] = false
@@ -155,6 +189,9 @@ func (device *Device) SpreadPacket(skip_list map[mtypes.Vertex]bool, usage path.
 // broadcast tree rooted at src_nodeID. Like SendPacket, it copies packet
 // before returning.
 func (device *Device) TransitBoardcastPacket(src_nodeID mtypes.Vertex, in_id mtypes.Vertex, usage path.Usage, ttl uint8, packet []byte, offset int) {
+	if device.pureP2P() { // PureP2P never relays
+		return
+	}
 	node_boardcast_list, errs := device.graph.GetBoardcastThroughList(device.ID, in_id, src_nodeID)
 	if device.LogLevel.LogControl {
 		for _, err := range errs {
@@ -319,7 +356,9 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 		RawTimediff:    rawTimediff,
 		HasRawTimediff: true,
 	}
-	if device.EdgeConfig.DynamicRoute.P2P.UseP2P && time.Now().After(device.graph.NhTableExpire) {
+	// PureP2P answers the pinger directly and keeps no routing graph.
+	floodPong := device.EdgeConfig.DynamicRoute.P2P.UseP2P && !device.pureP2P()
+	if floodPong && time.Now().After(device.graph.NhTableExpire) {
 		device.graph.UpdateLatencyMulti([]mtypes.PongMsg{pongMessage}, true, false)
 	}
 	body, err := mtypes.GetByte(&pongMessage)
@@ -330,7 +369,7 @@ func (device *Device) process_ping(peer *Peer, content mtypes.PingMsg) error {
 	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
 	header.SetSrc(device.ID)
 	copy(buf[path.EgHeaderLen:], body)
-	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+	if floodPong {
 		header.SetDst(mtypes.NodeID_Spread)
 		device.SpreadPacket(make(map[mtypes.Vertex]bool), path.PongPacket, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 	} else {
@@ -416,6 +455,14 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 		return nil
 	}
 	device.noteReverseSample(content)
+	if device.pureP2P() {
+		// Pongs are unicast back to the pinger; only answers to our own
+		// pings matter, and they only trigger peer discovery.
+		if content.Src_nodeID != device.ID {
+			return nil
+		}
+		return device.queryNeighborsOnce(peer)
+	}
 	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
 		if !isValidLatencySample(content.Timediff) {
 			return nil
@@ -423,21 +470,7 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 		if time.Now().After(device.graph.NhTableExpire) {
 			device.graph.UpdateLatency(content.Src_nodeID, content.Dst_nodeID, content.Timediff, device.EdgeConfig.DynamicRoute.PeerAliveTimeout, content.AdditionalCost, true, false)
 		}
-		if !peer.AskedForNeighbor {
-			QueryPeerMsg := mtypes.QueryPeerMsg{
-				Request_ID: uint32(device.ID),
-			}
-			body, err := mtypes.GetByte(&QueryPeerMsg)
-			if err != nil {
-				return err
-			}
-			buf := make([]byte, path.EgHeaderLen+len(body))
-			header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
-			header.SetSrc(device.ID)
-			header.SetDst(mtypes.NodeID_Spread)
-			copy(buf[path.EgHeaderLen:], body)
-			device.SendPacket(peer, path.QueryPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
-		}
+		return device.queryNeighborsOnce(peer)
 	} else if content.Src_nodeID == device.ID {
 		latency := content.Timediff
 		clock := "legacy"
@@ -463,6 +496,28 @@ func (device *Device) process_pong(peer *Peer, content mtypes.PongMsg) error {
 		peer.OutboundLatency.Push(latency)
 		device.log.Verbosef("super outbound latency self=%v peer=%v measured_ms=%.3f clock=%s", device.ID, content.Dst_nodeID, latency*1000, clock)
 	}
+	return nil
+}
+
+// queryNeighborsOnce asks peer for its neighbours until it has answered a
+// QueryPeer from this node.
+func (device *Device) queryNeighborsOnce(peer *Peer) error {
+	if peer.AskedForNeighbor {
+		return nil
+	}
+	QueryPeerMsg := mtypes.QueryPeerMsg{
+		Request_ID: uint32(device.ID),
+	}
+	body, err := mtypes.GetByte(&QueryPeerMsg)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, path.EgHeaderLen+len(body))
+	header, _ := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
+	header.SetSrc(device.ID)
+	header.SetDst(mtypes.NodeID_Spread)
+	copy(buf[path.EgHeaderLen:], body)
+	device.SendPacket(peer, path.QueryPeer, device.EdgeConfig.DefaultTTL, buf, MessageTransportOffsetContent)
 	return nil
 }
 
@@ -549,11 +604,13 @@ func (device *Device) process_BoardcastPeerMsg(peer *Peer, content mtypes.Boardc
 			if device.LogLevel.LogControl {
 				fmt.Println("Control: Add new peer to local ID:" + content.NodeID.ToString() + " PubKey:" + pk.ToString())
 			}
-			if device.graph.Weight(device.ID, content.NodeID, false) == mtypes.Infinity { // add node to graph
-				device.graph.UpdateLatency(device.ID, content.NodeID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
-			}
-			if device.graph.Weight(content.NodeID, device.ID, false) == mtypes.Infinity { // add node to graph
-				device.graph.UpdateLatency(content.NodeID, device.ID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
+			if !device.pureP2P() {
+				if device.graph.Weight(device.ID, content.NodeID, false) == mtypes.Infinity { // add node to graph
+					device.graph.UpdateLatency(device.ID, content.NodeID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
+				}
+				if device.graph.Weight(content.NodeID, device.ID, false) == mtypes.Infinity { // add node to graph
+					device.graph.UpdateLatency(content.NodeID, device.ID, mtypes.Infinity, 0, device.EdgeConfig.DynamicRoute.AdditionalCost, true, false)
+				}
 			}
 			thepeer, err = device.NewPeer(pk, content.NodeID, false, 0)
 			if err != nil {
@@ -691,7 +748,7 @@ func (device *Device) RoutineRecalculateNhTable() {
 		return
 	}
 
-	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+	if !device.EdgeConfig.DynamicRoute.P2P.UseP2P || device.pureP2P() {
 		return
 	}
 	for {

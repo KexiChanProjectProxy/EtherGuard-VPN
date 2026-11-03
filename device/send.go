@@ -285,6 +285,20 @@ func (device *Device) RoutineReadFromTUN() {
 
 		if dst_nodeID != mtypes.NodeID_Broadcast {
 			var peer *Peer
+			if device.pureP2P() {
+				peer = device.directAlivePeer(dst_nodeID)
+				if peer == nil {
+					device.log.Verbosef("PureP2P: drop unicast to node %v: not a live direct peer", dst_nodeID.ToString())
+					device.PutMessageBuffer(elem.buffer)
+					device.PutOutboundElement(elem)
+					continue
+				}
+				device.chan_send_packet <- &packet_send_params{
+					peer: peer,
+					elem: elem,
+				}
+				continue
+			}
 			next_id := device.graph.Next(device.ID, dst_nodeID)
 			if next_id != mtypes.NodeID_Invalid {
 				device.peers.RLock()

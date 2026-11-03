@@ -39,6 +39,7 @@ DynamicRoute:
   SaveNewPeers: false
   P2P:
     UseP2P: true
+    PureP2P: false
     SendPeerInterval: 20
     GraphRecalculateSetting:
       StaticMode: false
