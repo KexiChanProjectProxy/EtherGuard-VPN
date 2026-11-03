@@ -490,6 +490,31 @@ func TestDocsSTUNRefresh(t *testing.T) {
 	}
 }
 
+// TestDocsP2PNATTraversal keeps the P2P punch behavior and the STUNServers
+// option documented in both languages.
+func TestDocsP2PNATTraversal(t *testing.T) {
+	t.Parallel()
+	for doc, sentences := range map[string][]string{
+		"example_config/p2p_mode/README.md": {
+			"does not move the session",
+			"20-second handshake grace",
+			"optional and empty by default",
+		},
+		"example_config/p2p_mode/README_zh.md": {
+			"不會移動工作階段",
+			"20秒的握手寬限期",
+			"此選項為選用，預設為空",
+		},
+	} {
+		content := readFile(t, doc)
+		for _, required := range append(sentences, "STUNServers", "stun:stun.example.org:3478") {
+			if !strings.Contains(content, required) {
+				t.Errorf("%s: missing %q", doc, required)
+			}
+		}
+	}
+}
+
 func TestDocsDirectConnectivity(t *testing.T) {
 	t.Parallel()
 	for _, doc := range superDocFiles {

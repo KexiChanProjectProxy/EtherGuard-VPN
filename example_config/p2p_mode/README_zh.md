@@ -175,6 +175,29 @@ DynamicRoute:
 
 各edge也會分享自己觀察到的位址。除了自己對每個存活peer使用的endpoint，edge還會廣播該peer的peer-reflexive位址：來自該peer、經過驗證但未被採用的封包來源位址，例如多WAN peer的其他上行鏈路。其他edge與該peer的連線中斷時，廣播來的位址會成為重試候選；連線正常時，它們只作為最低延遲選擇的探測候選（每個peer最多六個，至少保留兩個廣播週期），讓從其他edge得知的更快路徑能被量測，而不干擾目前正在使用的連線。
 
+## NAT穿透
+
+Edge可以穿透endpoint-independent mapping的NAT，只要雙方都向對方發送封包即可。雙方透過BoardcastPeer廣播得知彼此的位址，因此必須至少有一個雙方都已連上的edge。
+
+- 存活的peer收到來自新位址的握手時，會在該位址回覆一個資料封包，不會移動工作階段（session）。未存活的peer則會在握手來源位址回覆握手回應。
+- 得知peer的新位址時會立刻向該位址發送一個封包，每個位址在每個`SendPingInterval`內最多一次。peer存活期間，已儲存的endpoint不會改變。
+- 已斷線的peer會立刻切換到新得知的位址並開始打洞ping，然後保持20秒的握手寬限期。寬限期間得知的位址會留在重試清單中。
+- Endpoint探測會在封包到達的位址回覆，讓候選路徑雙向都有流量。
+
+若要同時廣播WireGuard socket的公網映射，請列出STUN伺服器。此選項為選用，預設為空。每一項都是`stun:` URI，可使用主機名稱或IP位址。無效的項目會讓edge在啟動時失敗。
+
+```yaml
+DynamicRoute:
+  P2P:
+    UseP2P: true
+    STUNServers:
+      - stun:stun.example.org:3478
+```
+
+請求由WireGuard socket本身發出，每60秒一次，逾時3秒，因此得到的就是peer可以使用的映射。映射位址會和本機位址一樣廣播，並經過`EndpointBlacklist`過濾。某一輪失敗時會保留上一次的映射。使用SuperNodeV2時會忽略`STUNServers`，改由SuperNode提供清單。
+
+兩個endpoint-dependent mapping的NAT之間仍然無法互通，沒有共同可達edge的兩個edge也無法交換位址。這兩種情況下PureP2P都不會中繼。
+
 ## Endpoint黑名單
 
 `DynamicRoute.EndpointBlacklist`列出永遠不可作為peer endpoint使用的IP位址或CIDR（最多256項）。被列入的位址會從每個peer的候選清單中移除，不會被探測或切換過去，不會作為本edge自己的endpoint廣播，來自這些位址的封包也會被丟棄。若某peer目前使用的endpoint被列入，會改用其他候選位址。清單在啟動時讀取；格式錯誤的項目，或在P2P模式以外設定此項，會導致啟動失敗。Super模式請改用Super的`EndpointBlacklist`參數。

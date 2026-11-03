@@ -79,6 +79,13 @@ func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
 			return errors.New("DynamicRoute.P2P.PureP2P is not supported with SuperNodeV2")
 		}
 	}
+	if route.P2P.UseP2P && !econfig.SuperNodeV2Enabled {
+		for i, server := range route.P2P.STUNServers {
+			if err := mtypes.ValidateSTUNURI(server); err != nil {
+				return fmt.Errorf("DynamicRoute.P2P.STUNServers[%d]: %w", i, err)
+			}
+		}
+	}
 	if err := mtypes.ValidateEndpointSelection(route.EndpointProbeInterval, route.EndpointSwitchMarginMS, route.EndpointSwitchMarginPercent, route.EndpointSwitchRounds, route.EndpointSwitchPersistRounds); err != nil {
 		return fmt.Errorf("DynamicRoute endpoint selection: %w", err)
 	}

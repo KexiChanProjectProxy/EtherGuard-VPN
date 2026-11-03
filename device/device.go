@@ -158,6 +158,11 @@ type Device struct {
 	closed        chan int
 	log           *Logger
 	superSTUN     *SuperSTUNManager
+	// p2pMapped holds the addresses from the last successful P2P STUN pass.
+	p2pMapped struct {
+		sync.RWMutex
+		addresses []string
+	}
 	// uplinkOverride replaces interface enumeration for tests.
 	uplinkOverride atomic.Pointer[[]stunSource]
 	// routeCheck replaces the kernel route check for tests; nil selects the
@@ -441,6 +446,7 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 		go device.RoutineSendPing(device.Chan_SendPingStart)
 		go device.RoutineProbeEndpoints()
 		go device.RoutineSpreadAllMyNeighbor()
+		go device.RoutineP2PSTUN()
 		go device.RoutineResetEndpoint()
 		go device.RoutineClearL2FIB()
 		go device.RoutineRecalculateNhTable()

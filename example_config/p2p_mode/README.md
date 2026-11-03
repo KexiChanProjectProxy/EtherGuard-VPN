@@ -95,6 +95,29 @@ On Linux, the edge first asks the kernel (the same lookup `ip route get` perform
 
 Edges also share what they observe. Besides the endpoint an edge uses for each live peer, it advertises that peer's peer-reflexive addresses: sources of the peer's authenticated packets that it did not adopt, for example a multi-WAN peer's other uplinks. When an edge's own session to that peer is down, advertised addresses become retry candidates. While the session is up they are probe-only candidates for lowest-latency selection (at most six per peer, kept for at least two broadcast rounds), so a faster path learned from another edge is measured without disturbing the working one.
 
+## NAT traversal
+
+Edges punch through NATs with endpoint-independent mapping, which only requires that both sides send to each other. They learn each other's addresses from the BoardcastPeer flood, so at least one edge both of them already reach must exist.
+
+- A live peer that receives a handshake from a new address answers with one data packet on that address and does not move the session. A peer that is not alive answers with a handshake response on the address the initiation came from.
+- Learning a peer address sends one packet there immediately, at most once per `SendPingInterval` per address. The stored endpoint does not change while the peer is alive.
+- A dead peer switches to a newly learned address immediately and starts the hole-punching pings, then holds for the 20-second handshake grace. Addresses learned during the grace wait in the retry list.
+- Endpoint probes are answered on the address they arrived from, so a candidate path gets traffic in both directions.
+
+To advertise the public mapping of the WireGuard socket as well, list STUN servers. The option is optional and empty by default. Each entry is a `stun:` URI, with a hostname or an IP address. An invalid entry stops the edge at startup.
+
+```yaml
+DynamicRoute:
+  P2P:
+    UseP2P: true
+    STUNServers:
+      - stun:stun.example.org:3478
+```
+
+Requests go out from the WireGuard socket itself, every 60 seconds with a 3-second timeout, so the mapping found is the one peers can use. Mapped addresses are advertised like local ones and pass through `EndpointBlacklist`. A failed round keeps the last mapping. `STUNServers` is ignored under SuperNodeV2, where the SuperNode supplies the list.
+
+Two NATs with endpoint-dependent mapping stay unreachable from each other, and two edges with no common reachable edge cannot exchange addresses. PureP2P does not relay in either case.
+
 ## Endpoint blacklist
 
 `DynamicRoute.EndpointBlacklist` lists IP addresses or CIDRs (up to 256) that must never be used as a peer endpoint. Blacklisted addresses are removed from every peer's candidate list, are never probed or switched to, are not advertised as this edge's own endpoints, and datagrams from them are dropped. A peer currently on a blacklisted endpoint is moved to another candidate. The list is read at startup; an invalid entry, or setting it outside P2P mode, is a startup error. In Super mode use the Super's `EndpointBlacklist` parameter instead.

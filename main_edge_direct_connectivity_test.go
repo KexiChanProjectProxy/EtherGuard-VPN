@@ -152,6 +152,38 @@ func TestValidateDynamicRouteEndpointBlacklist(t *testing.T) {
 	}
 }
 
+func TestValidateDynamicRouteP2PSTUNServers(t *testing.T) {
+	config := func(useP2P, super bool, servers ...string) *mtypes.EdgeConfig {
+		return &mtypes.EdgeConfig{
+			SuperNodeV2Enabled: super,
+			DynamicRoute: mtypes.DynamicRouteInfo{P2P: mtypes.P2PInfo{
+				UseP2P:      useP2P,
+				STUNServers: servers,
+			}},
+		}
+	}
+	cases := []struct {
+		name   string
+		config *mtypes.EdgeConfig
+		ok     bool
+	}{
+		{"none configured", config(true, false), true},
+		{"hostname", config(true, false, "stun:stun.example.org:3478"), true},
+		{"stun uri with slashes", config(true, false, "stun://198.51.100.1:3478"), true},
+		{"bad scheme", config(true, false, "turn:198.51.100.1:3478"), false},
+		{"one bad entry among good", config(true, false, "stun:198.51.100.1:3478", "nonsense"), false},
+		{"ignored under super", config(false, true, "turn:198.51.100.1:3478"), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDynamicRoute(tc.config)
+			if (err == nil) != tc.ok {
+				t.Fatalf("validateDynamicRoute() error = %v, want ok=%v", err, tc.ok)
+			}
+		})
+	}
+}
+
 func TestValidateDynamicRoutePureP2P(t *testing.T) {
 	config := func(useP2P, pure, super bool, graph mtypes.GraphRecalculateSetting) *mtypes.EdgeConfig {
 		return &mtypes.EdgeConfig{

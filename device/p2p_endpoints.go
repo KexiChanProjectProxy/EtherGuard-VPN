@@ -221,8 +221,11 @@ func (device *Device) SetUplinksForTest(uplinks []UplinkForTest) {
 	device.uplinkOverride.Store(&sources)
 }
 
+// p2pLocalEndpointURLs lists the addresses this edge advertises for itself:
+// its interface addresses and the mappings P2P STUN found for its socket.
 func (device *Device) p2pLocalEndpointURLs() []string {
-	return device.localEndpointURLs(device.activeListenPort())
+	local := device.localEndpointURLs(device.activeListenPort())
+	return device.filterEndpointURLs(mergeEndpointURLs(local, device.p2pMappedEndpointURLs()))
 }
 
 func (device *Device) spreadPeerAdvertisement(response mtypes.BoardcastPeerMsg) error {

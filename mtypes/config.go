@@ -159,8 +159,13 @@ type P2PInfo struct {
 	// to a live direct peer and broadcast only to live direct peers; routing
 	// is left to whatever runs on top of the tap. Requires UseP2P.
 	// GraphRecalculateSetting and NextHopTable are ignored.
-	PureP2P                 bool                    `yaml:"PureP2P"`
-	SendPeerInterval        float64                 `yaml:"SendPeerInterval"`
+	PureP2P          bool    `yaml:"PureP2P"`
+	SendPeerInterval float64 `yaml:"SendPeerInterval"`
+	// STUNServers lists optional stun: URIs. The edge queries them from its
+	// WireGuard socket and advertises the mapped addresses like local ones.
+	// Empty turns this off. Ignored under SuperNodeV2, whose STUN list comes
+	// from the control plane.
+	STUNServers             []string                `yaml:"STUNServers,omitempty"`
 	GraphRecalculateSetting GraphRecalculateSetting `yaml:"GraphRecalculateSetting"`
 }
 
