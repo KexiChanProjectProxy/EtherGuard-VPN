@@ -25,7 +25,7 @@ import (
 )
 
 func (device *Device) startRouteListener(bind conn.Bind) (*rwcancel.RWCancel, error) {
-	if _, ok := bind.(*conn.LinuxSocketBind); !ok {
+	if _, ok := conn.UnwrapBind(bind).(*conn.LinuxSocketBind); !ok {
 		return nil, nil
 	}
 
@@ -112,11 +112,14 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 									pePtr.peer.Unlock()
 									break
 								}
-								if uint32(pePtr.peer.endpoint.(*conn.LinuxSocketEndpoint).Src4().Ifindex) == ifidx {
+								// The endpoint may have been replaced since the
+								// request, by one of another type (a remote leg).
+								nativeEP, ok := pePtr.peer.endpoint.(*conn.LinuxSocketEndpoint)
+								if !ok || uint32(nativeEP.Src4().Ifindex) == ifidx {
 									pePtr.peer.Unlock()
 									break
 								}
-								pePtr.peer.endpoint.(*conn.LinuxSocketEndpoint).ClearSrc()
+								nativeEP.ClearSrc()
 								pePtr.peer.Unlock()
 							}
 							attr = attr[attrhdr.Len:]

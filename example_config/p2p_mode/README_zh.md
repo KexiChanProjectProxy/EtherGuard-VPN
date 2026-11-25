@@ -209,6 +209,73 @@ DynamicRoute:
     - 100.64.0.0/10     # 整個範圍
 ```
 
+## 遠端leg
+
+同一個站點常有多台機器，各自接不同的上行網路，例如一台接光纖、一台接LTE。
+遠端leg讓一個P2P edge（controller）同時使用所有這些上行，而站點上仍只跑這一個edge。
+其他每台機器各跑一個leg agent：`etherguard-go -mode leg`。
+agent不持有WireGuard金鑰，也不解密任何東西。
+它只在自己的上行與controller之間，透過站點網路上的UDP轉送已加密、已混淆的封包。
+
+controller把每個agent的每條上行當成自己的上行：
+
+- 最低延遲endpoint選擇會經每條遠端leg探測peer，並把peer切到最快的那條。
+- STUN探測也會經每條遠端leg發出，得到的映射位址會被廣播。
+- 每條遠端leg的位址加上agent的上行埠，會和本機位址一樣廣播，並經過`EndpointBlacklist`過濾。
+- 對未存活的peer發出的握手請求，也會經每條同位址族的遠端leg各送一份。
+  peer在第一份到達的路徑上回覆，所以controller自己的上行到不了的peer，也能在遠端leg上建立連線，並打開該leg的NAT。
+- agent停止送心跳時，它的leg會在`HeartbeatTimeout`後移除。
+  在這些leg上的peer會改用controller自己的上行連到同一位址，之後交給重試迴圈與探測處理。
+
+P2P模式的路由不變：路由圖只看到一個edge。
+
+在controller的edge設定中加入`Legs`：
+
+```yaml
+Legs:
+  Listen: 0.0.0.0:16400   # agent送幀的位址
+  Key: <32個隨機位元組的base64，所有agent相同>
+  Peers:                  # 選用：controller能主動連到的agent
+    - 192.168.1.21:16400
+  HeartbeatTimeout: 6     # 秒；0 = 6
+```
+
+在其他每台機器上執行`etherguard-go -mode leg -config leg.yaml`：
+
+```yaml
+AgentID: 1                       # 1-65535，站點內唯一，重啟後不變
+Listen: 0.0.0.0:16400            # 接收controller的幀；空 = 隨機埠
+Controller: 192.168.1.10:16400   # 選用：controller的Legs.Listen
+Key: <同一把key>
+ListenPort: 16386                # peer連入的上行socket；0 = 隨機
+DisabledAf:
+  IPv4: false
+  IPv6: false
+Interfaces: []                   # 選用：只用這些介面
+ExcludeInterfaces: []            # 選用：不用這些介面
+LogLevel: error
+```
+
+`etherguard-go -mode leg -example`會印出範本。
+key可用`openssl rand -base64 32`產生。
+
+controller與agent之間可能只有單向可達，例如站點網路中間有NAT。
+至少一方要知道對方的位址：agent的`Controller`、controller的`Peers`，或兩者都設。
+雙方每2秒向自己所知的對方位址送心跳。
+雙方都從通過驗證的心跳學到對方位址，因此沒設位址的一方會回到心跳的來源位址，心跳也讓這個NAT映射保持開啟。
+
+每個幀都帶有以`Key`計算的keyed BLAKE2s MAC。
+心跳必須比上次接受的更新，所以重放的心跳無法把controller或agent導向別處。
+每個幀增加58位元組，在tap MTU為1280到1400時，1500位元組的站點網路不會分片。
+
+agent每個介面、每個位址族宣告一條上行：只取運作中、有全域位址、且核心有到網際網路路由的介面，排除loopback與共享位址空間（`100.64.0.0/10`）。
+每10秒重新掃描一次。
+不該承載VPN流量的介面（例如與controller自己的上行重複的那條），請用`Interfaces`或`ExcludeInterfaces`排除。
+每條上行的來源位址綁定只在Linux上支援。
+其他系統，或使用`-bind std`時，agent每個位址族只用一條上行。
+
+`Legs`只支援P2P模式，在SuperNodeV2或static模式下會被拒絕。
+
 ## Note
 P2P模式下，PSK是禁用的。因為n個節點有n(n-1)/2的連線，每個連線都要使用不同PSK  
 又不像static mode提前設好，peer數固定不再變動  

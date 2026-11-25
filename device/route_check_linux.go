@@ -33,9 +33,10 @@ type netlinkRouteChecker struct {
 }
 
 // platformRouteChecker asks the kernel only for binds that send through real
-// kernel sockets; fake binds in tests keep every leg.
+// kernel sockets, looking through wrappers such as conn.LegBind; fake binds in
+// tests keep every leg.
 func (device *Device) platformRouteChecker(bind conn.Bind) routeChecker {
-	switch bind.(type) {
+	switch conn.UnwrapBind(bind).(type) {
 	case *conn.LinuxSocketBind, *conn.StdNetBind:
 		return &netlinkRouteChecker{fwmark: device.currentFwmark, timeout: netlinkRouteLookupTimeout}
 	}
@@ -214,6 +215,30 @@ func classifyRouteReply(reply routeReply) error {
 	}
 	if reply.family == unix.AF_INET && reply.table == unix.RT_TABLE_UNSPEC {
 		return &noRouteError{reason: "no route through the interface (on-link fallback)"}
+	}
+	return nil
+}
+
+// uplinkRouteProbe4 and uplinkRouteProbe6 are public destinations for asking
+// whether an uplink has a default route; nothing is sent to them.
+var (
+	uplinkRouteProbe4 = netip.MustParseAddr("1.1.1.1")
+	uplinkRouteProbe6 = netip.MustParseAddr("2606:4700:4700::1111")
+)
+
+// CheckUplinkRoute returns an error when the kernel definitively has no route
+// to the internet from uplink's address out of its interface, the same test
+// edges apply to every leg. A failed lookup returns nil and keeps the uplink.
+func CheckUplinkRoute(uplink Uplink, fwmark uint32) error {
+	dst := uplinkRouteProbe4
+	if !uplink.Addr.Unmap().Is4() {
+		dst = uplinkRouteProbe6
+	}
+	checker := &netlinkRouteChecker{fwmark: func() uint32 { return fwmark }, timeout: netlinkRouteLookupTimeout}
+	err := checker.routable(dst, uplink.Addr, uplink.Ifindex)
+	var noRoute *noRouteError
+	if errors.As(err, &noRoute) {
+		return err
 	}
 	return nil
 }

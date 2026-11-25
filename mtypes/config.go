@@ -44,6 +44,9 @@ type EdgeConfig struct {
 	NextHopTable          NextHopTable     `yaml:"NextHopTable"`
 	ResetEndPointInterval float64          `yaml:"ResetEndPointInterval"`
 	Peers                 []PeerInfo       `yaml:"Peers"`
+	// Legs lets this P2P edge also send through the uplinks of other
+	// machines on its site, each running a leg agent (-mode leg).
+	Legs *LegsConfig `yaml:"Legs,omitempty"`
 }
 
 type Passwords struct {

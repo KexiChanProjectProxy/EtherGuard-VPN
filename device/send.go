@@ -188,6 +188,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
+	peer.device.sendInitiationViaRemoteLegs(peer, packet)
 	peer.timersHandshakeInitiated()
 
 	return err

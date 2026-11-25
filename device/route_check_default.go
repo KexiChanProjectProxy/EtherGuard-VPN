@@ -8,3 +8,8 @@ import "github.com/KusakabeSi/EtherGuard-VPN/conn"
 func (device *Device) platformRouteChecker(conn.Bind) routeChecker {
 	return nil
 }
+
+// CheckUplinkRoute keeps every uplink off Linux.
+func CheckUplinkRoute(Uplink, uint32) error {
+	return nil
+}

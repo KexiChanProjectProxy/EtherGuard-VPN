@@ -56,6 +56,11 @@ func (m *routeMemo) routable(local *stunSource, remote netip.Addr) bool {
 	if m == nil {
 		return true
 	}
+	if local != nil && local.remote {
+		// A remote leg's routes live on its agent, which only announces
+		// uplinks that have a default route.
+		return true
+	}
 	key := routeKey{dst: remote.Unmap()}
 	if local != nil {
 		key.src = local.ip.Unmap()

@@ -31,9 +31,15 @@ type stunSource struct {
 	ip      netip.Addr
 	ifindex int
 	ifname  string
+	// remote marks an uplink of a leg agent; ifindex is then the synthetic
+	// conn.LegIfindex and the bind relays through the agent.
+	remote bool
 }
 
 func (s stunSource) String() string {
+	if s.remote {
+		return "leg:" + s.ifname + "/" + s.ip.String()
+	}
 	return s.ifname + "/" + s.ip.String() + "#" + strconv.Itoa(s.ifindex)
 }
 
@@ -178,15 +184,70 @@ func (device *Device) localEndpointURLs(port int) []string {
 	return device.filterEndpointURLs(endpointURLsForInterfaces(records, device.EdgeConfig.Interface.Name, port, device.enabledAf))
 }
 
-// stunSources lists the local uplinks that per-interface STUN discovery and
-// endpoint probing pin datagrams to.
+// stunSources lists the uplinks that per-interface STUN discovery and
+// endpoint probing pin datagrams to: the local ones, then the remote legs of
+// leg agents.
 func (device *Device) stunSources() []stunSource {
 	if device == nil {
 		return nil
 	}
+	var sources []stunSource
 	if override := device.uplinkOverride.Load(); override != nil {
-		return append([]stunSource(nil), (*override)...)
+		sources = append(sources, (*override)...)
+	} else if device.remoteLegs == nil || device.localPinning {
+		// A leg bind always pins, but it can only pin local sources when
+		// the socket bind under it can.
+		sources = device.localStunSources()
 	}
+	return append(sources, device.remoteLegSources()...)
+}
+
+// maxRemoteLegSources caps how many remote legs one round probes.
+const maxRemoteLegSources = 8
+
+// remoteLegSources lists the remote legs of the bind, in enabled families.
+func (device *Device) remoteLegSources() []stunSource {
+	if device.remoteLegs == nil {
+		return nil
+	}
+	var sources []stunSource
+	for _, leg := range device.remoteLegs.RemoteLegs() {
+		addr := leg.Addr.Addr().Unmap()
+		if (addr.Is4() && !device.enabledAf.IPv4) || (!addr.Is4() && !device.enabledAf.IPv6) {
+			continue
+		}
+		if len(sources) >= maxRemoteLegSources {
+			if device.log != nil {
+				device.log.Verbosef("Remote leg sources truncated: limit=%d", maxRemoteLegSources)
+			}
+			break
+		}
+		sources = append(sources, stunSource{ip: addr, ifindex: leg.Ifindex, ifname: leg.Key(), remote: true})
+	}
+	return sources
+}
+
+// remoteLegEndpointURLs lists the addresses of remote legs that peers may
+// reach directly: the leg's own address and its agent's socket port.
+func (device *Device) remoteLegEndpointURLs() []string {
+	if device == nil || device.remoteLegs == nil {
+		return nil
+	}
+	var urls []string
+	for _, leg := range device.remoteLegs.RemoteLegs() {
+		ip := net.IP(leg.Addr.Addr().Unmap().AsSlice())
+		if !ip.IsGlobalUnicast() || sharedAddressSpaceIP(ip) {
+			continue
+		}
+		if (ip.To4() != nil && !device.enabledAf.IPv4) || (ip.To4() == nil && !device.enabledAf.IPv6) {
+			continue
+		}
+		urls = append(urls, net.JoinHostPort(ip.String(), strconv.Itoa(int(leg.Addr.Port()))))
+	}
+	return urls
+}
+
+func (device *Device) localStunSources() []stunSource {
 	var tapName string
 	var listenV4, listenV6 netip.Addr
 	if device.EdgeConfig != nil {
@@ -204,11 +265,39 @@ func (device *Device) stunSources() []stunSource {
 	return sources
 }
 
-// UplinkForTest describes one local uplink for SetUplinksForTest.
-type UplinkForTest struct {
+// Uplink describes one local uplink: an interface and a source address on it.
+type Uplink struct {
 	Addr    netip.Addr
 	Ifindex int
 	Name    string
+}
+
+// UplinkForTest describes one local uplink for SetUplinksForTest.
+type UplinkForTest = Uplink
+
+// DiscoverUplinks lists this machine's uplinks the way an edge picks them for
+// per-uplink STUN and probing: one address per running interface and family,
+// leaving out loopback, tapName and shared address space. Leg agents use it to
+// find the uplinks they announce.
+func DiscoverUplinks(tapName string, enabledAf conn.EnabledAf, listenV4, listenV6 netip.Addr) ([]Uplink, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	records := make([]interfaceAddresses, 0, len(interfaces))
+	for _, iface := range interfaces {
+		addresses, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		records = append(records, interfaceAddresses{name: iface.Name, index: iface.Index, flags: iface.Flags, addrs: addresses})
+	}
+	sources := stunSourcesForInterfaces(records, tapName, enabledAf, listenV4, listenV6, 0)
+	uplinks := make([]Uplink, 0, len(sources))
+	for _, source := range sources {
+		uplinks = append(uplinks, Uplink{Addr: source.ip, Ifindex: source.ifindex, Name: source.ifname})
+	}
+	return uplinks, nil
 }
 
 // SetUplinksForTest replaces interface enumeration for per-uplink STUN and
@@ -221,11 +310,18 @@ func (device *Device) SetUplinksForTest(uplinks []UplinkForTest) {
 	device.uplinkOverride.Store(&sources)
 }
 
+// P2PLocalEndpointURLsForTest returns the addresses this edge advertises for
+// itself in P2P mode.
+func (device *Device) P2PLocalEndpointURLsForTest() []string {
+	return device.p2pLocalEndpointURLs()
+}
+
 // p2pLocalEndpointURLs lists the addresses this edge advertises for itself:
-// its interface addresses and the mappings P2P STUN found for its socket.
+// its interface addresses, the addresses of its remote legs, and the mappings
+// P2P STUN found for its socket and legs.
 func (device *Device) p2pLocalEndpointURLs() []string {
 	local := device.localEndpointURLs(device.activeListenPort())
-	return device.filterEndpointURLs(mergeEndpointURLs(local, device.p2pMappedEndpointURLs()))
+	return device.filterEndpointURLs(mergeEndpointURLs(local, device.remoteLegEndpointURLs(), device.p2pMappedEndpointURLs()))
 }
 
 func (device *Device) spreadPeerAdvertisement(response mtypes.BoardcastPeerMsg) error {
