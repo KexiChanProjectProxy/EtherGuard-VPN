@@ -164,16 +164,26 @@ func buildProbePairs(current string, candidates []trylistCandidate, sources []st
 	for _, candidate := range candidates {
 		addRemote(candidate.address)
 	}
+	// Each remote leg may add two pairs on top of the local budget, so a
+	// site with leg agents still probes its legs for more than one remote.
+	maxPairs := endpointProbeMaxPairs
+	if pinning {
+		for i := range sources {
+			if sources[i].remote {
+				maxPairs += 2
+			}
+		}
+	}
 	var pairs []*probePair
 	for _, remote := range remotes {
-		if len(pairs) < endpointProbeMaxPairs && (routable == nil || routable(nil, remote.Addr())) {
+		if len(pairs) < maxPairs && (routable == nil || routable(nil, remote.Addr())) {
 			pairs = append(pairs, &probePair{key: probePairKey(nil, remote.String()), remote: remote.String(), rtt: math.Inf(1)})
 		}
 		if !pinning {
 			continue
 		}
 		for i := range sources {
-			if len(pairs) >= endpointProbeMaxPairs {
+			if len(pairs) >= maxPairs {
 				break
 			}
 			source := sources[i]
@@ -194,7 +204,9 @@ func buildProbePairs(current string, candidates []trylistCandidate, sources []st
 
 // currentPairKey maps the peer's live endpoint to a pair key: the pinned
 // source it uses when that source is still a known uplink, else the default
-// route.
+// route. A remote leg endpoint matches its leg by interface index, so a leg
+// whose address equals a local one is never confused with it; one whose leg
+// is gone gets a key no pair has, which any measured pair may replace.
 func currentPairKey(endpoint conn.Endpoint, sources []stunSource) string {
 	if endpoint == nil {
 		return ""
@@ -204,10 +216,19 @@ func currentPairKey(endpoint conn.Endpoint, sources []stunSource) string {
 		return ""
 	}
 	remote := netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String()
+	if leg, ok := endpoint.(conn.SourceIfindexer); ok {
+		for i := range sources {
+			if sources[i].remote && sources[i].ifindex == leg.SrcIfindex() {
+				return probePairKey(&sources[i], remote)
+			}
+		}
+		src, _ := netip.AddrFromSlice(endpoint.SrcIP())
+		return probePairKey(&stunSource{ip: src.Unmap(), ifindex: leg.SrcIfindex(), remote: true}, remote)
+	}
 	if src, ok := netip.AddrFromSlice(endpoint.SrcIP()); ok && !src.IsUnspecified() {
 		src = src.Unmap()
 		for i := range sources {
-			if sources[i].ip == src {
+			if !sources[i].remote && sources[i].ip == src {
 				return probePairKey(&sources[i], remote)
 			}
 		}

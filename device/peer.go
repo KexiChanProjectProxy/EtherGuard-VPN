@@ -919,7 +919,10 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) bool {
 				}
 			}
 		}
-		localAddressChanged := peer.ID == mtypes.NodeID_SuperNode &&
+		// A remote leg's source belongs to another machine, so it says
+		// nothing about this machine's local address.
+		_, viaLeg := endpoint.(conn.LegEndpoint)
+		localAddressChanged := peer.ID == mtypes.NodeID_SuperNode && !viaLeg &&
 			(peer.endpoint == nil || !peer.endpoint.DstIP().Equal(endpoint.DstIP()))
 		peer.device.SaveToConfig(peer, endpoint)
 		peer.endpoint = endpoint

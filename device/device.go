@@ -170,6 +170,12 @@ type Device struct {
 	routeCheck    routeChecker
 	superHTTP     *SuperHTTPRuntime
 	controlCancel context.CancelFunc
+
+	// remoteLegs lists the uplinks of leg agents when the bind relays
+	// through them; localPinning reports whether the socket bind under it can
+	// pin local sources.
+	remoteLegs   conn.RemoteLegLister
+	localPinning bool
 }
 
 type IdAndTime struct {
@@ -414,6 +420,7 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 	device.Version = version
 	device.JWTSecret = mtypes.ByteSlice2Byte32(mtypes.RandomBytes(32, []byte(fmt.Sprintf("%v", time.Now()))))
 	device.enabledAf = bind.EnabledAf()
+	device.attachRemoteLegs(bind)
 
 	device.state_hashes.NhTable.Store("")
 	device.state_hashes.Peer.Store("")

@@ -97,7 +97,30 @@ func validateDynamicRoute(econfig *mtypes.EdgeConfig) error {
 			return fmt.Errorf("DynamicRoute.EndpointBlacklist: %w", err)
 		}
 	}
+	if econfig.Legs != nil {
+		if !route.P2P.UseP2P || econfig.SuperNodeV2Enabled {
+			return errors.New("Legs is only supported in P2P mode")
+		}
+		if _, err := econfig.Legs.BindConfig(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// edgeBind builds the socket bind, wrapped in a leg bind when the edge relays
+// through leg agents. validateDynamicRoute has checked the Legs block.
+func edgeBind(econfig *mtypes.EdgeConfig, enabledAf conn.EnabledAf, bindmode string, logger *device.Logger) (conn.Bind, error) {
+	bind := conn.NewDefaultBind(enabledAf, bindmode, econfig.FwMark)
+	if econfig.Legs == nil {
+		return bind, nil
+	}
+	legConfig, err := econfig.Legs.BindConfig()
+	if err != nil {
+		return nil, err
+	}
+	legConfig.Logf = logger.Verbosef
+	return conn.NewLegBind(bind, legConfig), nil
 }
 
 // applyPureP2PConfig clears the settings PureP2P mode does not use: the
@@ -334,7 +357,11 @@ func runEdge(runConfig edgeRunConfig) (err error) {
 			Results:    results,
 		})
 	} else {
-		the_device = device.NewDevice(thetap, econfig.NodeID, conn.NewDefaultBind(EnabledAf, runConfig.bindmode, econfig.FwMark), logger, graph, runConfig.configPath, &econfig, Version)
+		bind, err := edgeBind(&econfig, EnabledAf, runConfig.bindmode, logger)
+		if err != nil {
+			return err
+		}
+		the_device = device.NewDevice(thetap, econfig.NodeID, bind, logger, graph, runConfig.configPath, &econfig, Version)
 	}
 	defer the_device.Close()
 	pk, err := device.Str2PriKey(econfig.PrivKey)

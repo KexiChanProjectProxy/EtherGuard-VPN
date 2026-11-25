@@ -130,3 +130,70 @@ DynamicRoute:
 ```
 
 [WIP]
+
+## Remote legs
+
+A site often has several machines with different uplinks, for example one on fiber and one on LTE.
+Remote legs let one P2P edge (the controller) use all of them while it stays the only edge on the site.
+Each other machine runs a leg agent, `etherguard-go -mode leg`.
+The agent holds no WireGuard keys and never decrypts anything.
+It relays already encrypted and obfuscated datagrams between its own uplinks and the controller, over UDP on the site network.
+
+The controller treats every uplink of every agent like one of its own uplinks:
+
+- Lowest-latency endpoint selection probes peers through each remote leg and switches a peer to the fastest one.
+- STUN discovery queries the STUN servers through each remote leg, and the mapped addresses are advertised.
+- The address of each remote leg, with the agent's uplink port, is advertised like a local address and passes through `EndpointBlacklist`.
+- A handshake initiation for a peer that is not alive also goes out through every remote leg of the peer's family.
+  The peer answers the first copy on that copy's path, so a peer the controller's own uplinks cannot reach comes up on a remote leg, and the leg's NAT is opened toward it.
+- When an agent stops sending heartbeats, its legs go away after `HeartbeatTimeout`.
+  Peers on those legs move to the controller's own uplink for the same address, and the retry loop and the prober take over from there.
+
+Routing in P2P mode does not change: the routing graph sees one edge.
+
+On the controller, add a `Legs` block to the edge config:
+
+```yaml
+Legs:
+  Listen: 0.0.0.0:16400   # where agents send frames
+  Key: <base64 of 32 random bytes, the same on every agent>
+  Peers:                  # optional: agents the controller can reach by itself
+    - 192.168.1.21:16400
+  HeartbeatTimeout: 6     # seconds; 0 = 6
+```
+
+On each other machine, run `etherguard-go -mode leg -config leg.yaml` with:
+
+```yaml
+AgentID: 1                       # 1-65535, unique on the site, stable across restarts
+Listen: 0.0.0.0:16400            # frames from the controller; empty = random port
+Controller: 192.168.1.10:16400   # optional: the controller's Legs.Listen
+Key: <the same key>
+ListenPort: 16386                # uplink socket that peers reach; 0 = random
+DisabledAf:
+  IPv4: false
+  IPv6: false
+Interfaces: []                   # optional: only these interfaces
+ExcludeInterfaces: []            # optional: never these interfaces
+LogLevel: error
+```
+
+`etherguard-go -mode leg -example` prints a template.
+Generate the key with `openssl rand -base64 32`.
+
+The controller and an agent may reach each other in one direction only, for example through NAT on the site network.
+At least one side must know the other's address: the agent's `Controller`, or an entry in the controller's `Peers`, or both.
+Both sides send a heartbeat every 2 seconds to every address they know for the other side.
+Each side learns the other's address from authenticated heartbeats, so the side without an address answers on the address the heartbeats come from, and the heartbeats keep that NAT mapping open.
+
+Every frame carries a keyed BLAKE2s MAC under `Key`.
+Heartbeats must be newer than the last accepted one, so a replayed heartbeat cannot redirect the controller or an agent.
+A frame adds 58 bytes to a datagram, which fits a 1500-byte site network for the usual tap MTU of 1280 to 1400.
+
+The agent announces one uplink per interface and address family: running interfaces with a global address and a kernel route to the internet, leaving out loopback and shared address space (`100.64.0.0/10`).
+It rescans every 10 seconds.
+Use `Interfaces` or `ExcludeInterfaces` when an interface should not carry VPN traffic, such as an uplink that duplicates the controller's own.
+Source pinning per uplink is Linux only.
+On other systems, and with `-bind std`, an agent uses one uplink per address family.
+
+`Legs` is supported only in P2P mode and is refused with SuperNodeV2 or in static mode.

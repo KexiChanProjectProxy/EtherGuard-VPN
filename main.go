@@ -35,7 +35,7 @@ const (
 
 var (
 	tconfig      = flag.String("config", "", "Config path for the interface.")
-	mode         = flag.String("mode", "", "Running mode. [super|edge|solve|gencfg]")
+	mode         = flag.String("mode", "", "Running mode. [super|edge|leg|solve|gencfg]")
 	printExample = flag.Bool("example", false, "Print example config")
 	cfgmode      = flag.String("cfgmode", "", "Running mode for generated config. [none|super|p2p]")
 	bind         = flag.String("bind", "linux", "UDP socket bind mode. [linux|std]\nYou may need std mode if you want to run Etherguard under WSL.")
@@ -77,6 +77,8 @@ func main() {
 		err = Edge(*tconfig, !*nouapi, *printExample, *bind)
 	case "super":
 		err = Super(*tconfig, !*nouapi, *printExample, *bind)
+	case "leg":
+		err = Leg(*tconfig, *printExample, *bind)
 	case "solve":
 		err = path.Solve(*tconfig, *printExample)
 	case "gencfg":
