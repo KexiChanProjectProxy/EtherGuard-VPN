@@ -29,6 +29,17 @@ type e2eLegSite struct {
 
 func startE2ELegAgent(t *testing.T, fabric *e2eFabric, controller netip.AddrPort) *legAgent {
 	t.Helper()
+	agent := newE2ELegAgent(t, fabric, controller)
+	if err := agent.Start(); err != nil {
+		t.Fatalf("agent start: %v", err)
+	}
+	return agent
+}
+
+// newE2ELegAgent builds an agent whose uplink is 203.0.113.50:150 on the
+// fabric; an invalid controller makes it wait for the controller to call.
+func newE2ELegAgent(t *testing.T, fabric *e2eFabric, controller netip.AddrPort) *legAgent {
+	t.Helper()
 	key, err := conn.ParseLegKey(e2eLegKey)
 	if err != nil {
 		t.Fatal(err)
@@ -46,13 +57,17 @@ func startE2ELegAgent(t *testing.T, fabric *e2eFabric, controller netip.AddrPort
 			return []device.Uplink{{Addr: netip.MustParseAddr("203.0.113.50"), Ifindex: 7, Name: "wan-b"}}, nil
 		},
 	})
-	if err := agent.Start(); err != nil {
-		t.Fatalf("agent start: %v", err)
-	}
 	return agent
 }
 
 func newE2ELegSite(t *testing.T) *e2eLegSite {
+	t.Helper()
+	return newE2ELegSiteWith(t, false)
+}
+
+// newE2ELegSiteWith builds the site; controllerCalls makes the agent know no
+// controller address, so only the controller's Legs.Peers entry connects them.
+func newE2ELegSiteWith(t *testing.T, controllerCalls bool) *e2eLegSite {
 	t.Helper()
 	site := &e2eLegSite{fabric: newE2EFabric()}
 	// The controller's own uplink and C cannot reach each other.
@@ -62,10 +77,19 @@ func newE2ELegSite(t *testing.T) *e2eLegSite {
 			!(strings.HasPrefix(source, c) && strings.HasPrefix(destination, a))
 	}
 	key, _ := conn.ParseLegKey(e2eLegKey)
+	var peers []netip.AddrPort
+	if controllerCalls {
+		site.agent = newE2ELegAgent(t, site.fabric, netip.AddrPort{})
+		if err := site.agent.Start(); err != nil {
+			t.Fatalf("agent start: %v", err)
+		}
+		peers = []netip.AddrPort{site.agent.LocalAddr()}
+	}
 	inner := newE2EBind(site.fabric, net.ParseIP("192.0.2.101"), net.ParseIP("192.0.2.101"), 101, true)
 	site.legBind = conn.NewLegBind(inner, conn.LegConfig{
 		Listen:           netip.MustParseAddrPort("127.0.0.1:0"),
 		Key:              key,
+		Peers:            peers,
 		HeartbeatTimeout: 3 * time.Second,
 	})
 	privateA, pubA := device.RandomKeyPair()
@@ -75,7 +99,9 @@ func newE2ELegSite(t *testing.T) *e2eLegSite {
 	bindC := newE2EBind(site.fabric, net.ParseIP("198.51.100.103"), net.ParseIP("198.51.100.103"), 103, true)
 	site.edgeC, _ = newE2EMultiWANEdge(t, e2eMultiWANEdgeConfig{id: 103, name: "edge-c", bind: bindC, port: 103, p2p: true, uplinks: []device.UplinkForTest{}}, "", privateC)
 
-	site.agent = startE2ELegAgent(t, site.fabric, site.legBind.LocalAddr())
+	if !controllerCalls {
+		site.agent = startE2ELegAgent(t, site.fabric, site.legBind.LocalAddr())
+	}
 	t.Cleanup(func() {
 		if site.agent != nil {
 			site.agent.Close()
@@ -154,5 +180,19 @@ func TestP2PControllerAdvertisesRemoteLegAddresses(t *testing.T) {
 			}
 		}
 		return false
+	})
+}
+
+func TestP2PControllerReachesAgentThatOnlyListens(t *testing.T) {
+	// Given an agent that knows no controller address: only the controller
+	// can start the exchange, through its Legs.Peers entry
+	site := newE2ELegSiteWith(t, true)
+
+	// When the controller reaches C
+	site.peerC.SendHandshakeInitiation(false)
+
+	// Then the session runs over the agent's uplink
+	awaitE2E(t, 10*time.Second, func() bool {
+		return site.peerC.IsPeerAlive() && onRemoteLeg(site.peerC)
 	})
 }

@@ -186,9 +186,14 @@ At least one side must know the other's address: the agent's `Controller`, or an
 Both sides send a heartbeat every 2 seconds to every address they know for the other side.
 Each side learns the other's address from authenticated heartbeats, so the side without an address answers on the address the heartbeats come from, and the heartbeats keep that NAT mapping open.
 
-Every frame carries a keyed BLAKE2s MAC under `Key`.
-Heartbeats must be newer than the last accepted one, so a replayed heartbeat cannot redirect the controller or an agent.
-A frame adds 58 bytes to a datagram, which fits a 1500-byte site network for the usual tap MTU of 1280 to 1400.
+Every frame carries a keyed BLAKE2s MAC under `Key`, and a direction flag, so neither side accepts a frame it sent itself.
+A side trusts a heartbeat only when it is newer than the last one from the address already in use.
+A new address, a restarted side, or a side back after `HeartbeatTimeout` must first echo a random challenge, which takes one extra round trip.
+So a recorded heartbeat replayed later cannot redirect the controller or an agent, and an agent whose clock went backwards still gets back in.
+Data frames are not checked for replay: WireGuard drops replayed packets at the far end.
+
+A frame adds 58 bytes to each datagram.
+On a 1500-byte site network, keep the tap MTU at 1340 or less so frames do not fragment; the 1280 of the example configs fits.
 
 The agent announces one uplink per interface and address family: running interfaces with a global address and a kernel route to the internet, leaving out loopback and shared address space (`100.64.0.0/10`).
 It rescans every 10 seconds.

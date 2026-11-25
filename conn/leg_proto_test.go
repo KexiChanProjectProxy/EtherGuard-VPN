@@ -68,30 +68,32 @@ func TestLegFrameRejectsTamperingAndWrongKey(t *testing.T) {
 }
 
 func TestLegStateRoundTrip(t *testing.T) {
-	legs := []LegInfo{
+	in := LegState{Nonce: 11, Echo: 22, Legs: []LegInfo{
 		{LegID: 0, Name: "eth0", Addr: netip.MustParseAddrPort("198.51.100.4:16386")},
 		{LegID: 5, Name: "wwan0", Addr: netip.MustParseAddrPort("[2001:db8:1::5]:16386")},
-	}
-	out, err := ParseLegState(AppendLegState(nil, legs))
+	}}
+	out, err := ParseLegState(AppendLegState(nil, in))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if len(out) != 2 || out[0] != legs[0] || out[1] != legs[1] {
+	if out.Nonce != 11 || out.Echo != 22 || len(out.Legs) != 2 || out.Legs[0] != in.Legs[0] || out.Legs[1] != in.Legs[1] {
 		t.Fatalf("got %+v", out)
 	}
-	empty, err := ParseLegState(AppendLegState(nil, nil))
-	if err != nil || len(empty) != 0 {
+	empty, err := ParseLegState(AppendLegState(nil, LegState{}))
+	if err != nil || len(empty.Legs) != 0 {
 		t.Fatalf("empty state: %v %v", empty, err)
 	}
 }
 
 func TestLegStateRejectsMalformedBodies(t *testing.T) {
-	good := AppendLegState(nil, []LegInfo{{LegID: 1, Name: "eth0", Addr: netip.MustParseAddrPort("198.51.100.4:1")}})
+	good := AppendLegState(nil, LegState{Legs: []LegInfo{{LegID: 1, Name: "eth0", Addr: netip.MustParseAddrPort("198.51.100.4:1")}}})
+	tooMany := append(make([]byte, 16), MaxLegsPerAgent+1)
 	for name, body := range map[string][]byte{
 		"empty":     nil,
+		"no legs":   make([]byte, 16),
 		"truncated": good[:len(good)-1],
 		"trailing":  append(append([]byte(nil), good...), 0),
-		"too many":  {MaxLegsPerAgent + 1},
+		"too many":  tooMany,
 	} {
 		if _, err := ParseLegState(body); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -99,28 +101,116 @@ func TestLegStateRejectsMalformedBodies(t *testing.T) {
 	}
 }
 
-func TestLegReplayGuard(t *testing.T) {
-	var guard LegReplayGuard
+func TestLegFrameCarriesDirectionFlag(t *testing.T) {
+	key := testLegKey(1)
+	out, err := DecodeLegFrame(key, AppendLegFrame(nil, key, LegFrame{Type: LegFrameData, Flags: LegFlagFromController}))
+	if err != nil || out.Flags&LegFlagFromController == 0 {
+		t.Fatalf("flags %x, %v", out.Flags, err)
+	}
+}
+
+var (
+	sessionHome  = netip.MustParseAddrPort("192.168.1.21:16400")
+	sessionOther = netip.MustParseAddrPort("192.168.1.66:4000")
+)
+
+func TestLegSessionNeedsEchoBeforeTrustingAnAddress(t *testing.T) {
+	var s LegSession
 	now := time.Unix(1000, 0)
 	timeout := 6 * time.Second
-	steps := []struct {
-		epoch   uint64
-		counter uint64
-		at      time.Duration
-		want    bool
-	}{
-		{10, 5, 0, true},
-		{10, 5, time.Second, false},      // replay
-		{10, 4, time.Second, false},      // older
-		{10, 6, time.Second, true},       // newer
-		{9, 100, 2 * time.Second, false}, // older epoch
-		{11, 1, 3 * time.Second, true},   // restart
-		{1, 1, 20 * time.Second, true},   // silent past the timeout: any epoch
+	challenge, _ := s.Nonces()
+
+	// A first frame from anywhere is answered with a challenge.
+	if accepted, reply := s.Observe(1, 1, LegState{Nonce: 77}, sessionHome, now, timeout); accepted || !reply {
+		t.Fatalf("first frame: accepted=%v reply=%v", accepted, reply)
 	}
-	for i, step := range steps {
-		if got := guard.Accept(step.epoch, step.counter, now.Add(step.at), timeout); got != step.want {
-			t.Fatalf("step %d: got %v want %v", i, got, step.want)
+	if _, echo := s.Nonces(); echo != 77 {
+		t.Fatalf("does not echo the sender's nonce: %d", echo)
+	}
+	// Echoing the challenge proves freshness.
+	if accepted, reply := s.Observe(1, 2, LegState{Nonce: 77, Echo: challenge}, sessionHome, now, timeout); !accepted || !reply {
+		t.Fatalf("echo: accepted=%v reply=%v", accepted, reply)
+	}
+	if next, _ := s.Nonces(); next == challenge {
+		t.Fatal("challenge not rotated after use")
+	}
+	// Newer frames from the same address are trusted while live.
+	if accepted, reply := s.Observe(1, 3, LegState{Nonce: 77}, sessionHome, now.Add(time.Second), timeout); !accepted || reply {
+		t.Fatalf("live frame: accepted=%v reply=%v", accepted, reply)
+	}
+	// The echo frame replayed, from anywhere, is not.
+	for _, from := range []netip.AddrPort{sessionHome, sessionOther} {
+		if accepted, _ := s.Observe(1, 2, LegState{Nonce: 77, Echo: challenge}, from, now.Add(2*time.Second), timeout); accepted {
+			t.Fatalf("replayed echo frame from %v accepted", from)
 		}
+	}
+	// A trusted frame that echoes the current challenge uses it up, so the
+	// frame replayed from another address is refused.
+	current, _ := s.Nonces()
+	if accepted, _ := s.Observe(1, 4, LegState{Nonce: 77, Echo: current}, sessionHome, now.Add(time.Second), timeout); !accepted {
+		t.Fatal("live echo frame refused")
+	}
+	if accepted, _ := s.Observe(1, 4, LegState{Nonce: 77, Echo: current}, sessionOther, now.Add(2*time.Second), timeout); accepted {
+		t.Fatal("replayed live frame accepted from another address")
+	}
+	// A newer frame from another address still needs the echo.
+	if accepted, _ := s.Observe(1, 9, LegState{Nonce: 77}, sessionOther, now.Add(3*time.Second), timeout); accepted {
+		t.Fatal("new address trusted without echo")
+	}
+	if addr, _ := s.Addr(); addr != sessionHome {
+		t.Fatalf("session moved to %v", addr)
+	}
+}
+
+func TestLegSessionNeedsEchoAfterTimeoutAndForOlderEpochs(t *testing.T) {
+	var s LegSession
+	now := time.Unix(1000, 0)
+	timeout := 6 * time.Second
+	challenge, _ := s.Nonces()
+	s.Observe(5, 1, LegState{Echo: challenge}, sessionHome, now, timeout)
+	if !s.Live(now, timeout) {
+		t.Fatal("not live after echo")
+	}
+
+	// After a timeout even a newer frame from the same address needs the echo,
+	// so a replay cannot revive a dead side.
+	later := now.Add(10 * time.Second)
+	if s.Live(later, timeout) {
+		t.Fatal("still live after timeout")
+	}
+	if accepted, reply := s.Observe(5, 2, LegState{}, sessionHome, later, timeout); accepted || !reply {
+		t.Fatalf("stale frame: accepted=%v reply=%v", accepted, reply)
+	}
+	// A sender whose clock went backwards gets back in with the echo.
+	current, _ := s.Nonces()
+	if accepted, _ := s.Observe(1, 1, LegState{Echo: current}, sessionHome, later, timeout); !accepted {
+		t.Fatal("older epoch with echo refused")
+	}
+}
+
+func TestLegSessionRateLimitsChallenges(t *testing.T) {
+	var s LegSession
+	now := time.Unix(1000, 0)
+	if _, reply := s.Observe(1, 1, LegState{}, sessionOther, now, time.Second); !reply {
+		t.Fatal("first untrusted frame not answered")
+	}
+	if _, reply := s.Observe(1, 1, LegState{}, sessionOther, now.Add(time.Millisecond), time.Second); reply {
+		t.Fatal("second untrusted frame answered at once")
+	}
+	if _, reply := s.Observe(1, 1, LegState{}, sessionOther, now.Add(time.Second), time.Second); !reply {
+		t.Fatal("untrusted frame not answered after the interval")
+	}
+}
+
+func TestLegSessionBootstrapChallenge(t *testing.T) {
+	var s LegSession
+	s.Bootstrap(42)
+	if accepted, _ := s.Observe(1, 1, LegState{Echo: 42}, sessionHome, time.Unix(1, 0), time.Second); !accepted {
+		t.Fatal("bootstrap echo refused")
+	}
+	s.Bootstrap(43)
+	if nonce, _ := s.Nonces(); nonce == 43 {
+		t.Fatal("bootstrap replaced a live challenge")
 	}
 }
 

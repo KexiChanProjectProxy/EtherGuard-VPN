@@ -51,7 +51,7 @@ func TestP2PSTUNPublishesMappingAndKeepsItAfterFailure(t *testing.T) {
 	const mapped = "198.51.100.80:40100"
 
 	// When
-	device.refreshP2PSTUN(context.Background(), servers)
+	device.refreshP2PSTUN(context.Background(), servers, false)
 
 	// Then the mapping joins the addresses this edge advertises
 	if urls := device.p2pLocalEndpointURLs(); !containsURL(urls, mapped) {
@@ -62,11 +62,30 @@ func TestP2PSTUNPublishesMappingAndKeepsItAfterFailure(t *testing.T) {
 	failing, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	delete(bind.responses, p2pSTUNTestServer)
-	device.refreshP2PSTUN(failing, servers)
+	device.refreshP2PSTUN(failing, servers, false)
 
 	// Then the mapping is still advertised
 	if urls := device.p2pLocalEndpointURLs(); !containsURL(urls, mapped) {
 		t.Fatalf("advertised after failure = %v, want %s", urls, mapped)
+	}
+}
+
+func TestP2PSTUNPassAfterLegChangeReplacesMappingEvenWhenEmpty(t *testing.T) {
+	// Given a mapping found through a remote leg
+	device, bind := newP2PSTUNTestDevice(t)
+	bind.responses[p2pSTUNTestServer] = net.ParseIP("198.51.100.80")
+	servers := device.EdgeConfig.DynamicRoute.P2P.STUNServers
+	device.refreshP2PSTUN(context.Background(), servers, false)
+
+	// When the leg is gone and the pass after it finds nothing
+	failing, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	delete(bind.responses, p2pSTUNTestServer)
+	device.refreshP2PSTUN(failing, servers, true)
+
+	// Then the old mapping is no longer advertised
+	if urls := device.p2pLocalEndpointURLs(); containsURL(urls, "198.51.100.80:40100") {
+		t.Fatalf("stale mapping still advertised: %v", urls)
 	}
 }
 

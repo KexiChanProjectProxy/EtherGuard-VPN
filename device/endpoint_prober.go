@@ -217,13 +217,14 @@ func currentPairKey(endpoint conn.Endpoint, sources []stunSource) string {
 	}
 	remote := netip.AddrPortFrom(addrPort.Addr().Unmap(), addrPort.Port()).String()
 	if leg, ok := endpoint.(conn.SourceIfindexer); ok {
+		src, _ := netip.AddrFromSlice(endpoint.SrcIP())
+		src = src.Unmap()
 		for i := range sources {
-			if sources[i].remote && sources[i].ifindex == leg.SrcIfindex() {
+			if sources[i].remote && sources[i].ifindex == leg.SrcIfindex() && sources[i].ip == src {
 				return probePairKey(&sources[i], remote)
 			}
 		}
-		src, _ := netip.AddrFromSlice(endpoint.SrcIP())
-		return probePairKey(&stunSource{ip: src.Unmap(), ifindex: leg.SrcIfindex(), remote: true}, remote)
+		return probePairKey(&stunSource{ip: src, ifindex: leg.SrcIfindex(), remote: true}, remote)
 	}
 	if src, ok := netip.AddrFromSlice(endpoint.SrcIP()); ok && !src.IsUnspecified() {
 		src = src.Unmap()

@@ -84,14 +84,15 @@ func TestLegAgentRelaysThroughPinnedKernelSocket(t *testing.T) {
 
 	// The agent announces its leg with the port of its uplink socket.
 	state, agentAddr := readFrame(conn.LegFrameState)
-	legs, err := conn.ParseLegState(state.Body)
+	parsed, err := conn.ParseLegState(state.Body)
+	legs := parsed.Legs
 	if err != nil || len(legs) != 1 || legs[0].Addr != netip.AddrPortFrom(loopback, agent.WANPort()) {
 		t.Fatalf("announced legs %+v (%v)", legs, err)
 	}
 
 	// Controller -> leg -> far peer.
 	farAddr := farPeer.LocalAddr().(*net.UDPAddr).AddrPort()
-	out := conn.AppendLegFrame(nil, &key, conn.LegFrame{Type: conn.LegFrameData, AgentID: 5, LegID: legs[0].LegID, Epoch: 1, Counter: 1, Addr: farAddr, Body: []byte("to peer")})
+	out := conn.AppendLegFrame(nil, &key, conn.LegFrame{Type: conn.LegFrameData, Flags: conn.LegFlagFromController, AgentID: 5, LegID: legs[0].LegID, Epoch: 1, Counter: 1, Addr: farAddr, Body: []byte("to peer")})
 	if _, err := controller.WriteToUDPAddrPort(out, agentAddr); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +103,15 @@ func TestLegAgentRelaysThroughPinnedKernelSocket(t *testing.T) {
 	}
 	if from != legs[0].Addr {
 		t.Fatalf("far peer saw source %v, want the leg %v", from, legs[0].Addr)
+	}
+
+	// The same frame without the controller's direction flag, as an agent
+	// frame reflected back would be, is not relayed.
+	reflected := conn.AppendLegFrame(nil, &key, conn.LegFrame{Type: conn.LegFrameData, AgentID: 5, LegID: legs[0].LegID, Epoch: 1, Counter: 2, Addr: farAddr, Body: []byte("reflected")})
+	controller.WriteToUDPAddrPort(reflected, agentAddr)
+	farPeer.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if n, _, err := farPeer.ReadFromUDPAddrPort(buf); err == nil {
+		t.Fatalf("agent relayed a frame without the controller flag: %q", buf[:n])
 	}
 
 	// Far peer -> leg -> controller, tagged with the leg and the peer.
