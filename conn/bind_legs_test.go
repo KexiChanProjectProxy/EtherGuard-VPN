@@ -55,13 +55,14 @@ func (f *fakeInnerBind) ParseEndpoint(s string) (Endpoint, error) {
 }
 func (f *fakeInnerBind) EnabledAf() EnabledAf { return EnabledAf46 }
 
-// testAgent is a leg agent reduced to a socket and the frame codec.
+// testAgent is a leg agent reduced to a socket, the frame codec and a session.
 type testAgent struct {
-	t    *testing.T
-	id   uint16
-	key  *LegKey
-	sock *net.UDPConn
-	seq  *LegSequence
+	t       *testing.T
+	id      uint16
+	key     *LegKey
+	sock    *net.UDPConn
+	seq     *LegSequence
+	session LegSession
 }
 
 func newTestAgent(t *testing.T, id uint16, key *LegKey) *testAgent {
@@ -74,13 +75,20 @@ func newTestAgent(t *testing.T, id uint16, key *LegKey) *testAgent {
 	return &testAgent{t: t, id: id, key: key, sock: sock, seq: NewLegSequence()}
 }
 
-func (a *testAgent) sendState(to netip.AddrPort, legs []LegInfo) {
-	a.t.Helper()
+func (a *testAgent) stateFrame(legs []LegInfo) []byte {
 	epoch, counter := a.seq.Next()
-	frame := AppendLegFrame(nil, a.key, LegFrame{Type: LegFrameState, AgentID: a.id, Epoch: epoch, Counter: counter, Body: AppendLegState(nil, legs)})
+	nonce, echo := a.session.Nonces()
+	return AppendLegFrame(nil, a.key, LegFrame{Type: LegFrameState, AgentID: a.id, Epoch: epoch, Counter: counter,
+		Body: AppendLegState(nil, LegState{Nonce: nonce, Echo: echo, Legs: legs})})
+}
+
+func (a *testAgent) sendState(to netip.AddrPort, legs []LegInfo) []byte {
+	a.t.Helper()
+	frame := a.stateFrame(legs)
 	if _, err := a.sock.WriteToUDPAddrPort(frame, to); err != nil {
 		a.t.Fatal(err)
 	}
+	return frame
 }
 
 func (a *testAgent) sendData(to netip.AddrPort, legID uint8, from netip.AddrPort, payload []byte) {
@@ -93,25 +101,88 @@ func (a *testAgent) sendData(to netip.AddrPort, legID uint8, from netip.AddrPort
 }
 
 // read returns the next frame of type kind, skipping others.
-func (a *testAgent) read(kind byte) LegFrame {
+func (a *testAgent) read(kind byte) (LegFrame, netip.AddrPort) {
 	a.t.Helper()
+	frame, from, ok := a.tryRead(kind, 3*time.Second)
+	if !ok {
+		a.t.Fatal("agent read timed out")
+	}
+	return frame, from
+}
+
+func (a *testAgent) tryRead(kind byte, wait time.Duration) (LegFrame, netip.AddrPort, bool) {
 	buf := make([]byte, 65536)
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(wait)
 	for {
 		a.sock.SetReadDeadline(deadline)
-		n, _, err := a.sock.ReadFromUDPAddrPort(buf)
+		n, from, err := a.sock.ReadFromUDPAddrPort(buf)
 		if err != nil {
-			a.t.Fatalf("agent read: %v", err)
+			return LegFrame{}, netip.AddrPort{}, false
 		}
 		frame, err := DecodeLegFrame(a.key, buf[:n])
 		if err != nil {
 			a.t.Fatalf("agent decode: %v", err)
 		}
+		if frame.Flags&LegFlagFromController == 0 {
+			a.t.Fatalf("controller frame without direction flag: %+v", frame)
+		}
 		if frame.Type == kind {
 			frame.Body = append([]byte(nil), frame.Body...)
-			return frame
+			return frame, from, true
 		}
 	}
+}
+
+// observe feeds a controller state frame to the agent's session.
+func (a *testAgent) observe(frame LegFrame, from netip.AddrPort) (accepted, reply bool) {
+	a.t.Helper()
+	state, err := ParseLegState(frame.Body)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	return a.session.Observe(frame.Epoch, frame.Counter, state, from, time.Now(), DefaultLegHeartbeatTimeout)
+}
+
+// join runs the challenge exchange until the bind lists the agent's legs.
+func (a *testAgent) join(bind *LegBind, legs []LegInfo) {
+	a.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !a.bindHas(bind, len(legs)) {
+		if time.Now().After(deadline) {
+			a.t.Fatal("agent never joined")
+		}
+		a.sendState(bind.LocalAddr(), legs)
+		if frame, from, ok := a.tryRead(LegFrameState, 100*time.Millisecond); ok {
+			a.observe(frame, from)
+		}
+	}
+}
+
+func (a *testAgent) bindHas(bind *LegBind, legs int) bool {
+	n := 0
+	for _, leg := range bind.RemoteLegs() {
+		if leg.AgentID == a.id {
+			n++
+		}
+	}
+	return n == legs && legs > 0 || (legs == 0 && bind.agentOnline(a.id))
+}
+
+func (b *LegBind) agentOnline(id uint16) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	agent := b.agents[id]
+	return agent != nil && agent.online
+}
+
+func (b *LegBind) agentAddr(id uint16) netip.AddrPort {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if agent := b.agents[id]; agent != nil {
+		addr, _ := agent.session.Addr()
+		return addr
+	}
+	return netip.AddrPort{}
 }
 
 func (a *testAgent) addr() netip.AddrPort {
@@ -135,10 +206,10 @@ func (l *legEventLog) snapshot() []LegEvent {
 	return append([]LegEvent(nil), l.events...)
 }
 
-func openTestLegBind(t *testing.T, key *LegKey) (*LegBind, *fakeInnerBind, ReceiveFunc, *legEventLog) {
+func openTestLegBind(t *testing.T, key *LegKey, peers ...netip.AddrPort) (*LegBind, *fakeInnerBind, ReceiveFunc, *legEventLog) {
 	t.Helper()
 	inner := &fakeInnerBind{}
-	bind := NewLegBind(inner, LegConfig{Listen: netip.MustParseAddrPort("127.0.0.1:0"), Key: *key})
+	bind := NewLegBind(inner, LegConfig{Listen: netip.MustParseAddrPort("127.0.0.1:0"), Key: *key, Peers: peers})
 	events := &legEventLog{}
 	bind.SetLegEventHandler(events.add)
 	fns, port, err := bind.Open(0)
@@ -197,12 +268,14 @@ func TestLegBindLearnsAgentAndRelays(t *testing.T) {
 	data := pump(recv)
 	agent := newTestAgent(t, 9, key)
 
+	// A first frame only earns a challenge.
 	agent.sendState(bind.LocalAddr(), testLegs)
-	waitFor(t, "legs", func() bool { return len(bind.RemoteLegs()) == 2 })
-	// A newly seen agent gets a state frame at once, so it learns us.
-	if reply := agent.read(LegFrameState); reply.AgentID != LegControllerID {
-		t.Fatalf("reply from agent id %d", reply.AgentID)
+	challenge, from := agent.read(LegFrameState)
+	if challenge.AgentID != LegControllerID || len(bind.RemoteLegs()) != 0 {
+		t.Fatalf("agent trusted before echoing: %+v", bind.RemoteLegs())
 	}
+	agent.observe(challenge, from)
+	agent.join(bind, testLegs)
 	legs := bind.RemoteLegs()
 	if legs[0].Key() != "9/0" || legs[0].Addr != testLegs[0].Addr || legs[0].Ifindex != LegIfindex(9, 0) {
 		t.Fatalf("leg 0: %+v", legs[0])
@@ -225,7 +298,7 @@ func TestLegBindLearnsAgentAndRelays(t *testing.T) {
 	if err := bind.Send([]byte("hello"), ep); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	frame := agent.read(LegFrameData)
+	frame, _ := agent.read(LegFrameData)
 	if frame.LegID != 0 || frame.AgentID != 9 || frame.Addr.String() != "203.0.113.50:7000" || string(frame.Body) != "hello" {
 		t.Fatalf("relayed frame: %+v", frame)
 	}
@@ -259,41 +332,69 @@ func TestLegBindLearnsAgentAndRelays(t *testing.T) {
 	}
 }
 
-func TestLegBindDropsForgedAndReplayedFrames(t *testing.T) {
+func TestLegBindDropsReflectedFrames(t *testing.T) {
+	key := testLegKey(3)
+	bind, _, recv, _ := openTestLegBind(t, key)
+	data := pump(recv)
+	agent := newTestAgent(t, 9, key)
+	agent.join(bind, testLegs)
+
+	// A frame the controller built, sent back to it, is dropped.
+	ep, _ := bind.ParseEndpointFrom("203.0.113.50:7000", netip.Addr{}, LegIfindex(9, 0))
+	bind.Send([]byte("outbound"), ep)
+	frame, _ := agent.read(LegFrameData)
+	reflected := AppendLegFrame(nil, key, frame)
+	agent.sock.WriteToUDPAddrPort(reflected, bind.LocalAddr())
+	agent.sendData(bind.LocalAddr(), 0, netip.MustParseAddrPort("203.0.113.50:7000"), []byte("genuine"))
+	if got := <-data; string(got.payload) != "genuine" {
+		t.Fatalf("reflected frame delivered: %q", got.payload)
+	}
+}
+
+func TestLegBindIgnoresForgedAndReplayedState(t *testing.T) {
 	key := testLegKey(3)
 	bind, _, recv, _ := openTestLegBind(t, key)
 	pump(recv)
 	forger := newTestAgent(t, 9, testLegKey(4))
 	forger.sendState(bind.LocalAddr(), testLegs)
 	agent := newTestAgent(t, 9, key)
-	agent.sendState(bind.LocalAddr(), testLegs[:1])
-	waitFor(t, "legs", func() bool { return len(bind.RemoteLegs()) == 1 })
+	agent.join(bind, testLegs[:1])
+	recorded := agent.sendState(bind.LocalAddr(), testLegs[:1])
 
-	// A replay of an older state frame from another address must not move
-	// the agent there.
-	epoch, _ := agent.seq.Next()
-	old := AppendLegFrame(nil, key, LegFrame{Type: LegFrameState, AgentID: 9, Epoch: epoch, Counter: 0, Body: AppendLegState(nil, testLegs)})
+	// A recorded frame replayed from another address does not move the
+	// agent there, now or after the agent went silent.
 	replayer := newTestAgent(t, 9, key)
-	replayer.sock.WriteToUDPAddrPort(old, bind.LocalAddr())
-	time.Sleep(100 * time.Millisecond)
-	if n := len(bind.RemoteLegs()); n != 1 {
-		t.Fatalf("replayed state accepted: %d legs", n)
+	// Challenges are rate limited; the join just used one.
+	time.Sleep(2 * legChallengeReplyInterval)
+	replayer.sock.WriteToUDPAddrPort(recorded, bind.LocalAddr())
+	if _, _, ok := replayer.tryRead(LegFrameState, time.Second); !ok {
+		t.Fatal("no challenge for the replayed frame")
 	}
-	bind.mu.RLock()
-	addr := bind.agents[9].addr
-	bind.mu.RUnlock()
-	if addr != agent.addr() {
+	if addr := bind.agentAddr(9); addr != agent.addr() {
 		t.Fatalf("agent moved to %v", addr)
+	}
+	bind.tick(nil, time.Now().Add(DefaultLegHeartbeatTimeout+time.Second))
+	if len(bind.RemoteLegs()) != 0 {
+		t.Fatal("silent agent still online")
+	}
+	time.Sleep(2 * legChallengeReplyInterval)
+	replayer.sock.WriteToUDPAddrPort(recorded, bind.LocalAddr())
+	// The replayer only gets a challenge it cannot answer.
+	if _, _, ok := replayer.tryRead(LegFrameState, time.Second); !ok {
+		t.Fatal("no challenge for the replayed frame")
+	}
+	time.Sleep(100 * time.Millisecond)
+	if len(bind.RemoteLegs()) != 0 || bind.agentAddr(9) == replayer.addr() {
+		t.Fatal("replayed state revived the agent at the replayer's address")
 	}
 }
 
-func TestLegBindExpiresSilentAgents(t *testing.T) {
+func TestLegBindExpiresSilentAgentsAndTakesThemBack(t *testing.T) {
 	key := testLegKey(3)
 	bind, _, recv, events := openTestLegBind(t, key)
 	pump(recv)
 	agent := newTestAgent(t, 9, key)
-	agent.sendState(bind.LocalAddr(), testLegs)
-	waitFor(t, "legs", func() bool { return len(bind.RemoteLegs()) == 2 })
+	agent.join(bind, testLegs)
 
 	bind.tick(nil, time.Now().Add(DefaultLegHeartbeatTimeout+time.Second))
 	if n := len(bind.RemoteLegs()); n != 0 {
@@ -314,10 +415,74 @@ func TestLegBindExpiresSilentAgents(t *testing.T) {
 	if downs != 2 {
 		t.Fatalf("%d down events", downs)
 	}
-	// The agent comes back on its next heartbeat, possibly after a restart.
-	agent.seq = NewLegSequence()
-	agent.sendState(bind.LocalAddr(), testLegs)
-	waitFor(t, "legs back", func() bool { return len(bind.RemoteLegs()) == 2 })
+	// A restarted agent, with a fresh session and sequence, joins again.
+	restarted := newTestAgent(t, 9, key)
+	restarted.join(bind, testLegs)
+	if bind.agentAddr(9) != restarted.addr() {
+		t.Fatal("restarted agent not at its new address")
+	}
+}
+
+func TestLegBindTakesQuicklyRestartedAgentAtNewAddress(t *testing.T) {
+	key := testLegKey(3)
+	bind, _, recv, _ := openTestLegBind(t, key)
+	pump(recv)
+	agent := newTestAgent(t, 9, key)
+	agent.join(bind, testLegs)
+
+	// The agent restarts within the timeout, on a new port.
+	restarted := newTestAgent(t, 9, key)
+	restarted.join(bind, testLegs[:1])
+	if bind.agentAddr(9) != restarted.addr() {
+		t.Fatalf("agent at %v, want %v", bind.agentAddr(9), restarted.addr())
+	}
+	waitFor(t, "leg list", func() bool { return len(bind.RemoteLegs()) == 1 })
+	ep, _ := bind.ParseEndpointFrom("203.0.113.50:7000", netip.Addr{}, LegIfindex(9, 0))
+	bind.Send([]byte("to new"), ep)
+	if frame, _ := restarted.read(LegFrameData); string(frame.Body) != "to new" {
+		t.Fatalf("relayed %q", frame.Body)
+	}
+}
+
+func TestLegBindReachesAgentListedInPeers(t *testing.T) {
+	// The agent cannot reach the controller first: it knows no address and
+	// only answers what arrives.
+	key := testLegKey(3)
+	agent := newTestAgent(t, 9, key)
+	bind, _, recv, _ := openTestLegBind(t, key, agent.addr())
+	pump(recv)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(bind.RemoteLegs()) != len(testLegs) {
+		if time.Now().After(deadline) {
+			t.Fatal("controller never learned the agent")
+		}
+		frame, from, ok := agent.tryRead(LegFrameState, 200*time.Millisecond)
+		if !ok {
+			continue
+		}
+		if accepted, reply := agent.observe(frame, from); reply || accepted {
+			agent.sendState(from, testLegs)
+		}
+	}
+	if bind.agentAddr(9) != agent.addr() {
+		t.Fatalf("agent at %v", bind.agentAddr(9))
+	}
+}
+
+func TestLegBindForgetsLongGoneAgents(t *testing.T) {
+	key := testLegKey(3)
+	bind, _, recv, _ := openTestLegBind(t, key)
+	pump(recv)
+	agent := newTestAgent(t, 9, key)
+	agent.join(bind, testLegs)
+	bind.tick(nil, time.Now().Add(DefaultLegHeartbeatTimeout+time.Second))
+	if !bind.agentAddr(9).IsValid() {
+		t.Fatal("offline agent forgotten at once")
+	}
+	bind.tick(nil, time.Now().Add(legAgentForget+time.Minute))
+	if bind.agentAddr(9).IsValid() {
+		t.Fatal("long-gone agent still kept")
+	}
 }
 
 func TestLegBindReportsChangedLegs(t *testing.T) {
@@ -325,7 +490,7 @@ func TestLegBindReportsChangedLegs(t *testing.T) {
 	bind, _, recv, events := openTestLegBind(t, key)
 	pump(recv)
 	agent := newTestAgent(t, 9, key)
-	agent.sendState(bind.LocalAddr(), testLegs)
+	agent.join(bind, testLegs)
 	waitFor(t, "legs", func() bool { return len(events.snapshot()) == 2 })
 	moved := []LegInfo{{LegID: 0, Name: "eth0", Addr: netip.MustParseAddrPort("198.51.100.99:16386")}}
 	agent.sendState(bind.LocalAddr(), moved)
@@ -348,14 +513,16 @@ func TestLegBindRejectsUnusableLegAddresses(t *testing.T) {
 	bind, _, recv, _ := openTestLegBind(t, key)
 	pump(recv)
 	agent := newTestAgent(t, 9, key)
+	agent.join(bind, testLegs[:1])
 	agent.sendState(bind.LocalAddr(), []LegInfo{
 		{LegID: 0, Addr: netip.MustParseAddrPort("0.0.0.0:16386")},
 		{LegID: 1, Addr: netip.MustParseAddrPort("198.51.100.4:0")},
 		{LegID: 2, Addr: netip.MustParseAddrPort("198.51.100.4:16386")},
 	})
-	waitFor(t, "legs", func() bool { return len(bind.RemoteLegs()) == 1 })
-	if leg := bind.RemoteLegs()[0]; leg.LegID != 2 {
-		t.Fatalf("kept leg %d", leg.LegID)
+	time.Sleep(100 * time.Millisecond)
+	legs := bind.RemoteLegs()
+	if len(legs) != 1 || legs[0].LegID != 2 {
+		t.Fatalf("kept legs %+v", legs)
 	}
 }
 
@@ -369,8 +536,7 @@ func TestLegBindCloseAndReopenKeepsAgents(t *testing.T) {
 	}
 	data := pump(fns[1])
 	agent := newTestAgent(t, 9, key)
-	agent.sendState(bind.LocalAddr(), testLegs)
-	waitFor(t, "legs", func() bool { return len(bind.RemoteLegs()) == 2 })
+	agent.join(bind, testLegs)
 	if err := bind.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -393,7 +559,7 @@ func TestLegBindCloseAndReopenKeepsAgents(t *testing.T) {
 	if err := bind.Send([]byte("again"), ep); err != nil {
 		t.Fatalf("send after reopen: %v", err)
 	}
-	if frame := agent.read(LegFrameData); !bytes.Equal(frame.Body, []byte("again")) {
+	if frame, _ := agent.read(LegFrameData); !bytes.Equal(frame.Body, []byte("again")) {
 		t.Fatalf("frame body %q", frame.Body)
 	}
 }

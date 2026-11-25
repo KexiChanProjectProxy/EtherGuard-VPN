@@ -8,6 +8,7 @@
 package conn
 
 import (
+	"net"
 	"runtime"
 
 	"golang.org/x/sys/unix"
@@ -62,4 +63,23 @@ func (bind *StdNetBind) SetMark(mark uint32) error {
 		}
 	}
 	return nil
+}
+
+// SetUDPConnMark sets the fwmark (or its platform equivalent) on c.
+func SetUDPConnMark(c *net.UDPConn, mark uint32) error {
+	if fwmarkIoctl == 0 {
+		return nil
+	}
+	raw, err := c.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var operr error
+	err = raw.Control(func(fd uintptr) {
+		operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+	})
+	if err != nil {
+		return err
+	}
+	return operr
 }

@@ -196,14 +196,39 @@ func TestProbeRoundsSwitchPeerToFasterRemoteLeg(t *testing.T) {
 	t.Fatal("peer never moved to the faster remote leg")
 }
 
-func TestRemoteLegDownMovesPeersOffTheLeg(t *testing.T) {
-	bind := newLegFakeBind(3001, legB, legC)
+func newLegEventTestDevice(t *testing.T, bind *legFakeBind) (*Device, *Peer, *Peer) {
+	t.Helper()
 	device, peer := newProberTestDevice(t, bind)
+	device.closed = make(chan int)
+	t.Cleanup(func() { close(device.closed) })
 	device.event_tryendpoint = make(chan struct{}, 1)
 	device.peers.keyMap = map[NoisePublicKey]*Peer{{1}: peer}
 	other := &Peer{ID: 3, device: device}
 	device.peers.keyMap[NoisePublicKey{2}] = other
 	device.attachRemoteLegs(bind)
+	return device, peer, other
+}
+
+func peerEndpoint(peer *Peer) conn.Endpoint {
+	peer.RLock()
+	defer peer.RUnlock()
+	return peer.endpoint
+}
+
+func awaitDevice(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestRemoteLegDownMovesPeersOffTheLeg(t *testing.T) {
+	bind := newLegFakeBind(3001, legB, legC)
+	device, peer, other := newLegEventTestDevice(t, bind)
 
 	onB, _ := bind.ParseEndpointFrom("203.0.113.20:3001", legB.Addr.Addr(), legB.Ifindex)
 	onC, _ := bind.ParseEndpointFrom("203.0.113.30:3001", legC.Addr.Addr(), legC.Ifindex)
@@ -213,19 +238,72 @@ func TestRemoteLegDownMovesPeersOffTheLeg(t *testing.T) {
 
 	bind.handler(conn.LegEvent{Leg: legB, Up: false})
 
-	if _, still := peer.endpoint.(conn.LegEndpoint); still {
-		t.Fatal("peer still on the lost leg")
+	awaitDevice(t, "peer moved off the lost leg", func() bool {
+		_, still := peerEndpoint(peer).(conn.LegEndpoint)
+		return !still
+	})
+	if peerEndpoint(peer).DstToString() != "203.0.113.20:3001" || peer.endpointPinned.Load() {
+		t.Fatalf("peer endpoint %v pinned=%v", peerEndpoint(peer).DstToString(), peer.endpointPinned.Load())
 	}
-	if peer.endpoint.DstToString() != "203.0.113.20:3001" || peer.endpointPinned.Load() {
-		t.Fatalf("peer endpoint %v pinned=%v", peer.endpoint.DstToString(), peer.endpointPinned.Load())
-	}
-	if other.endpoint != onC {
+	if peerEndpoint(other) != onC {
 		t.Fatal("peer on another leg was moved")
 	}
+	awaitDevice(t, "endpoint retry signal", func() bool {
+		select {
+		case <-device.event_tryendpoint:
+			return true
+		default:
+			return false
+		}
+	})
+	awaitDevice(t, "STUN refresh request", func() bool { return len(device.p2pSTUNRefresh) == 1 })
+}
+
+func TestRemoteLegEventHandlerNeverBlocksOnDeviceLocks(t *testing.T) {
+	// The bind calls the handler from goroutines its Close waits for, so the
+	// handler must return even while the peer table is locked.
+	bind := newLegFakeBind(3001, legB)
+	device, peer, _ := newLegEventTestDevice(t, bind)
+	peer.endpoint, _ = bind.ParseEndpointFrom("203.0.113.20:3001", legB.Addr.Addr(), legB.Ifindex)
+
+	device.peers.Lock()
+	returned := make(chan struct{})
+	go func() {
+		bind.handler(conn.LegEvent{Leg: legB, Up: false})
+		close(returned)
+	}()
 	select {
-	case <-device.event_tryendpoint:
-	default:
-		t.Fatal("endpoint retry not signalled")
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		device.peers.Unlock()
+		t.Fatal("leg event handler blocked on the peer table")
+	}
+	device.peers.Unlock()
+	awaitDevice(t, "peer moved off the lost leg", func() bool {
+		_, still := peerEndpoint(peer).(conn.LegEndpoint)
+		return !still
+	})
+}
+
+func TestRemoteLegDownForOldAddressKeepsPeersOnNewAddress(t *testing.T) {
+	// The leg moved from .70 to .71; its down event for .70 may be handled
+	// after a peer already switched to .71.
+	moved := testRemoteLeg(2, 0, "203.0.113.71:16386")
+	bind := newLegFakeBind(3001, moved)
+	_, peer, other := newLegEventTestDevice(t, bind)
+	onNew, _ := bind.ParseEndpointFrom("203.0.113.20:3001", moved.Addr.Addr(), moved.Ifindex)
+	peer.endpoint = onNew
+	onOld := &conn.RemoteLegEndpoint{AgentID: 2, LegID: 0, Src: legB.Addr.Addr(), Dst: netip.MustParseAddrPort("203.0.113.30:3001")}
+	other.endpoint = onOld
+
+	bind.handler(conn.LegEvent{Leg: legB, Up: false})
+
+	awaitDevice(t, "peer on the old address moved", func() bool {
+		_, still := peerEndpoint(other).(conn.LegEndpoint)
+		return !still
+	})
+	if peerEndpoint(peer) != onNew {
+		t.Fatal("peer on the leg's new address was moved")
 	}
 }
 

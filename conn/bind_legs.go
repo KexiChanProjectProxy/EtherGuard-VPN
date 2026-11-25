@@ -125,12 +125,15 @@ type LegConfig struct {
 }
 
 type legAgent struct {
-	id     uint16
-	addr   netip.AddrPort // learned from state frames
-	guard  LegReplayGuard
-	legs   map[uint8]RemoteLeg
-	online bool
+	id      uint16
+	session LegSession
+	legs    map[uint8]RemoteLeg
+	online  bool
 }
+
+// legAgentForget is how long the controller keeps an offline agent's state
+// and keeps sending it heartbeats.
+const legAgentForget = 10 * time.Minute
 
 // LegBind wraps a kernel bind and adds the uplinks of leg agents as remote
 // legs. It implements Bind, EndpointSourcePinner, RemoteLegLister and
@@ -146,6 +149,12 @@ type LegBind struct {
 	mu      sync.RWMutex
 	agents  map[uint16]*legAgent
 	handler func(LegEvent)
+	// bootNonce is the challenge in state frames to configured Peers whose
+	// agent is not known yet.
+	bootNonce uint64
+	// emitMu keeps events in the order of the state changes behind them.
+	emitMu sync.Mutex
+	mark   uint32
 
 	// sock is the site-network socket; nil while closed.
 	sockMu sync.RWMutex
@@ -168,11 +177,12 @@ func NewLegBind(inner Bind, cfg LegConfig) *LegBind {
 		cfg.HeartbeatTimeout = DefaultLegHeartbeatTimeout
 	}
 	return &LegBind{
-		inner:  inner,
-		cfg:    cfg,
-		seq:    NewLegSequence(),
-		agents: make(map[uint16]*legAgent),
-		bufs:   sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }},
+		inner:     inner,
+		cfg:       cfg,
+		seq:       NewLegSequence(),
+		agents:    make(map[uint16]*legAgent),
+		bootNonce: NewLegNonce(),
+		bufs:      sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }},
 	}
 }
 
@@ -196,13 +206,16 @@ func (b *LegBind) logf(format string, args ...any) {
 }
 
 // SetLegEventHandler sets the callback for leg changes. It runs on the bind's
-// own goroutines and must not block on the device's bind lock.
+// own goroutines, in order, and must neither block nor call into the bind:
+// Close waits for those goroutines.
 func (b *LegBind) SetLegEventHandler(handler func(LegEvent)) {
 	b.mu.Lock()
 	b.handler = handler
 	b.mu.Unlock()
 }
 
+// emit delivers events. Callers hold emitMu from before the state change
+// that produced them.
 func (b *LegBind) emit(events []LegEvent) {
 	if len(events) == 0 {
 		return
@@ -232,6 +245,16 @@ func (b *LegBind) Open(port uint16) ([]ReceiveFunc, uint16, error) {
 		b.inner.Close()
 		return nil, 0, fmt.Errorf("remote legs listen %s: %w", b.cfg.Listen, err)
 	}
+	b.mu.RLock()
+	mark := b.mark
+	b.mu.RUnlock()
+	if mark != 0 {
+		if err := SetUDPConnMark(sock, mark); err != nil {
+			sock.Close()
+			b.inner.Close()
+			return nil, 0, fmt.Errorf("remote legs fwmark: %w", err)
+		}
+	}
 	stop := make(chan struct{})
 	b.sockMu.Lock()
 	b.sock = sock
@@ -256,7 +279,22 @@ func (b *LegBind) Close() error {
 	return errors.Join(b.inner.Close(), sockErr)
 }
 
-func (b *LegBind) SetMark(mark uint32) error                { return b.inner.SetMark(mark) }
+// SetMark marks the socket bind and the site-network socket, so policy
+// routing that keeps the tunnel's own traffic out of the tunnel covers the
+// frames to agents too.
+func (b *LegBind) SetMark(mark uint32) error {
+	b.mu.Lock()
+	b.mark = mark
+	b.mu.Unlock()
+	err := b.inner.SetMark(mark)
+	b.sockMu.RLock()
+	defer b.sockMu.RUnlock()
+	if b.sock != nil {
+		err = errors.Join(err, SetUDPConnMark(b.sock, mark))
+	}
+	return err
+}
+
 func (b *LegBind) ParseEndpoint(s string) (Endpoint, error) { return b.inner.ParseEndpoint(s) }
 func (b *LegBind) EnabledAf() EnabledAf                     { return b.inner.EnabledAf() }
 
@@ -338,9 +376,10 @@ func (b *LegBind) Send(buf []byte, endpoint Endpoint) error {
 	agent := b.agents[legEndpoint.AgentID]
 	var to netip.AddrPort
 	ok = false
-	if agent != nil && agent.online && agent.addr.IsValid() {
-		if leg, found := agent.legs[legEndpoint.LegID]; found && leg.Addr.Addr() == legEndpoint.Src {
-			to, ok = agent.addr, true
+	if agent != nil && agent.online {
+		addr, known := agent.session.Addr()
+		if leg, found := agent.legs[legEndpoint.LegID]; known && found && leg.Addr.Addr() == legEndpoint.Src {
+			to, ok = addr, true
 		}
 	}
 	b.mu.RUnlock()
@@ -355,7 +394,7 @@ func (b *LegBind) Send(buf []byte, endpoint Endpoint) error {
 	epoch, counter := b.seq.Next()
 	ptr := b.bufs.Get().(*[]byte)
 	frame := AppendLegFrame((*ptr)[:0], &b.cfg.Key, LegFrame{
-		Type: LegFrameData, AgentID: legEndpoint.AgentID, LegID: legEndpoint.LegID,
+		Type: LegFrameData, Flags: LegFlagFromController, AgentID: legEndpoint.AgentID, LegID: legEndpoint.LegID,
 		Epoch: epoch, Counter: counter, Addr: legEndpoint.Dst, Body: buf,
 	})
 	_, err := b.sock.WriteToUDPAddrPort(frame, to)
@@ -376,6 +415,10 @@ func (b *LegBind) receiveFunc(sock *net.UDPConn) ReceiveFunc {
 			frame, err := DecodeLegFrame(&b.cfg.Key, buf[:n])
 			if err != nil {
 				b.logf("Remote legs: dropping frame from %s: %v", from, err)
+				continue
+			}
+			if frame.Flags&LegFlagFromController != 0 {
+				// One of ours, reflected back.
 				continue
 			}
 			switch frame.Type {
@@ -419,7 +462,7 @@ func (b *LegBind) handleState(sock *net.UDPConn, frame LegFrame, from netip.Addr
 	if frame.AgentID == LegControllerID {
 		return
 	}
-	infos, err := ParseLegState(frame.Body)
+	state, err := ParseLegState(frame.Body)
 	if err != nil {
 		b.logf("Remote legs: bad state from agent %d at %s: %v", frame.AgentID, from, err)
 		return
@@ -427,24 +470,41 @@ func (b *LegBind) handleState(sock *net.UDPConn, frame LegFrame, from netip.Addr
 	now := time.Now()
 	from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
 	var events []LegEvent
+	b.emitMu.Lock()
+	defer b.emitMu.Unlock()
 	b.mu.Lock()
 	agent := b.agents[frame.AgentID]
 	if agent == nil {
 		agent = &legAgent{id: frame.AgentID, legs: make(map[uint8]RemoteLeg)}
+		agent.session.Bootstrap(b.bootNonce)
 		b.agents[frame.AgentID] = agent
 	}
-	if !agent.guard.Accept(frame.Epoch, frame.Counter, now, b.cfg.HeartbeatTimeout) {
+	previous, _ := agent.session.Addr()
+	usedBoot := state.Echo == b.bootNonce
+	accepted, reply := agent.session.Observe(frame.Epoch, frame.Counter, state, from, now, b.cfg.HeartbeatTimeout)
+	var answer []byte
+	if reply {
+		answer = b.stateFrameLocked(agent)
+	}
+	if !accepted {
 		b.mu.Unlock()
+		if answer != nil {
+			b.logf("Remote legs: challenging agent %d at %s", frame.AgentID, from)
+			b.writeState(sock, answer, from)
+		}
 		return
 	}
+	if usedBoot {
+		// Each bootstrap challenge admits one agent.
+		b.bootNonce = NewLegNonce()
+	}
 	wasOnline := agent.online
-	if agent.addr != from {
+	if previous != from {
 		b.logf("Remote legs: agent %d at %s", agent.id, from)
 	}
-	agent.addr = from
 	agent.online = true
-	next := make(map[uint8]RemoteLeg, len(infos))
-	for _, info := range infos {
+	next := make(map[uint8]RemoteLeg, len(state.Legs))
+	for _, info := range state.Legs {
 		addr := netip.AddrPortFrom(info.Addr.Addr().Unmap(), info.Addr.Port())
 		if !validLegAddr(addr) {
 			b.logf("Remote legs: agent %d announced invalid leg %d address %s", agent.id, info.LegID, info.Addr)
@@ -469,20 +529,31 @@ func (b *LegBind) handleState(sock *net.UDPConn, frame LegFrame, from netip.Addr
 	}
 	agent.legs = next
 	b.mu.Unlock()
-	if !wasOnline {
-		// Answer at once so an agent that does not know our address
-		// learns it without waiting for the next heartbeat.
-		b.sendState(sock, from)
+	if answer != nil {
+		b.writeState(sock, answer, from)
 	}
 	b.emit(events)
 }
 
-func (b *LegBind) sendState(sock *net.UDPConn, to netip.AddrPort) {
+// stateFrameLocked builds the controller's state frame for agent.
+func (b *LegBind) stateFrameLocked(agent *legAgent) []byte {
+	nonce, echo := agent.session.Nonces()
+	return b.stateFrame(nonce, echo)
+}
+
+func (b *LegBind) stateFrame(nonce, echo uint64) []byte {
 	epoch, counter := b.seq.Next()
-	frame := AppendLegFrame(nil, &b.cfg.Key, LegFrame{
-		Type: LegFrameState, AgentID: LegControllerID, Epoch: epoch, Counter: counter,
-		Body: AppendLegState(nil, nil),
+	return AppendLegFrame(nil, &b.cfg.Key, LegFrame{
+		Type: LegFrameState, Flags: LegFlagFromController, AgentID: LegControllerID,
+		Epoch: epoch, Counter: counter,
+		Body: AppendLegState(nil, LegState{Nonce: nonce, Echo: echo}),
 	})
+}
+
+func (b *LegBind) writeState(sock *net.UDPConn, frame []byte, to netip.AddrPort) {
+	if sock == nil {
+		return
+	}
 	if _, err := sock.WriteToUDPAddrPort(frame, to); err != nil {
 		b.logf("Remote legs: state to %s failed: %v", to, err)
 	}
@@ -502,35 +573,44 @@ func (b *LegBind) heartbeat(sock *net.UDPConn, stop chan struct{}) {
 	}
 }
 
-// tick expires silent agents and sends state frames to every known agent
-// address.
+// tick expires silent agents, forgets long-gone ones, and sends state frames
+// to every known agent and configured peer address.
 func (b *LegBind) tick(sock *net.UDPConn, now time.Time) {
-	targets := make(map[netip.AddrPort]struct{})
-	for _, peer := range b.cfg.Peers {
-		targets[peer] = struct{}{}
+	type outgoing struct {
+		frame []byte
+		to    netip.AddrPort
 	}
+	var sends []outgoing
+	covered := make(map[netip.AddrPort]bool)
 	var events []LegEvent
+	b.emitMu.Lock()
+	defer b.emitMu.Unlock()
 	b.mu.Lock()
-	for _, agent := range b.agents {
-		if agent.addr.IsValid() {
-			targets[agent.addr] = struct{}{}
-		}
-		if !agent.online {
-			continue
-		}
-		if last, ok := agent.guard.LastSeen(); !ok || now.Sub(last) > b.cfg.HeartbeatTimeout {
+	for id, agent := range b.agents {
+		if agent.online && !agent.session.Live(now, b.cfg.HeartbeatTimeout) {
 			agent.online = false
 			for _, leg := range agent.legs {
 				events = append(events, LegEvent{Leg: leg, Up: false})
 			}
 		}
+		addr, known := agent.session.Addr()
+		if !agent.online && (!known || now.Sub(agent.session.LastSeen()) > legAgentForget) {
+			delete(b.agents, id)
+			continue
+		}
+		if known {
+			sends = append(sends, outgoing{b.stateFrameLocked(agent), addr})
+			covered[addr] = true
+		}
+	}
+	for _, peer := range b.cfg.Peers {
+		if !covered[peer] {
+			sends = append(sends, outgoing{b.stateFrame(b.bootNonce, 0), peer})
+		}
 	}
 	b.mu.Unlock()
 	b.emit(events)
-	if sock == nil {
-		return
-	}
-	for target := range targets {
-		b.sendState(sock, target)
+	for _, send := range sends {
+		b.writeState(sock, send.frame, send.to)
 	}
 }

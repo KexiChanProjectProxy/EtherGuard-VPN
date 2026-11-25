@@ -23,6 +23,10 @@ import (
 // legRediscoverEvery is how many heartbeats pass between uplink scans.
 const legRediscoverEvery = 5
 
+// legPinDropHold is how long an uplink whose source pin the kernel refused
+// stays out of the announced legs.
+const legPinDropHold = 30 * time.Second
+
 func printExampleLegConf() {
 	example := mtypes.LegAgentConfig{
 		AgentID:    1,
@@ -129,18 +133,24 @@ type legAgent struct {
 	wanPort uint16
 	stop    chan struct{}
 	wg      sync.WaitGroup
+	// rescanNow asks the heartbeat loop for an uplink scan before the next
+	// regular one.
+	rescanNow chan struct{}
 
 	mu sync.RWMutex
 	// legs are the announced uplinks; ids keeps each uplink's leg ID stable
 	// across scans.
-	legs       []agentLeg
-	ids        map[string]uint8
-	guard      conn.LegReplayGuard
-	controller netip.AddrPort // learned from state frames
+	legs []agentLeg
+	ids  map[string]uint8
+	// pinDropped holds uplinks whose pin the kernel refused, until when.
+	pinDropped map[string]time.Time
+	// session tracks the controller: its learned address and the
+	// challenges in both directions.
+	session conn.LegSession
 }
 
 func newLegAgent(settings mtypes.LegAgentSettings, opts legAgentOptions) *legAgent {
-	agent := &legAgent{settings: settings, opts: opts, seq: conn.NewLegSequence(), ids: make(map[string]uint8)}
+	agent := &legAgent{settings: settings, opts: opts, seq: conn.NewLegSequence(), ids: make(map[string]uint8), pinDropped: make(map[string]time.Time), rescanNow: make(chan struct{}, 1)}
 	agent.pinner, _ = opts.wan.(conn.EndpointSourcePinner)
 	return agent
 }
@@ -173,6 +183,13 @@ func (a *legAgent) Start() error {
 	if err != nil {
 		a.opts.wan.Close()
 		return fmt.Errorf("leg agent site socket %s: %w", a.settings.Listen, err)
+	}
+	if a.opts.fwmark != 0 {
+		if err := conn.SetUDPConnMark(lan, a.opts.fwmark); err != nil {
+			lan.Close()
+			a.opts.wan.Close()
+			return fmt.Errorf("leg agent site socket fwmark: %w", err)
+		}
 	}
 	a.lan, a.wanPort, a.stop = lan, port, make(chan struct{})
 	a.rescan()
@@ -224,6 +241,16 @@ func (a *legAgent) rescan() {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	now := time.Now()
+	for key, until := range a.pinDropped {
+		if now.After(until) {
+			delete(a.pinDropped, key)
+		}
+	}
+	uplinks = slices.DeleteFunc(uplinks, func(uplink device.Uplink) bool {
+		_, held := a.pinDropped[legUplinkKey(uplink)]
+		return held
+	})
 	used := make(map[uint8]bool)
 	legs := make([]agentLeg, 0, len(uplinks))
 	var fresh []device.Uplink
@@ -275,8 +302,8 @@ func (a *legAgent) controllerTargets() []netip.AddrPort {
 	if a.settings.Controller.IsValid() {
 		targets = append(targets, a.settings.Controller)
 	}
-	if a.controller.IsValid() && a.controller != a.settings.Controller {
-		targets = append(targets, a.controller)
+	if learned, ok := a.session.Addr(); ok && learned != a.settings.Controller {
+		targets = append(targets, learned)
 	}
 	return targets
 }
@@ -289,11 +316,15 @@ func (a *legAgent) dataTarget() (netip.AddrPort, bool) {
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.controller, a.controller.IsValid()
+	if !a.session.Live(time.Now(), a.settings.HeartbeatTimeout) {
+		return netip.AddrPort{}, false
+	}
+	return a.session.Addr()
 }
 
 func (a *legAgent) stateFrame() []byte {
-	a.mu.RLock()
+	a.mu.Lock()
+	nonce, echo := a.session.Nonces()
 	infos := make([]conn.LegInfo, 0, len(a.legs))
 	for _, leg := range a.legs {
 		infos = append(infos, conn.LegInfo{
@@ -302,20 +333,24 @@ func (a *legAgent) stateFrame() []byte {
 			Addr:  netip.AddrPortFrom(leg.uplink.Addr, a.wanPort),
 		})
 	}
-	a.mu.RUnlock()
+	a.mu.Unlock()
 	epoch, counter := a.seq.Next()
 	return conn.AppendLegFrame(nil, &a.settings.Key, conn.LegFrame{
 		Type: conn.LegFrameState, AgentID: a.settings.AgentID,
-		Epoch: epoch, Counter: counter, Body: conn.AppendLegState(nil, infos),
+		Epoch: epoch, Counter: counter,
+		Body: conn.AppendLegState(nil, conn.LegState{Nonce: nonce, Echo: echo, Legs: infos}),
 	})
 }
 
 func (a *legAgent) sendState() {
-	frame := a.stateFrame()
 	for _, target := range a.controllerTargets() {
-		if _, err := a.lan.WriteToUDPAddrPort(frame, target); err != nil {
-			a.logf("Leg agent: state to %s failed: %v", target, err)
-		}
+		a.sendStateTo(target)
+	}
+}
+
+func (a *legAgent) sendStateTo(target netip.AddrPort) {
+	if _, err := a.lan.WriteToUDPAddrPort(a.stateFrame(), target); err != nil {
+		a.logf("Leg agent: state to %s failed: %v", target, err)
 	}
 }
 
@@ -328,6 +363,9 @@ func (a *legAgent) heartbeat() {
 		select {
 		case <-a.stop:
 			return
+		case <-a.rescanNow:
+			a.rescan()
+			continue
 		case <-ticker.C:
 		}
 		if beat%legRediscoverEvery == 0 {
@@ -346,7 +384,13 @@ func (a *legAgent) lanLoop() {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			select {
+			case <-a.stop:
+				return
+			default:
+			}
 			a.logf("Leg agent: site socket: %v", err)
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		frame, err := conn.DecodeLegFrame(&a.settings.Key, buf[:n])
@@ -354,24 +398,31 @@ func (a *legAgent) lanLoop() {
 			a.logf("Leg agent: dropping frame from %s: %v", from, err)
 			continue
 		}
+		if frame.Flags&conn.LegFlagFromController == 0 {
+			// An agent frame, possibly our own reflected back.
+			continue
+		}
 		switch frame.Type {
 		case conn.LegFrameState:
 			if frame.AgentID != conn.LegControllerID {
 				continue
 			}
+			state, err := conn.ParseLegState(frame.Body)
+			if err != nil {
+				continue
+			}
 			from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
 			a.mu.Lock()
-			fresh := a.guard.Accept(frame.Epoch, frame.Counter, time.Now(), a.settings.HeartbeatTimeout)
-			learned := fresh && a.controller != from
-			if fresh {
-				a.controller = from
-			}
+			previous, _ := a.session.Addr()
+			accepted, reply := a.session.Observe(frame.Epoch, frame.Counter, state, from, time.Now(), a.settings.HeartbeatTimeout)
 			a.mu.Unlock()
-			if learned {
+			if accepted && previous != from {
 				a.logf("Leg agent: controller at %s", from)
-				// Answer at once, so a controller that only knows this
-				// agent from its own Peers list sees the legs now.
-				a.sendState()
+			}
+			if reply {
+				// Answer at once: with a challenge when the frame was not
+				// trusted, or with the echo the controller waits for.
+				a.sendStateTo(from)
 			}
 		case conn.LegFrameData:
 			if frame.AgentID == a.settings.AgentID && frame.Addr.IsValid() {
@@ -409,6 +460,24 @@ func (a *legAgent) relayOut(frame conn.LegFrame) {
 	}
 	if err := a.opts.wan.Send(frame.Body, endpoint); err != nil {
 		a.logf("Leg agent: send on leg %d to %s failed: %v", frame.LegID, frame.Addr, err)
+		return
+	}
+	if a.pinner != nil {
+		if src := endpoint.SrcIP(); src != nil && src.IsUnspecified() {
+			// The kernel refused the pin (the address is gone or not
+			// usable yet) and the datagram left through the default
+			// route. Hold the uplink back and rescan now, so the
+			// controller drops the leg instead of crediting replies from
+			// another uplink to it.
+			a.errorf("Leg agent: kernel dropped the source pin of leg %d (%s), holding it back for %v", frame.LegID, uplink.Addr, legPinDropHold)
+			a.mu.Lock()
+			a.pinDropped[legUplinkKey(uplink)] = time.Now().Add(legPinDropHold)
+			a.mu.Unlock()
+			select {
+			case a.rescanNow <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
@@ -446,6 +515,15 @@ func (a *legAgent) wanLoop(fn conn.ReceiveFunc) {
 	out := make([]byte, 0, 65536+conn.LegFrameOverhead)
 	for {
 		n, endpoint, err := fn(buf)
+		if err == nil && (n == 0 || endpoint == nil) {
+			// Shutdown wakes the kernel socket with an empty read.
+			select {
+			case <-a.stop:
+				return
+			default:
+				continue
+			}
+		}
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
@@ -464,6 +542,9 @@ func (a *legAgent) wanLoop(fn conn.ReceiveFunc) {
 			continue
 		}
 		remote = netip.AddrPortFrom(remote.Addr().Unmap(), remote.Port())
+		if remote.Port() == 0 || remote.Addr().IsUnspecified() {
+			continue
+		}
 		legID, ok := a.legFor(endpoint.SrcIP(), remote.Addr())
 		if !ok {
 			a.logf("Leg agent: datagram from %s on unknown local address %s", remote, endpoint.SrcToString())

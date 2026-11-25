@@ -18,12 +18,50 @@ func (device *Device) attachRemoteLegs(bind conn.Bind) {
 	}
 	device.remoteLegs = lister
 	_, device.localPinning = conn.UnwrapBind(bind).(conn.EndpointSourcePinner)
+	device.p2pSTUNRefresh = make(chan struct{}, 1)
 	if source, ok := bind.(conn.LegEventSource); ok {
-		// The handler must not take device.net: the bind calls it from
-		// goroutines that Close waits for while the device holds that lock.
-		source.SetLegEventHandler(func(event conn.LegEvent) {
+		// The bind calls the handler from goroutines that its Close waits
+		// for, while the device may hold device.net and peers wait on it.
+		// So the handler only queues; a device goroutine does the work.
+		device.remoteLegEvents.signal = make(chan struct{}, 1)
+		source.SetLegEventHandler(device.queueRemoteLegEvent)
+		go device.routineRemoteLegEvents(bind)
+	}
+}
+
+func (device *Device) queueRemoteLegEvent(event conn.LegEvent) {
+	device.remoteLegEvents.Lock()
+	device.remoteLegEvents.queue = append(device.remoteLegEvents.queue, event)
+	device.remoteLegEvents.Unlock()
+	select {
+	case device.remoteLegEvents.signal <- struct{}{}:
+	default:
+	}
+}
+
+// routineRemoteLegEvents handles queued leg changes in order until the
+// device closes.
+func (device *Device) routineRemoteLegEvents(bind conn.Bind) {
+	for {
+		select {
+		case <-device.closed:
+			return
+		case <-device.remoteLegEvents.signal:
+		}
+		device.remoteLegEvents.Lock()
+		events := device.remoteLegEvents.queue
+		device.remoteLegEvents.queue = nil
+		device.remoteLegEvents.Unlock()
+		for _, event := range events {
 			device.onRemoteLegEvent(bind, event)
-		})
+		}
+		if len(events) > 0 {
+			// New or lost legs change the public mappings.
+			select {
+			case device.p2pSTUNRefresh <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
@@ -42,11 +80,14 @@ func (device *Device) onRemoteLegEvent(bind conn.Bind, event conn.LegEvent) {
 		fmt.Printf("Control: Remote leg %v (%v) down\n", event.Leg.Key(), event.Leg.Name)
 	}
 	key := event.Leg.Key()
+	lostSrc := event.Leg.Addr.Addr()
 	moved := false
 	for _, peer := range device.allPeersSnapshot() {
 		peer.Lock()
 		legEndpoint, ok := peer.endpoint.(conn.LegEndpoint)
-		if !ok || legEndpoint.LegKey() != key {
+		// A leg that changed address comes back under the same key; peers
+		// already on the new address stay.
+		if !ok || legEndpoint.LegKey() != key || !endpointSrcIs(legEndpoint, lostSrc) {
 			peer.Unlock()
 			continue
 		}
@@ -115,4 +156,9 @@ func (device *Device) sendInitiationViaRemoteLegs(peer *Peer, packet []byte) {
 			device.log.Verbosef("%v - Handshake initiation via remote leg %s failed: %v", peer, source.ifname, err)
 		}
 	}
+}
+
+func endpointSrcIs(endpoint conn.Endpoint, addr netip.Addr) bool {
+	src, ok := netip.AddrFromSlice(endpoint.SrcIP())
+	return ok && src.Unmap() == addr.Unmap()
 }

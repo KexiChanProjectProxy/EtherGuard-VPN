@@ -29,11 +29,22 @@ func (device *Device) RoutineP2PSTUN() {
 	if len(servers) == 0 {
 		return
 	}
+	legsChanged := false
 	for {
-		device.refreshP2PSTUN(context.Background(), servers)
+		device.refreshP2PSTUN(context.Background(), servers, legsChanged)
+		legsChanged = false
 		timer := time.NewTimer(p2pSTUNRefreshInterval)
 		select {
 		case <-timer.C:
+		case <-device.p2pSTUNRefresh:
+			timer.Stop()
+			legsChanged = true
+			// Let a burst of leg changes settle into one pass.
+			select {
+			case <-time.After(p2pSTUNLegSettle):
+			case <-device.closed:
+				return
+			}
 		case <-device.closed:
 			timer.Stop()
 			return
@@ -41,11 +52,16 @@ func (device *Device) RoutineP2PSTUN() {
 	}
 }
 
+// p2pSTUNLegSettle is how long a STUN pass waits after remote legs changed.
+const p2pSTUNLegSettle = 500 * time.Millisecond
+
 // refreshP2PSTUN runs one discovery pass. A pass that finds nothing keeps the
-// previous addresses: the mapping may well outlive a STUN server outage.
-func (device *Device) refreshP2PSTUN(ctx context.Context, servers []string) {
+// previous addresses: the mapping may well outlive a STUN server outage. After
+// remote legs changed, the result replaces them even when empty, since the
+// old mappings may belong to a leg that is gone.
+func (device *Device) refreshP2PSTUN(ctx context.Context, servers []string, legsChanged bool) {
 	candidates := device.superSTUN.Discover(ctx, servers, p2pSTUNRequestTimeout)
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && !legsChanged {
 		return
 	}
 	addresses := make([]string, 0, len(candidates))

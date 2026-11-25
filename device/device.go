@@ -176,6 +176,16 @@ type Device struct {
 	// pin local sources.
 	remoteLegs   conn.RemoteLegLister
 	localPinning bool
+	// remoteLegEvents queues leg changes from the bind for
+	// routineRemoteLegEvents.
+	remoteLegEvents struct {
+		sync.Mutex
+		queue  []conn.LegEvent
+		signal chan struct{}
+	}
+	// p2pSTUNRefresh asks RoutineP2PSTUN for a pass now, after remote legs
+	// changed.
+	p2pSTUNRefresh chan struct{}
 }
 
 type IdAndTime struct {
@@ -420,7 +430,6 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 	device.Version = version
 	device.JWTSecret = mtypes.ByteSlice2Byte32(mtypes.RandomBytes(32, []byte(fmt.Sprintf("%v", time.Now()))))
 	device.enabledAf = bind.EnabledAf()
-	device.attachRemoteLegs(bind)
 
 	device.state_hashes.NhTable.Store("")
 	device.state_hashes.Peer.Store("")
@@ -442,6 +451,7 @@ func NewDeviceWithInitialBind(tapDevice tap.Device, id mtypes.Vertex, bind conn.
 	device.Chan_SendRegisterStart = make(chan struct{}, 1<<5)
 	device.Chan_HttpPostStart = make(chan struct{}, 1<<5)
 	device.LogLevel = econfig.LogLevel
+	device.attachRemoteLegs(bind)
 	go device.RoutineSendPacket()
 	go func() {
 		<-device.Chan_Device_Initialized
