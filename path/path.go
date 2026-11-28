@@ -541,6 +541,18 @@ func (g *IG) GetEdges(isOld bool, withAC bool) (edges map[mtypes.Vertex]map[mtyp
 	return
 }
 
+// NextHops returns a copy of id's row of the next-hop table: every reachable
+// destination mapped to the neighbour to hand it to.
+func (g *IG) NextHops(id mtypes.Vertex) map[mtypes.Vertex]mtypes.Vertex {
+	g.routelock.RLock()
+	defer g.routelock.RUnlock()
+	hops := make(map[mtypes.Vertex]mtypes.Vertex, len(g.nhTable[id]))
+	for dst, next := range g.nhTable[id] {
+		hops[dst] = next
+	}
+	return hops
+}
+
 func (g *IG) GetBoardcastList(id mtypes.Vertex) (tosend map[mtypes.Vertex]bool) {
 	g.routelock.RLock()
 	defer g.routelock.RUnlock()
