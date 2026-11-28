@@ -144,6 +144,10 @@ func (device *Device) BoardcastPacket(skip_list map[mtypes.Vertex]bool, usage pa
 		}
 		return
 	}
+	if device.EdgeConfig.DynamicRoute.P2P.UseP2P {
+		device.replicateBroadcast(skip_list, usage, ttl, packet, offset)
+		return
+	}
 	send_list := device.graph.GetBoardcastList(device.ID)
 	for node_id := range skip_list {
 		send_list[node_id] = false
@@ -161,6 +165,47 @@ func (device *Device) BoardcastPacket(skip_list map[mtypes.Vertex]bool, usage pa
 	device.peers.RUnlock()
 	for _, peer_out := range targets {
 		device.SendPacket(peer_out, usage, ttl, packet, offset)
+	}
+}
+
+// replicateBroadcast sends one unicast copy of a broadcast frame to every
+// destination this node has a route to, except those in skip_list. Each copy
+// carries that destination's ID and is forwarded hop by hop like any unicast
+// frame.
+//
+// P2P edges compute their next-hop tables independently, and only when a
+// weight changes bucket, so the tables of two edges can disagree for as long
+// as the latencies stay put. The broadcast tree (TransitBoardcastPacket) only
+// works when every relay's table matches the origin's: a relay that the origin
+// routes through, but whose own table does not put it on the origin's path,
+// drops the frame, and the destination never receives the origin's ARP, ND or
+// OSPF hellos while unicast to it still works. Unicast replication needs no
+// agreement between tables, at the cost of one copy per destination.
+//
+// Like SendPacket, it copies packet before returning.
+func (device *Device) replicateBroadcast(skip_list map[mtypes.Vertex]bool, usage path.Usage, ttl uint8, packet []byte, offset int) {
+	if len(packet) < path.EgHeaderLen {
+		return
+	}
+	routes := device.graph.NextHops(device.ID)
+	buf := make([]byte, len(packet))
+	for dst, next := range routes {
+		if dst == device.ID || dst >= mtypes.NodeID_Special || skip_list[dst] {
+			continue
+		}
+		device.peers.RLock()
+		peer_out := device.peers.IDMap[next]
+		device.peers.RUnlock()
+		if peer_out == nil {
+			continue
+		}
+		copy(buf, packet)
+		header, err := path.NewEgHeader(buf[:path.EgHeaderLen], device.EdgeConfig.Interface.MTU)
+		if err != nil {
+			return
+		}
+		header.SetDst(dst)
+		device.SendPacket(peer_out, usage, ttl, buf, offset)
 	}
 }
 
